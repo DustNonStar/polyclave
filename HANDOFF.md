@@ -619,3 +619,24 @@ Not done: No outstanding implementation items. Merge review is separate.
 ## Scheduled run idle fix review (Claude): passed, merged
 
 Branch `dot/idle-waits-for-scheduled-runs` (`d50e7a9`, `93cbf9a`) fast-forwarded into `main`. `Runs.start()` now registers its whole operation in `pending` synchronously, before worktree preparation, and the retry path tracks its settle loop the same way; `idle()` waits on `pending`. The HTTP handler calls `runs.start()` before it responds, so `idle()` right after a POST now waits for that run. The new test `idle waits for a newly posted run before worktree preparation finishes` fails against the old `src/runs.ts` (status `pending` at idle) and passes with the fix, so it pins the race. CI green on Node 22 and 24 for both commits; locally `tests/http.spec.ts` + `tests/runs.spec.ts` passed 5 runs in a row (35/35) and `pnpm check` gave 133 passed, 1 skipped; privacy scan clean. The three existing tests were not changed.
+
+## Stabilize the `killGroup` supervisor-exit test
+
+Commits: `c193636` test: wait for supervisor exit after killing its group.
+
+Tests: The authorized change is limited to `kills the whole group on killGroup` in `tests/proc.spec.ts`. The two earlier macOS failures both reached the final assertion: the agent PID was gone, but the supervisor PID was still visible. A Linux diagnostic probe with a group listing limited to live processes observed the same pattern once in 25 attempts: the supervisor was already a zombie at `killGroup()` return, and its PID was gone after Node's `exit` event. The historical macOS logs did not capture process state. The test now subscribes before sending signals and keeps both assertions: agent PID absent immediately after `killGroup()`, supervisor PID absent after its own exit event. There is no fixed sleep or production change. The updated test passed 20 consecutive targeted runs with the Linux probe. `pnpm check` on `c193636` (Actions run 45782513661) passed on macOS Node 22 and 24:
+
+```
+ Test Files  11 passed | 1 skipped (12)
+      Tests  133 passed | 1 skipped (134)
+```
+
+Hand check: none (test-only change).
+
+Issues: No `PLAN-ISSUES.md` changes.
+
+Cleanup: The diagnostic probe awaited all supervisor exit events. No manually started host, browser, or listening port.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: No production process-management changes. Merge review is separate.
