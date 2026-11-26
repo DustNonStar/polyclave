@@ -27,7 +27,9 @@ const state = {
   confirmMoved: null,
   lockTurns: new Map(),
   lockTurnsByReason: new Map(),
+  lockCheckOpen: new Map(),
   lockRemoved: null,
+  confirmArmTimer: null,
   freshDoneIds: new Set(),
   arrivingLocks: new Set(),
   openWorkedTurns: new Set(),
@@ -692,6 +694,13 @@ function lockTurnOf(session) {
   return namedTurn ?? turns[turns.length - 1] ?? null
 }
 
+function shortPathLast2(path) {
+  const s = String(path ?? '')
+  const parts = s.split('/').filter(Boolean)
+  if (parts.length <= 2) return s
+  return `\u2026/${parts.slice(-2).join('/')}`
+}
+
 function lockEvidenceHtml(session) {
   const turn = lockTurnOf(session)
   if (!turn) return ''
@@ -702,14 +711,24 @@ function lockEvidenceHtml(session) {
     ? `process group ${turn.agentPgid}, ${fmtAgentStart(turn.agentStartedAt)}`
     : 'never started'
   const endedText = `ended ${fmtTime(turn.endedAt)}${turn.endReason ? ` (${endReasonLabel(turn.endReason)})` : ''}`
-  const psCode = hasPgid ? `<code class="inl">ps -g ${esc(String(turn.agentPgid))}</code> shows nothing` : ''
+  const isPhone = typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches
+  const checkOpen = state.lockCheckOpen.has(session.id)
+    ? state.lockCheckOpen.get(session.id)
+    : !isPhone
+  const psRow = hasPgid
+    ? `<div class="lock-cmd-row"><code class="inl lock-cmd" title="${esc(`ps -g ${turn.agentPgid}`)}">ps -g ${esc(String(turn.agentPgid))}</code><span>shows nothing</span></div>`
+    : ''
+  const gitRow = `<div class="lock-cmd-row"><code class="inl lock-cmd" title="${esc(`git -C ${path} status`)}">git -C ${esc(path)} status</code><span>shows no change you did not expect</span></div>`
   return `
       <dl class="lock-facts">
         <dt>Agent process</dt><dd>${esc(agentText)}</dd>
         <dt>Turn</dt><dd>Turn ${esc(String(turn.id))}, ${esc(endedText)}</dd>
-        <dt>Working directory</dt><dd class="mono one-line" title="${esc(path)}">${esc(path)}</dd>
+        <dt>Working directory</dt><dd class="mono one-line" title="${esc(path)}">${esc(shortPathLast2(path))}</dd>
       </dl>
-      <p class="lock-check">To check on the Mac: ${psCode ? `${psCode}, and ` : ''}<code class="inl">git -C ${esc(path)} status</code> shows no change you did not expect.</p>
+      <details class="lock-check-details" data-lock-check="${esc(session.id)}"${checkOpen ? ' open' : ''}>
+        <summary><span>How to check on the Mac</span><svg class="i chev"><use href="#i-chev"/></svg></summary>
+        <div class="lock-cmds">${psRow}${gitRow}</div>
+      </details>
   `
 }
 
@@ -744,6 +763,7 @@ function lockCardHtml(session) {
       <div class="top">${glyph('lock')}${esc(session.name)} locked<time>${esc(fmtTime(session.frozenAt))}</time></div>
       <p>${esc(session.frozenReason || 'Session is frozen')}. Nothing runs in ${esc(session.name)} until you remove the lock.</p>
       ${lockEvidenceHtml(session)}
+      <p class="lock-hint">Can't check from here? Keep it locked; nothing runs until you remove the lock.</p>
       <div><button class="btn warn open-btn" type="button" data-open-unlock="${esc(session.id)}">Remove lock…</button></div>
       <form class="unlock" data-unlock-form="${esc(session.id)}">
         <textarea id="unlock-note-${esc(session.id)}" placeholder="Why it is safe now, e.g. no git or test processes left" aria-label="Why it is safe now">${esc(note)}</textarea>
@@ -759,6 +779,11 @@ function lockCardHtml(session) {
 }
 
 function bindLockHandlers(container) {
+  for (const det of container.querySelectorAll('details[data-lock-check]')) {
+    det.addEventListener('toggle', () => {
+      state.lockCheckOpen.set(det.dataset.lockCheck, det.open)
+    })
+  }
   for (const btn of container.querySelectorAll('[data-open-unlock]')) {
     btn.addEventListener('click', () => {
       const sid = btn.dataset.openUnlock
@@ -1634,6 +1659,9 @@ refreshAll().then(() => {
     renderPhoneTabs()
     renderPhoneHead()
   }
+  window.matchMedia('(max-width: 860px)').addEventListener('change', () => {
+    renderSide()
+  })
   connectStream()
   setInterval(renderStatusBar, 10000)
 })

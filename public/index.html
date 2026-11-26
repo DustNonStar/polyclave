@@ -232,7 +232,16 @@ details.worked[open] summary svg.chev { transform: rotate(90deg); }
 .lock-facts dt { color: var(--text-3); }
 .lock-facts dd { margin: 0; color: var(--text-2); min-width: 0; }
 .lock-facts dd.mono { font-size: 11.5px; color: var(--silver-2); }
-.lock-check { margin: 0; color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+.lock-check-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.lock-check-details summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12.5px; border-radius: 8px; padding: 2px 4px; margin-left: -4px; }
+.lock-check-details summary:hover { color: var(--silver); background: var(--raise); }
+.lock-check-details summary::-webkit-details-marker { display: none; }
+.lock-check-details summary svg.chev { transition: transform .25s var(--ease); }
+.lock-check-details[open] summary svg.chev { transform: rotate(90deg); }
+.lock-cmds { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.lock-cmd-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; color: var(--text-3); font-size: 12px; }
+.lock-cmd { display: block; white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.lock-hint { margin: 0; color: var(--text-3); font-size: 12.5px; }
 .unlock-what { display: grid; gap: 2px; color: var(--text-2); font-size: 12.5px; }
 .unlock-what p { margin: 0; }
 .lock-removed { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); color: var(--text-2); font-size: 13.5px; }
