@@ -572,3 +572,19 @@ The reviewer accepted Gemini's page review 3 (`189ebd6`..`c6642db`, CI green) an
 ## History rewrite (2026-11-26)
 
 User decision: the repository has no AI contributors. The history of `main` was rewritten once to drop `Co-authored-by:` lines from commit messages (code unchanged) and force-pushed with a lease. Hashes of commits on `main` in this file were updated to the new ones; hashes from before the first push were never on GitHub. `scripts/privacy-scan.sh` now rejects AI attribution lines, and commit names are no longer restricted to the account login (the profile name is fine).
+
+## No-SHA HTTP test cleanup
+
+Commits: `ae31cd5` test: wait for the no-SHA HTTP run to settle.
+
+Tests: TypeScript check passed. The job authorized changing only `run detail commit is null when there is no sha` in `tests/http.spec.ts`. It now polls its own run's detail endpoint to a terminal status and keeps all existing assertions. The named test passed on macOS Node 22 and 24 in Actions run 45774170700, attempt 1. Both full-suite jobs reported `Tests  1 failed | 131 passed | 1 skipped (133)` because the separate request-ID replay test failed during temporary fixture cleanup with ENOTEMPTY. That test was not changed.
+
+Hand check: none (test-only change).
+
+Issues: No PLAN-ISSUES.md change. The separate request-ID replay cleanup failure is outside this job's scope.
+
+Cleanup: No manually started host, browser, or listening port; the test runner manages its fixtures.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: No changes outside the authorized test and this report. See the branch check for the job's final CI status.
