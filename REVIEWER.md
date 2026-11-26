@@ -20,7 +20,7 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 ## 2. Where things stand (2026-11-26)
 
-- **Phase 1 is built and accepted.** Gate A and Gate B passed. The real-Codex test runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node.js 24.x only; Node.js 22 is no longer supported. The host is still macOS-only. See the latest Actions run for current CI status.
+- **Phase 1 is built and accepted.** Gate A and Gate B passed. The real-Codex test runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node.js 26.x only; older Node.js versions are no longer supported. The host is still macOS-only. See the latest Actions run for current CI status.
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
@@ -63,7 +63,7 @@ Keep the message self-contained: the implementer sees only the message and the r
 
    Where a claim does not match, write that in the verdict.
 6. **Privacy:** the report ends with the privacy scan's last line. Skim the diff for local paths, emails and keys anyway, because the repository is public.
-7. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Node.js 24.x, you may run `pnpm check` or a scratch host there (section 5). Never ask the user to run anything for you.
+7. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Node.js 26.x, you may run `pnpm check` or a scratch host there (section 5). Never ask the user to run anything for you.
 
 ## 5. Recipes (for implementers, or for your own sandbox if you have one)
 

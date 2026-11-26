@@ -8,7 +8,7 @@
 
 **Architecture:** The repository root is one standalone package. One Node process holds a SQLite store, a host MCP server (streamable HTTP, JSON responses, one tool `submit_result`), a turn runner that starts one `codex exec` / `codex exec resume` process per turn under a supervisor that waits for the host's go-ahead, a run manager that gives every task its own worktree, branch and fixed base commit, a recovery pass that runs before anything is dispatched, and an HTTP+SSE API serving one static page. The probe scripts in `docs/superpowers/research/probes/` are references for Codex flags, event shapes and the MCP handshake.
 
-> **Superseded runtime (user decision 2026-11-26):** Polyclave now supports Node.js 24.x only (`engines.node` `^24.0.0`, `@types/node` 24.x, CI on macOS Node 24). Where this plan says Node 22, read Node 24.
+> **Superseded runtime (user decision 2026-11-26):** Polyclave now supports Node.js 26.x only (`engines.node` `^26.0.0`, `@types/node` 26.x, CI on macOS Node.js 26). Where this historical plan names an older runtime, use Node.js 26.x.
 
 **Tech Stack:** TypeScript run directly by Node type stripping (Node `^22.19.0 || >=24.0.0`, no build step), `node:sqlite`, `node:http`, `node:net`; zod 4.4.3; dev: vitest 4.1.8, typescript 6.0.3 (typecheck only), @types/node 22.20.0; git CLI; Codex CLI 0.172.0.
 
