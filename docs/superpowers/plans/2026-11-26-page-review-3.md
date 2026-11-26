@@ -4,11 +4,17 @@
 
 **Applies on top of:** `AGENTS.md`, `DESIGN.md`, the phase 1 plan and the two earlier page work lists. Keep the look.
 
-**Reviewer spike:** adding a `commit` field to `GET /api/runs/:id` was tried in a separate worktree; `pnpm check` stayed at 130 passed, 1 skipped. No existing test needs a change, and none may be changed. Only the two new tests named in item 1 are added.
+**Reviewer spike:** adding a `commit` field to `GET /api/runs/:id` was tried in a separate worktree; `pnpm check` stayed at 130 passed, 1 skipped. No existing test needs a change for items 1–7, and none may be changed except the one wait item 0 allows. Only the two new tests named in item 1 are added.
 
-**Order:** items 1 → 7, one commit each with the message given. `pnpm check` after every commit.
+**Order:** items 0 → 7, one commit each with the message given. `pnpm check` after every commit.
 
 ---
+
+## 0. CI: one milestone test races on a slower machine — `test: wait for the thread id before the token snapshot`
+
+The first CI run (macOS, Node 22) failed `tests/milestone.spec.ts` › `second host refused while the first lives; old token refused after restart` at line ~793: the snapshot of `runs` was taken after the fake codex reached its barrier but before the host had stored the run's `agent_session_id` (expected `null`, received `"fake-thread-…"`, and a later `updated_at`). The host is right; the test reads too early.
+
+Allowed change, and the only change to an existing test in this job: in that test, between `await bHold.waitReached()` and the snapshot, wait (with the existing `waitFor`-style polling of the database, not a fixed sleep) until the run row's `agent_session_id` is not null. Nothing else in the test changes. Check: `pnpm test tests/milestone.spec.ts` passes five times in a row locally, and CI is green after the push.
 
 ## 1. Host: run detail carries a commit summary — `feat: run detail includes a commit summary`
 

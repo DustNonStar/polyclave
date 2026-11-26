@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest]  # phase 1 host is macOS-only (sysctl kern.boottime, ps lstart)
         node: ['22', '24']
     runs-on: ${{ matrix.os }}
     steps:

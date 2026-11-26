@@ -20,7 +20,7 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 ## 2. Where things stand (2026-11-26)
 
-- **Phase 1 is built and accepted.** Gate A and Gate B passed. On Node 22 and 24, `pnpm check` gives 130 passed and 1 skipped. The skipped test is the real-Codex one, which runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS and Ubuntu with Node 22 and 24 on every push.
+- **Phase 1 is built and accepted.** Gate A and Gate B passed. On Node 22 and 24, `pnpm check` gives 130 passed and 1 skipped. The skipped test is the real-Codex one, which runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node 22 and 24 on every push (the phase 1 host is macOS-only, so there is no Linux job). The first run was red on Node 22 because of one racy milestone test; round 3 item 0 fixes it, so expect CI to be red until that job lands.
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
