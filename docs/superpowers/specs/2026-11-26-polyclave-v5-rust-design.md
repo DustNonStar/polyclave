@@ -28,6 +28,7 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
 | **Agent Orchestrator (`ao`)** | 1. **后台守护进程与薄前端彻底分离**：`polyclaved` 独立持有状态、数据库与子进程树，关闭窗口任务不断。<br>2. **SQLite `change_log` + SSE `Last-Event-ID`**：每次事务同步记录增量序号，桌面休眠唤醒或手机经 Tailscale 重连时无损补齐状态。<br>3. **后台 `SCM Observer`**：轮询 GitHub PR/CI 状态与评审评论。<br>4. **世代分支隔离（Attempt 分支）**：每次运行尝试使用独立分支 `agent/<runId>/a<n>`。 | 1. 拒绝 AO “CI 失败直接自动打回 Worker”的黑盒回路，改为把 PR/CI 事件推回**总主会话中枢**，由中枢带全局上下文决定重派、换模型还是询问用户。<br>2. 用 **Attempt 世代分支 + Windows Job Object / macOS 匿名管道守卫**取代 v4 “取消即冻结会话”的苛刻机制。<br>3. 零云控制面（无 `contracts/cloud`）、零遥测。 |
 | **Orca (`stablyai/orca`)** | 1. **长驻协议优先**：Worker 侧优先走原生流式协议（Claude `stream-json`、Codex `app-server` 备选与 `exec`、AGY/DSH `acp`）。<br>2. **扫码一次性票据换长期凭证**的设备配对机制与宿主端撤销。<br>3. **基于启动时间戳确认进程身份**，拒绝纯 PID 复用误判。 | 绝不采信 Worker 自报完成（必须过 R1 外部核证）；绝不镜像或修改用户的全局 `~/.codex` / `~/.claude` 配置；推送绝不经第三方网关明文转发。 |
 | **T3 Code (`t3code`)** | 1. **宏流程步骤级 Checkpoint 重放**：已成功步骤落盘输入哈希与输出，宿主重启不重放外部副作用。<br>2. **Reviewer 强制使用一次性 Worktree**（已实测证实 `plan` 模式锁不住 Codex/AGY）。<br>3. **结构化输出最多 2 次自动纠偏**，超限转人工或失败分支。 | 不引入庞大的通用脚本引擎，只保留 **`council`（多模型盲评方案）** 与 **`pr_gate`（范围检查与 SHA 绑定合并门禁）** 两个宿主内置强类型原子宏流程，其余灵活编排归总主会话中枢。 |
+| **`dsh-superagent-prototype` (`deepseek-ai`)** | 1. **主动值守管家心智（Proactive Personal Agent Bot）**：以“最小化人类注意力消耗（Attention Budget）”为目标，从被动一问一答升级为事件驱动的主动项目管家。<br>2. **准入策略矩阵（`Admission Policy`）**：宿主代码层严格区分本人客户端显式指令（`explicit`）与外部仓库/系统事件推断候选（`inferred`：`off \| observe \| auto`），并对外部机器人账号消息做防自激隔离。<br>3. **结构化 `Ticket` 与 `Mandate`（任务单与授权契约）**：将获准需求固化为带明确范围边界（Mandate）的工单，统领其下多轮跨厂商子智能体 `Run`，防止多轮对话跑偏（Conversational Drift）。 | 1. **摆脱单仓库与 DSH Bundle 绑定**：升级为跨多项目仓库、可调度多厂商 Worker（Codex / Claude / AGY / DSH）的独立全栈 Rust 中枢守护进程。<br>2. **100% 私有通信边界（拒绝第三方商业 IM 云）**：不接入飞书、Telegram 等第三方 IM 平台，客户端统一使用自研 Tauri v2 + Leptos（经 Tailscale 端到端加密直连），私有通知仅允许本机或运行在 Tailscale 私有网内的开源自托管渠道（如自建 `ntfy` / Matrix），确保连每一句对话文字也绝不经过第三方云端（2026-11-26 用户决定）。 |
 
 ---
 
@@ -44,6 +45,7 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
      - **原生 API 接入（如通过 DeepSeek API 调用 `deepseek-v4.1`）**：由 `polyclaved` 直接发起流式 HTTPS API 请求，保存思维链与工具调用记录。
      - **借用 `codex` 或 `claude` CLI 作为主控模型提供方**：允许利用本地已登录的 Codex 或 Claude Code CLI 执行主控推理，但**绝不让外部 Agent 接管主控会话的状态或记忆**；宿主每次从本地数据库组装规范上下文以只读无改写权限调用 CLI，并在每轮结束后**把 CLI 的回复全文、推理摘要与调度意图完整复制归档回 `polyclave.sqlite`**。用户可在任意轮次把主控模型从 DeepSeek API 切到 Claude CLI 再切回 Codex，项目历史永远完整留存。
 5. **中枢集中调度（信息流开放、控制流收口）**（2026-11-26 用户决定）：平时子智能体完成后，宿主核证结果并将交付摘要自动回传给主控会话，由主控会话统一决定下一步派谁（前序产物路径、SHA 与摘要通过 `context_refs` 传给后续智能体）；除 `council` 盲评阶段外不强制隔绝信息，但子智能体绝不相互私自派活。日常调度走主控会话单步中枢流转，复杂固定环节可调用内置的 `council` 与 `pr_gate` 原子宏流程。
+6. **主控升级为“主动值守的个人管家 Bot（Personal Superagent）” + 纯私有 Tailscale 触达**（2026-11-26 用户决定）：主控不仅是被动聊天框，而是具备统一事件收件箱（Event Triage Loop）、准入策略（`Admission Policy`）与 `Ticket / Mandate` 管理能力的主动大脑中枢；所有交互与通知严格限定在自研 Tauri 客户端与 Tailscale 私有网自托管开源通知渠道（如自建 `ntfy` / Matrix）内，不依赖任何第三方聊天软件。
 
 ---
 
@@ -154,9 +156,33 @@ CREATE TABLE turns (
 CREATE UNIQUE INDEX idx_turns_one_running_per_session
   ON turns(session_id) WHERE status = 'running';
 
--- 4. 任务运行表：由主控会话派发或用户创建的独立编码任务
+-- 4. 准入策略与工单契约表：管家 Bot 治理外部触发与任务范围边界
+CREATE TABLE admission_policies (
+  repo_cwd        TEXT PRIMARY KEY,
+  inferred_mode   TEXT NOT NULL DEFAULT 'observe' CHECK (inferred_mode IN ('off', 'observe', 'auto')),
+  bot_actors_json TEXT NOT NULL DEFAULT '[]',    -- 外部机器人账号列表，严格禁止触发执行或终止工单
+  updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE tickets (
+  id              TEXT PRIMARY KEY,              -- t + 8 hex
+  session_id      TEXT NOT NULL REFERENCES sessions(id),
+  repo_cwd        TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  mandate_json    TEXT NOT NULL,                 -- { goal, allowed_paths, forbidden_actions, acceptance_criteria }
+  source_kind     TEXT NOT NULL CHECK (source_kind IN ('explicit_user', 'inferred_event')),
+  basis_msg_id    INTEGER REFERENCES messages(id),
+  status          TEXT NOT NULL CHECK (status IN ('proposed', 'active', 'blocked_on_user', 'done', 'cancelled')),
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+-- 说明：1 个 Ticket 承载用户批准的 Mandate，统领该需求从分诊到验收的完整生命周期；
+-- 其下可挂接多个不同厂商的 Run（如调研 -> 编码 -> 评审）。对于简单单次任务，dispatch_task 可自动创建并绑定单任务 Ticket。
+
+-- 5. 任务运行表：由主控会话派发或用户创建的独立编码任务
 CREATE TABLE runs (
   id               TEXT PRIMARY KEY,             -- r + 8 hex
+  ticket_id        TEXT REFERENCES tickets(id),  -- 归属工单（绑定 Mandate 范围边界）
   session_id       TEXT NOT NULL REFERENCES sessions(id), -- 所属会话（中枢派发的挂在 hub 会话下）
   basis_msg_id     INTEGER REFERENCES messages(id),       -- 强绑定授权该任务的用户消息
   request_id       TEXT NOT NULL,
@@ -182,7 +208,7 @@ CREATE UNIQUE INDEX idx_runs_one_active_per_session
   ON runs(session_id) WHERE status IN ('pending', 'running') AND basis_msg_id IS NULL;
 -- 注：主控会话(hub)允许同时派发并跟踪多个不同 repo/分支的并发子任务，受全局/单仓库并发配额限制；普通 chat 会话维持 R2 单活任务约束。
 
--- 5. 尝试世代表：每次开始或重试生成独立分支 agent/<runId>/a<attempt_no>
+-- 6. 尝试世代表：每次开始或重试生成独立分支 agent/<runId>/a<attempt_no>
 CREATE TABLE attempts (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id           TEXT NOT NULL REFERENCES runs(id),
@@ -197,7 +223,7 @@ CREATE TABLE attempts (
   UNIQUE(run_id, attempt_no)
 );
 
--- 6. 交付签收表：每个 run 至多只能有一条 accepted = 1 的记录
+-- 7. 交付签收表：每个 run 至多只能有一条 accepted = 1 的记录
 CREATE TABLE results (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id           TEXT NOT NULL REFERENCES runs(id),
@@ -210,7 +236,7 @@ CREATE TABLE results (
 );
 CREATE UNIQUE INDEX idx_results_one_accepted ON results(run_id) WHERE accepted = 1;
 
--- 7. 原始事件流与 SSE 增量日志表
+-- 8. 原始事件流与 SSE 增量日志表
 CREATE TABLE events (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   turn_id          INTEGER NOT NULL REFERENCES turns(id),
@@ -221,7 +247,7 @@ CREATE TABLE events (
 
 CREATE TABLE change_log (
   seq              INTEGER PRIMARY KEY AUTOINCREMENT,
-  topic            TEXT NOT NULL,                -- 'message' | 'turn' | 'run' | 'attempt' | 'hub_receipt'
+  topic            TEXT NOT NULL,                -- 'message' | 'turn' | 'ticket' | 'run' | 'attempt' | 'hub_receipt' | 'inbox'
   entity_id        TEXT NOT NULL,
   payload_json     TEXT NOT NULL,
   created_at       TEXT NOT NULL
@@ -282,22 +308,35 @@ pub trait HubModelProvider: Send + Sync {
 2. **模式二：`CliHubProvider`（借用 `codex` 或 `claude` CLI，会话主权绝不外流）**：
    - 当用户希望使用已订阅的 `codex` 或 `claude` 作为主控模型的推理引擎时启用。
    - **严格防脱管机制（“借脑不交权”）**：
-     - 每次发起主控轮次时，宿主**不直接把主控权力交给外部 CLI 的自由会话目录**，而是使用独立空临时只读目录作为沙箱 cwd（Codex `-s read-only`；Claude `--permission-mode plan` 并禁用写文件与 Bash 工具），只注入主控申请类的只读/派活 MCP。
-     - **上下文由宿主从 `polyclave.sqlite` 现拼注入**：包含系统角色提示、最新 `rolling_summary`、最近 N 轮完整对话（含先前 API 或其他厂商轮次的记录）、当前在途/刚完成的 `runs` 状态卡片以及用户最新消息。
+     - 每次发起主控轮次时，宿主**不直接把主控权力交给外部 CLI 的自由会话目录**，而是使用独立空临时只读目录作为沙箱 cwd，只注入主控申请类的只读/派活 MCP。
+     - **借用 `claude` CLI 精确参数**：`claude -p --verbose --output-format stream-json --include-partial-messages --strict-mcp-config --mcp-config <0600_json_path> --setting-sources "" --tools "" --allowedTools mcp__host__... --max-turns <n>`，通过环境变量 `CLAUDE_CONFIG_DIR` 指向私有隔离目录；`--tools ""` 彻底剥离写文件与 Bash 等内置工具，流式解析 `system/init` → `stream_event` → `result` 帧。
+     - **上下文由宿主从 `polyclave.sqlite` 现拼注入**：包含系统角色提示、最新 `rolling_summary`、最近 N 轮完整对话（含先前 API 或其他厂商轮次的记录）、活跃 `Ticket` 与 `runs` 状态卡片以及用户最新消息。
      - **回复强行复制回本项目**：外部 CLI 流式输出完成后，宿主解析其最终回复文本、提取思考摘要与工具调用记录，**完整复制一条带 `provider_label = "codex_cli/..."` 或 `"claude_cli/..."` 的正式记录写入 `polyclave.sqlite` 的 `messages` 表**。外部 CLI 的本地临时文件随时可删，项目的开发进度、设计推导和对话历史 100% 永久留在 Polyclave 本地。
    - **长对话摘要压缩**：当 `messages` Token 估算接近模型窗口阈值时，宿主自动触发一次纯摘要调用更新 `sessions.rolling_summary`，确保切换模型或跨周续聊时上下文连贯。
+
+#### 主动管家事件分诊循环（Proactive Bot Triage & Attention Budget）
+
+主控会话以单线程事件分诊循环（Event Triage Loop）运行，统一消费三类入站事件：
+1. **本人显式消息（`explicit`）**：来自已配对 Tauri 桌面端或 Tailscale 私有客户端的 `source = 'user'` 消息，直接具备授权资格（可生成 `active` 状态 `Ticket` 并绑定为 `basis_msg_id`）。
+2. **子智能体终态与阻塞回执（`worker_receipt`）**：下层 `Run` 进入 `done` / `failed` / `needs_review` 或上报 `open_questions` 时写入主控收件箱。
+3. **仓库与系统推断事件（`inferred`）**：受 `admission_policies` 严格约束——`off` 直接丢弃；`observe`（默认）仅由主控 Bot 提炼成 `proposed` 状态的工单提案卡片等待用户点击确认，**绝不自主开工**；`auto` 仅放行白名单授权用户的明确触发标识，任何外部机器人账号（`bot_actors_json`）的发言一律不得触发或终止工单。
+
+**注意力预算（Attention Budget）汇报纪律**：下层 `Run` 在 `Mandate` 边界内正常推进或 2 次以内自动纠偏时，管家 Bot 仅静默更新 `Ticket` 进度条，不弹窗打扰；只有当整张 `Ticket` 验收完成、遇到 `direction` 级架构分叉、检测到超出 `allowed_paths` 的越界改动或进入 `needs_review` 时，才主动发出高信噪比决策卡片并触发私有通知。
 
 #### 子项目 1 工具集划分
 
 - **主控会话（`hub`）可用工具**：
-  - `dispatch_task({ basis_msg_id, vendor, model?, repo_cwd, base_branch, title, instructions, context_refs? })`：核实 `basis_msg_id` 为来自客户端的真实 `source = 'user'` 消息（主控不可凭空捏造授权），通过 R3 目标仓库预检（支持本机 bare remote 与普通 git 仓库双模预检：本地开发期保留 bare remote 严格校验，同时支持标准本地上游分支以配合真实开发仓库）后启动 Worker Run。
-  - `get_run_status({ run_id? })`：查询当前各并行/历史子任务状态与全区间改动摘要。
+  - `create_or_update_ticket({ basis_msg_id, repo_cwd, title, goal, allowed_paths, forbidden_actions?, acceptance_criteria? })`：将用户授权固化为带范围边界的 `Ticket`（含 `Mandate`）。
+  - `dispatch_task({ basis_msg_id, ticket_id?, vendor, model?, repo_cwd, base_branch, title, instructions, context_refs? })`：核实 `basis_msg_id` 为来自客户端的真实 `source = 'user'` 消息（主控不可凭空捏造授权），校验仓库预检（支持本机 bare remote 与普通本地上游 git 仓库双模预检）后启动 Worker Run；未传 `ticket_id` 时自动创建并绑定单任务 Ticket。
+  - `get_run_status({ run_id?, ticket_id? })`：查询当前各并行/历史子任务状态与全区间改动摘要。
   - `consult({ vendor, model?, question, context_paths? })`：单层只读跨厂商咨询（禁止被咨询方再次 `consult` 或 `dispatch_task`，单轮最多 5 次）。
 - **下层编码 Worker（Codex / Claude）可用工具**：
-  - 仅挂载宿主 HTTP MCP Server 提供的 **`submit_result`**、**`report_progress`** 与只读单层 **`consult`**。**物理不提供 `dispatch_task`**，从协议层杜绝 Worker 私自派活。
+  - 仅挂载宿主 HTTP MCP Server 提供的 **`submit_result`**、**`report_progress`** 与只读单层 **`consult`**。**物理不提供 `dispatch_task` 与 `create_or_update_ticket`**，从协议层杜绝 Worker 私自派活。
+  - 宿主向外部 CLI 注入 HTTP MCP 的标准配置格式（权限 `0600`）：`{ "mcpServers": { "host": { "type": "http", "url": "http://127.0.0.1:<port>/mcp", "headers": { "Authorization": "Bearer <mcp_token>" } } } }`。
   - 适配方式（子项目 1 先接 2 家）：
     - **Codex**：先沿用实测极稳的每轮 `codex exec --json` / `resume` + `--ignore-user-config` + 私有 `CODEX_HOME`（仅链 `auth.json` 与 `skills`），预留 `codex app-server` 长驻连接配置开关。
-    - **Claude Code**：使用 `claude -p --input-format stream-json --output-format stream-json` + `--mcp-config <temp-file> --strict-mcp-config` + 私有配置视图（仅链登录态与 `~/.claude/skills`）。
+    - **Claude Code**：使用 `claude -p --verbose --input-format stream-json --output-format stream-json` + `--mcp-config <temp-file> --strict-mcp-config --setting-sources ""` + `CLAUDE_CONFIG_DIR` 隔离视图（仅链登录态与 `~/.claude/skills`）。
+    - **`--bare` 关键避坑规则（来自 `claude-code-probe` 调研验证）**：Claude Code CLI 的 `--bare` 参数会禁用订阅 OAuth 登录、强制要求 `ANTHROPIC_API_KEY`。因此当用户选择使用 Claude 订阅登录时，**严禁传递 `--bare`**（改用 `CLAUDE_CONFIG_DIR` + `--strict-mcp-config` + `--setting-sources ""` 完成配置隔离）；仅在显式配置 `ANTHROPIC_API_KEY` 计费模式下才启用 `--bare`。
 
 #### 自动回传总主会话（Closed-Loop Dispatch）
 
@@ -351,10 +390,10 @@ pub trait HubModelProvider: Send + Sync {
   - 接入 **Antigravity (`agy`)** 与 **DeepSeek Harness (`dsh`)** 适配器。
   - 实现 `council` 原子宏流程：主控发起方案讨论 → 多厂商并行独立输出结构化 `Proposal` → 代码剥离厂商标识呈递“方案甲/乙/丙” → `direction` 级交用户拍板、`detail` 级结合偏好决策。
   - 实现 `pr_gate` 与后台 `SCM Observer`：三层 `touched_paths` 范围契约校验；强制异构模型 Reviewer 在一次性 Worktree 中评审确切 `head_sha`；Bot 账号与 Reviewer 账号物理隔离、显式传 `commit_id` 批准并先落台账再开 auto-merge；PR/CI 失败或评论变更实时作为事件推回主控会话中枢。
-- **子项目 3：Tauri v2 移动双端（iOS / Android）与 Tailscale 安全配对**
+- **子项目 3：Tauri v2 移动双端（iOS / Android）与 Tailscale 私有通知配对**
   - 编译并打包 iOS 与 Android Tauri v2 客户端，适配真机 375px 触控交互与深色系统状态栏。
   - 实现扫码 10 分钟一次性票据换长期设备凭证、`tailscale serve` 身份头双重验证与宿主端设备吊销。
-  - 实现无明文内容的原生推送通知（APNs / FCM / 可选局域网 UnifiedPush `ntfy`），App 收到唤醒后经 Tailscale `Last-Event-ID` 增量拉取完整内容。
+  - 坚持纯私有触达边界（拒绝第三方 IM 云）：移动端访问走 Tailscale 端到端加密通道（原生 App + 响应式 Web 备选）；远端提醒默认走**运行在用户本机或 Tailscale 私有网内的开源自托管通知渠道**（如自托管 `ntfy` / UnifiedPush 或自托管 Matrix 服务），推送载荷不附带敏感明文正文，App 收到唤醒后经 Tailscale `Last-Event-ID` 增量拉取完整内容，确保零对话内容外泄。
 - **子项目 4：CUA 桌面互斥锁与本地运行台账进化循环**
   - 实现整机单把 CUA 互斥锁（检测键鼠空闲、用户桌面随时一秒收回）。
   - 基于本地 `polyclave.sqlite` 历史派活、返工次数、评审打回率与运行耗时，通过本地模型或 API 定期总结并生成版本化、可一键回滚的路由表与 Role Brief 优化建议（严格禁止触碰宿主门禁代码与用户全局 `skills`）。
