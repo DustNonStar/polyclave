@@ -615,3 +615,7 @@ Cleanup: No manually started host or browser; the test runner manages its fixtur
 Privacy scan: privacy-scan: clean (origin/main..HEAD)
 
 Not done: No outstanding implementation items. Merge review is separate.
+
+## Scheduled run idle fix review (Claude): passed, merged
+
+Branch `dot/idle-waits-for-scheduled-runs` (`d50e7a9`, `93cbf9a`) fast-forwarded into `main`. `Runs.start()` now registers its whole operation in `pending` synchronously, before worktree preparation, and the retry path tracks its settle loop the same way; `idle()` waits on `pending`. The HTTP handler calls `runs.start()` before it responds, so `idle()` right after a POST now waits for that run. The new test `idle waits for a newly posted run before worktree preparation finishes` fails against the old `src/runs.ts` (status `pending` at idle) and passes with the fix, so it pins the race. CI green on Node 22 and 24 for both commits; locally `tests/http.spec.ts` + `tests/runs.spec.ts` passed 5 runs in a row (35/35) and `pnpm check` gave 133 passed, 1 skipped; privacy scan clean. The three existing tests were not changed.
