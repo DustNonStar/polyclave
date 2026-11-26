@@ -708,3 +708,11 @@ Cleanup: No manually started host, browser, or listening port.
 Privacy scan: privacy-scan: clean (origin/main..HEAD)
 
 Not done: Prior handoff entries and Git history are unchanged. No branch was deleted or merged.
+
+## Node.js 26 standardization review (Claude): merged with fixes
+
+Branch `dot/node26-only` (`379ba0f`, `8372486`, `e904273`) fast-forwarded into `main`, then one fix commit on top, at the user's request:
+- Removed `pnpm-workspace.yaml`. It exempted `@types/node@26.6.11` from pnpm's `minimumReleaseAge` check, and that version was published less than a day before (one of five 26.6.x releases in two days). The release-age check is a supply-chain guard, so no exception. `@types/node` is now pinned to `26.6.6` (published 2026-10-28), which needs no exception. The lockfile was rebuilt from the previous `main` lockfile, so only `@types/node` and `undici-types` changed. The phase 1 plan's Tech Stack line now says 26.6.6. The Dot report above ("approved release-age exception", `26.6.11`, `undici-types` 8.9.0 as the reason) is superseded by this entry.
+- Restored `docs/superpowers/plans/2026-11-25-polyclave-phase1-gemini-review.md` and `docs/superpowers/plans/2026-11-26-page-review-3.md` to their earlier text. They are historical records (they kept the Node 22 observations made at the time). Only documents that set current rules (AGENTS.md, REVIEWER.md, README.md, the phase 1 plan) say Node 26.
+
+Verified on Node 26: `pnpm install --frozen-lockfile` passes with the default release-age policy, and `pnpm check` gives 133 passed, 1 skipped. Rule for later jobs: never add release-age or other policy exceptions without asking the user.

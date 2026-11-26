@@ -12,7 +12,7 @@
 
 ## 0. CI: one milestone test races on a slower machine — `test: wait for the thread id before the token snapshot`
 
-The first macOS CI run for this review failed `tests/milestone.spec.ts` › `second host refused while the first lives; old token refused after restart` at line ~793: the snapshot of `runs` was taken after the fake codex reached its barrier but before the host had stored the run's `agent_session_id` (expected `null`, received `"fake-thread-…"`, and a later `updated_at`). The host is right; the test reads too early.
+The first CI run (macOS, Node 22) failed `tests/milestone.spec.ts` › `second host refused while the first lives; old token refused after restart` at line ~793: the snapshot of `runs` was taken after the fake codex reached its barrier but before the host had stored the run's `agent_session_id` (expected `null`, received `"fake-thread-…"`, and a later `updated_at`). The host is right; the test reads too early.
 
 Allowed change, and the only change to an existing test in this job: in that test, between `await bHold.waitReached()` and the snapshot, wait (with the existing `waitFor`-style polling of the database, not a fixed sleep) until the run row's `agent_session_id` is not null. Nothing else in the test changes. Check: `pnpm test tests/milestone.spec.ts` passes five times in a row locally, and CI is green after the push.
 

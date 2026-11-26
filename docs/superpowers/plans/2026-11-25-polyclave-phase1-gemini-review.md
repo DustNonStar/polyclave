@@ -6,7 +6,7 @@
   - `docs/superpowers/specs/2026-11-25-agent-console-design-v4.md`
   - `docs/superpowers/plans/2026-11-25-polyclave-phase1-gate-a-revisions.md`
   - `docs/superpowers/research/2026-11-24-t3-probe-results.md`、`2026-11-25-orca-comparison.md` 及 `probes/*.mjs`
-- **实机核验环境**：macOS（Darwin / BSD `ps`、`pgrep`、`sysctl`）、Node.js（原生 TypeScript 类型擦除、`node:sqlite`、`node:child_process` 第 4 管道）、`typescript@6.0.3`、`@types/node`（当时锁定的版本）、`vitest@4.1.8`、`zod@4.4.3`、`codex-cli 0.172.0`、`git`
+- **实机核验环境**：macOS（Darwin / BSD `ps`、`pgrep`、`sysctl`）、Node.js（原生 TypeScript 类型擦除、`node:sqlite`、`node:child_process` 第 4 管道）、`typescript@6.0.3`、`@types/node@22.20.0`、`vitest@4.1.8`、`zod@4.4.3`、`codex-cli 0.172.0`、`git`
 
 ---
 
@@ -108,7 +108,7 @@
 #### [B6] Task 3 `Supervised.child` 类型通不过 `tsc --noEmit`，且 `supervisor.ts` 升级清理、fd 3 关闭与管道继承存在挂起/漏杀缺陷
 - **位置**：`docs/superpowers/plans/2026-11-25-polyclave-phase1.md` Task 1（第 19、152 行）、Task 3（第 228–230、239、251、259 行）。
 - **问题**：
-  1. **编译失败（实测复现）**：在计划锁定的 `typescript@6.0.3` + `@types/node`（当时锁定的版本） + `strict: true` 下，`spawn(..., { detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] })` 返回类型为 `ChildProcess`（其 `stdin` 为 `Writable | null`），赋给第 228 行的 `ChildProcessWithoutNullStreams`（要求 `stdin: Writable`）时运行 `tsc --noEmit` 直接报 `TS2322`。
+  1. **编译失败（实测复现）**：在计划锁定的 `typescript@6.0.3` + `@types/node@22.20.0` + `strict: true` 下，`spawn(..., { detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] })` 返回类型为 `ChildProcess`（其 `stdin` 为 `Writable | null`），赋给第 228 行的 `ChildProcessWithoutNullStreams`（要求 `stdin: Writable`）时运行 `tsc --noEmit` 直接报 `TS2322`。
   2. **2 秒 `SIGKILL` 升级与进程退出的矛盾**：第 239 行要求先挂 2 秒 `SIGKILL` 定时器再向进程组发 `SIGTERM`，同时规定“以 agent 的退出码退出”。若直接子进程（如外层 shell）收到 `SIGTERM` 在几毫秒内退出，而同组孙进程捕获并忽略了 `SIGTERM`：一旦 `supervisor.ts` 随直接子进程退出而立即结束，**Node 进程终止会导致 2 秒定时器一并消失**，孙进程永远不会被 `SIGKILL`（Task 3 第 259 行测试失败）；反之若无条件等满 2 秒再退，不仅每次正常取消都平白卡顿 2 秒，到点执行 `process.kill(-process.pid, 'SIGKILL')` 还会将组长 `supervisor.ts` 自己用不可捕获的 `SIGKILL` 杀死，丢失退出码。
   3. **fd 3 与 `stdout`/`stderr` 管道生命周期漏收口**：`supervisor.ts` 收到 `go\n` 后若未销毁 fd 3 Socket，只要父进程未关 fd 3，agent 退出后 `supervisor.ts` 仍不会退出；同时 `fake-codex` 的 `detachedWriter`（第 251 行）若未指定 `stdio: 'ignore'`，会继承 `stdout`/`stderr` 管道写端，导致宿主等待 `child.on('close')` 一直阻塞到测试屏障释放后。
 - **修改建议**：
@@ -247,8 +247,8 @@
    - *工作或消息丢失*：`acceptRun` 后、`prepareWorktree` 前崩溃导致后续 `retry` 目录缺失失败（**[B4]**）；`prepared` 轮次崩溃导致已出队的聊天消息静默丢失（**[M4]**）。
    - *冻结会话启动轮次*：数据库 `claimTurn` 已对已冻结会话做强拦截，但聊天取消和 `runner.kill()` 存在“理应冻结却未冻结”的漏口（**[B2]**），且 `sysctl kern.boottime` 随时区变化可能误解除冻结保护（**[M2]**）。
 3. **工单可执行性（评估项 4）**：Task 3 存在确定性 `tsc` 类型错误与监护进程定时器竞态（**[B6]**）；Task 4 存在 `observedSha` 缺失与聊天轮次调 MCP 拒收写库异常（**[B3]、[B5]**）；Task 6 漏调 `prepareWorktree`、漏处理优雅关机且 `correctionText` 破坏测试夹具（**[B4]、[B5]、[M1]**）；Task 8 第 1、5 行崩溃实验在“禁用 `sleep`”约束下缺少宿主侧屏障与并发通道（**[B7]**）。
-4. **Phase 1 实测环境的可行性（评估项 5）：macOS、当时的 Node.js 运行时及 Codex 0.172.0**：
-   - **已实测通过的部分**：技术栈锁定的包版本在 npm 均真实可用；Node 原生类型擦除可直接运行 `.ts`（注意本地相对导入必须写 `.ts` 后缀，因 `noEmit` 下 Node 运行时不会把 `.js` 重写回 `.ts`）；`node:sqlite` 唯一约束冲突实测确为 `code = 'ERR_SQLITE_ERROR'`、`errcode = 2067`（注意：手写 `BEGIN IMMEDIATE` 事务回滚须用 `try { db.exec('ROLLBACK') } catch {}` 防止 SQLite 自动回滚后二次报错掩盖 `2067`，测试解析子进程输出时只应读 `stdout`，不要混入 `stderr` 的诊断信息）；macOS 上 `stdio` 第 4 管道实测为双向 UNIX socketpair，可正常收发 `ready\n` / `go\n` 并在宿主 `SIGKILL` 时立即触发 EOF；`codex exec` 与 `codex exec resume` 均支持 `-c` 注入全部沙箱与 MCP 参数；裸库按原始 40 位 SHA `git fetch`（含非分支顶点的历史提交）实测可行。
+4. **macOS + Node 22.19+/24+ + Codex 0.172.0 可行性（评估项 5）**：
+   - **已实测通过的部分**：技术栈锁定的包版本在 npm 均真实可用；Node 原生类型擦除可直接运行 `.ts`（注意本地相对导入必须写 `.ts` 后缀，因 `noEmit` 下 Node 运行时不会把 `.js` 重写回 `.ts`）；`node:sqlite` 唯一约束冲突实测确为 `code = 'ERR_SQLITE_ERROR'`、`errcode = 2067`（注意：手写 `BEGIN IMMEDIATE` 事务回滚须用 `try { db.exec('ROLLBACK') } catch {}` 防止 SQLite 自动回滚后二次报错掩盖 `2067`，且 Node 22 下 `node:sqlite` 会向 `stderr` 打印 `ExperimentalWarning`，测试解析子进程输出时只应读 `stdout`）；macOS 上 `stdio` 第 4 管道实测为双向 UNIX socketpair，可正常收发 `ready\n` / `go\n` 并在宿主 `SIGKILL` 时立即触发 EOF；`codex exec` 与 `codex exec resume` 均支持 `-c` 注入全部沙箱与 MCP 参数；裸库按原始 40 位 SHA `git fetch`（含非分支顶点的历史提交）实测可行。
    - **实测暴露的平台阻塞与隐患**：Codex 0.172.0 Seatbelt 报错拦截含 `/var`、`/tmp` 符号链接分量的路径及相对 `.git`、Git trailer 要求前导空行（**[B8]**）；`ChildProcessWithoutNullStreams` 类型不兼容与 fd 3 / 管道生命周期（**[B6]**）；BSD `ps`、`pgrep`、`sysctl` 的时区、`PID_MAX = 99999` 与退出码细节（**[M2]**）；提示词前需加 `--`（**[M5]**）。
 5. **范围裁剪（评估项 6）**：见 **[L3]**（可移除 `tests/class-docs.spec.ts` 与 `TurnRunner.kill()` 的独立写库逻辑）。
 6. **公开仓库内容审查（评估项 7）**：见 **[M6]**（已处理：早期文档不再公开，历史已压缩）。

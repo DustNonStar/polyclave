@@ -1,3 +1,0 @@
-# Exact-version exception for the Node.js 26 migration. Other packages keep the default age check.
-minimumReleaseAgeExclude:
-  - '@types/node@26.6.11'

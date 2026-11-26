@@ -10,7 +10,7 @@
 
 > **Superseded runtime (user decision 2026-11-26):** Polyclave now supports Node.js 26.x only (`engines.node` `^26.0.0`, `@types/node` 26.x, CI on macOS Node.js 26).
 
-**Tech Stack:** TypeScript run directly by Node type stripping (Node.js `^26.0.0`, no build step), `node:sqlite`, `node:http`, `node:net`; zod 4.4.3; dev: vitest 4.1.8, typescript 6.0.3 (typecheck only), @types/node 26.6.11; git CLI; Codex CLI 0.172.0.
+**Tech Stack:** TypeScript run directly by Node type stripping (Node.js `^26.0.0`, no build step), `node:sqlite`, `node:http`, `node:net`; zod 4.4.3; dev: vitest 4.1.8, typescript 6.0.3 (typecheck only), @types/node 26.6.6; git CLI; Codex CLI 0.172.0.
 
 **Spec:** `docs/superpowers/specs/2026-11-25-agent-console-design-v4.md` — §6.4–§6.8, §7, §8.2–§8.3, §9.1–§9.2, §13.1, §17 stage 1, §17.1, §19, §20. Probe record: `docs/superpowers/research/2026-11-24-t3-probe-results.md` §8–§9. Orca note: `docs/superpowers/research/2026-11-25-orca-comparison.md`.
 
