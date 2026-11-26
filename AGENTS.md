@@ -5,7 +5,7 @@ Several agents build this project. The user relays messages between them by hand
 ## Roles
 
 - **User:** decides direction, relays messages between agents, and approves anything destructive.
-- **Reviewer:** plans the work, writes the jobs, reviews the work and accepts it, and decides detail-level questions. Claude held this role until 2026-11-26; now it is a remote agent that works **only from GitHub**. It reads the pushed branch, the CI results and the committed screenshots, and it never touches the local machine or writes to the repository. Its handover notes are in `REVIEWER.md`.
+- **Reviewer:** plans the work, writes the jobs, reviews the work and accepts it, and decides detail-level questions. Claude held this role until 2026-11-26; now it is a remote agent that works **only from GitHub**. It reads the `main` branch, the CI results and the committed screenshots, and it never touches the local machine or writes to the repository. Its handover notes are in `REVIEWER.md`.
 - **Implementer (DeepSeek, Gemini or any other agent):** works in the local checkout. It saves the reviewer's messages into the repository, writes the code and tests, runs the hand checks, and pushes. Implementers take turns: only one works in the checkout at a time.
 
 ## Files
@@ -39,7 +39,7 @@ Several agents build this project. The user relays messages between them by hand
 3. At the end, the implementer:
    - commits the report and the screenshots;
    - runs `scripts/privacy-scan.sh`;
-   - pushes `feat/phase1`;
+   - pushes `main`;
    - stops.
 4. The user tells the reviewer the job is done. The reviewer reads the branch on GitHub (the commits, the CI run, `HANDOFF.md`, `handcheck/<job>/`) and writes the next message.
 5. Questions in `PLAN-ISSUES.md` marked `detail` are answered by the reviewer. Questions marked `direction` go to the user.
@@ -66,7 +66,7 @@ Several agents build this project. The user relays messages between them by hand
    - The page makes no external requests.
    - Do not change `docs/`, `AGENTS.md`, `REVIEWER.md` or `NEXT.md`. The one exception is saving a reviewer message verbatim, as step 2 of the loop says.
 6. **Pushing.**
-   - Push only the branch `feat/phase1`.
+   - Push only the branch `main` (plain `git push origin main`; never `--force`).
    - Push only at the end of a job, or when you stop for a `PLAN-ISSUES.md` item.
    - Before pushing, run `scripts/privacy-scan.sh`. It must print `clean`. If it finds something, fix it with a new commit, never by rewriting history, and run it again.
    - Never push with `--force`. Never push other branches or tags. Never open or merge pull requests.
@@ -75,7 +75,7 @@ Several agents build this project. The user relays messages between them by hand
    - Write it in `PLAN-ISSUES.md` with the evidence: command, output, file:line.
    - Mark it `detail` or `direction`, and propose a fix.
    - Commit it, push, and stop. Do not work around it.
-8. **Unfinished work.** Finished work that you cannot commit to `feat/phase1` yet goes on a local branch `wip/<item>`. Commit it there and never push it. Say in `PLAN-ISSUES.md` that it exists.
+8. **Unfinished work.** Finished work that you cannot commit to `main` yet goes on a local branch `wip/<item>`. Commit it there and never push it. Say in `PLAN-ISSUES.md` that it exists.
 9. **Progress lines.** After each commit, append one progress line to `HANDOFF.md` under the job's heading: `- <sha> <message> — pnpm check: N passed`. If you run out of quota, the next agent continues from that line.
 10. **Cleanup.** Stop every host, fake codex and browser you start, and say so in the report.
 
@@ -110,4 +110,4 @@ Privacy scan: its last line.
 Not done: anything left, and why.
 ```
 
-Commit the report and `handcheck/<job>/` as `NEXT.md` says (usually `chore: <job>`). Then run the privacy scan, push `feat/phase1`, and stop.
+Commit the report and `handcheck/<job>/` as `NEXT.md` says (usually `chore: <job>`). Then run the privacy scan, push `main`, and stop.

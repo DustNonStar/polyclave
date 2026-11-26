@@ -511,4 +511,6 @@ Third UI critique after this: 26/40 (trend 25 → 26 → 26). The earlier fixes 
 
 ## Branch published (2026-11-26)
 
-The reviewer role moves to a remote agent that reads only GitHub; implementers now push `feat/phase1` themselves after `scripts/privacy-scan.sh` passes, and commit hand-check screenshots to `handcheck/<job>/` (see `AGENTS.md`). CI runs `pnpm check` on every push. Before the first push the roughly 70 local commits were squashed into one, because the history carried a local path; **commit hashes mentioned above this line are local only and are not on GitHub.** Next: `NEXT.md` (page review 3, given to Gemini).
+The reviewer role moves to a remote agent that reads only GitHub; implementers now push themselves after `scripts/privacy-scan.sh` passes, and commit hand-check screenshots to `handcheck/<job>/` (see `AGENTS.md`). CI runs `pnpm check` on every push. Before the first push the roughly 70 local commits were squashed into one, because the history carried a local path; **commit hashes mentioned above this line are local only and are not on GitHub.** Next: `NEXT.md` (page review 3, given to Gemini).
+
+Same day, user decision: `main` was fast-forwarded to the published branch and all work now goes straight to `main`; `feat/phase1` is retired.

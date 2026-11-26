@@ -1,10 +1,10 @@
 #!/bin/sh
 # Scan what a push would publish for private details. Exit 1 on any finding.
-# Usage: scripts/privacy-scan.sh [base]   (default base: origin/feat/phase1 if it exists, else origin/main)
+# Usage: scripts/privacy-scan.sh [base]   (default base: origin/main, i.e. what the push would add)
 set -eu
 base="${1:-}"
 if [ -z "$base" ]; then
-  if git rev-parse -q --verify origin/feat/phase1 >/dev/null; then base=origin/feat/phase1; else base=origin/main; fi
+  base=origin/main
 fi
 fail=0
 pattern='/Users/[A-Za-z]|/home/[a-z]|C:\\Users\\|BEGIN [A-Z ]*PRIVATE KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|xox[abp]-'

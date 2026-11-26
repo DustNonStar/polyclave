@@ -4,7 +4,7 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 `AGENTS.md` holds the rules every agent follows, the file table, the loop and the report format. This file adds what only the reviewer needs: the current state, how to review, how to write a job, the decisions already made, and the lessons learned.
 
-**You work only from GitHub:** `https://github.com/DustNonStar/polyclave`, branch `feat/phase1`. You never touch the user's machine and never write to the repository. You read the branch, the CI runs and the committed screenshots. Everything you want in the repository goes into your message to the implementer, and the implementer saves it (`AGENTS.md`, The loop).
+**You work only from GitHub:** `https://github.com/DustNonStar/polyclave`, branch `main`. You never touch the user's machine and never write to the repository. You read the branch, the CI runs and the committed screenshots. Everything you want in the repository goes into your message to the implementer, and the implementer saves it (`AGENTS.md`, The loop).
 
 ## 1. Read in this order
 
@@ -26,7 +26,8 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
   - **Round 3 (`2026-11-26-page-review-3.md`) is written. `NEXT.md` points to it, and nobody has started it yet.** The user is giving it to Gemini, so your first review will be of Gemini's round 3.
 - **UI critique scores:** 25 → 26 → 26 out of 40 (the method is in section 5). Each round fixed what it targeted. The score stays flat because each fresh reviewer surfaces older defects, and reviewers differ by 4–5 points. Judge progress by the issue list, not by the number.
-- **Git history:** the branch was built locally in about 70 commits and then squashed into one commit before its first push. The squash removed a local path from the history.
+- **Git:** all work is on `main` (user decision 2026-11-26: implementers push straight to `main`, you review `main`; a job that fails review is fixed in the next job, not reverted unless the user says so). The old `feat/phase1` branch on GitHub is retired; ignore it.
+- **Git history:** phase 1 was built locally in about 70 commits and then squashed into one commit before its first push. The squash removed a local path from the history.
   - **Commit hashes mentioned in `HANDOFF.md` before the "Branch published" note are local only and do not exist on GitHub.** Ignore them.
   - Commits after that note are on GitHub.
 
@@ -44,7 +45,7 @@ Keep the message self-contained: the implementer sees only the message and the r
 
 ## 4. How to review a job (from GitHub)
 
-1. **Commits:** compare `feat/phase1` from your last verdict to the new head, then read the commit list and the full diff.
+1. **Commits:** compare `main` from your last verdict to the new head, then read the commit list and the full diff.
 2. **CI:** the `check` workflow run for the new head must be green on all four jobs. A red job means the job is not passed. Name the failing job and test.
 3. **Tests:** any removed or changed line in an existing test must be one the work list allowed by name.
 4. **Code against the rules:**
@@ -113,7 +114,7 @@ Round 2 once had to stop because a third affected test was missed.
 - Before accepting, the page shows the commit subject and the changed files, not a full diff. This is round 3, item 1.
 - Phone first: desktop and phone (375 px) are equally important.
 - The look is the industrial gray-black with fluorescent green and orange from `DESIGN.md`. Fluorescent colour is used only for motion.
-- Implementers (DeepSeek or Gemini) commit, hand-check and push `feat/phase1` themselves after `scripts/privacy-scan.sh` passes. They never force-push and never touch other branches.
+- Implementers (DeepSeek or Gemini) commit, hand-check and push `main` themselves after `scripts/privacy-scan.sh` passes. They never force-push and never touch other branches.
 - Hand-check screenshots are committed to `handcheck/<job>/`, with fixtures under `/tmp` so that no user name appears in them.
 
 ## 7. Standing rules for the reviewer
@@ -137,5 +138,4 @@ From the critiques, the user has not chosen these yet:
 - `.impeccable/design.json` is out of date against `DESIGN.md`.
 
 Other open items:
-- A pull request from `feat/phase1` to `main`, only when the user asks for it.
 - Phase 2 scope (more vendors, phone over Tailscale) is not planned yet.
