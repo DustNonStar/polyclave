@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { prepareCodexHome } from '../src/codex.ts'
-import { checkRunBranch } from '../src/git-effect.ts'
+import { checkRunBranch, type CommitSummary } from '../src/git-effect.ts'
 import { startHttpServer, type HttpServer } from '../src/http.ts'
 import { hostInstanceId } from '../src/ids.ts'
 import { startHostMcp, type HostMcp } from '../src/mcp.ts'
@@ -582,5 +583,81 @@ describe('HTTP API and SSE', () => {
 
     const jsRes = await fetch(`${http.url}/app.js`)
     expect(jsRes.status).toBe(200)
+  })
+
+  it('run detail includes the commit subject and changed files', async () => {
+    const dir = trackTemp(tempDir('polyclave-http-commit-'))
+    const { work, remote, http } = await setupHttp(dir, {
+      '1': [
+        { commit: { file: 'f.txt', content: 'hello\n', trailer: true } },
+        { push: true },
+        { reply: 'pushed, no submit' },
+      ],
+    })
+
+    const session = (await (
+      await fetch(`${http.url}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 's1', cwd: work }),
+      })
+    ).json()) as SessionRow
+
+    const runRes = await fetch(`${http.url}/api/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: session.id, requestId: 'req-commit', instructions: 'add f' }),
+    })
+    expect(runRes.status).toBe(201)
+    const run = (await runRes.json()) as RunRow
+
+    const detail = await waitFor(async () => {
+      const res = await fetch(`${http.url}/api/runs/${run.id}`)
+      const body = (await res.json()) as { run: RunRow; commit: CommitSummary | null }
+      return body.run.status === 'needs_review' ? body : null
+    })
+
+    const sha = detail.run.observedSha!
+    expect(sha).toBeTruthy()
+    const expectedSubject = execFileSync('git', ['-C', remote, 'log', '-1', '--format=%s', sha], {
+      encoding: 'utf8',
+    }).trim()
+
+    expect(detail.commit).not.toBeNull()
+    expect(detail.commit!.sha).toBe(sha)
+    expect(detail.commit!.subject).toBe(expectedSubject)
+    expect(detail.commit!.files).toContainEqual({ path: 'f.txt', added: 1, deleted: 0 })
+    expect(detail.commit!.filesTotal).toBe(1)
+  })
+
+  it('run detail commit is null when there is no sha', async () => {
+    const dir = trackTemp(tempDir('polyclave-http-nocommit-'))
+    const { work, http, runs } = await setupHttp(dir, {
+      '1': [{ exit: 1 }],
+    })
+
+    const session = (await (
+      await fetch(`${http.url}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 's1', cwd: work }),
+      })
+    ).json()) as SessionRow
+
+    const runRes = await fetch(`${http.url}/api/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: session.id, requestId: 'req-nocommit', instructions: 'fail' }),
+    })
+    expect(runRes.status).toBe(201)
+    const run = (await runRes.json()) as RunRow
+    await runs.idle()
+
+    const res = await fetch(`${http.url}/api/runs/${run.id}`)
+    expect(res.status).toBe(200)
+    const detail = (await res.json()) as { run: RunRow; commit: CommitSummary | null }
+    expect(detail.run.observedSha).toBeNull()
+    expect(detail.run.resultSha).toBeNull()
+    expect(detail.commit).toBeNull()
   })
 })

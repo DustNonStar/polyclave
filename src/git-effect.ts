@@ -363,3 +363,47 @@ export function classifyRun(f: Facts): RunVerdict {
 
   return { verdict: 'retryable' }
 }
+
+export interface CommitSummary {
+  sha: string
+  subject: string
+  files: { path: string; added: number | null; deleted: number | null }[]
+  filesTotal: number
+}
+
+export async function commitSummary(
+  remote: string,
+  sha: string,
+): Promise<CommitSummary | null> {
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return null
+  try {
+    const realRemote = realpathSync(remote)
+    const out = await git(realRemote, ['show', '--numstat', '--format=%s', sha])
+    const lines = out.split(/\r?\n/)
+    const subject = lines[0] ?? ''
+    const allFiles: CommitSummary['files'] = []
+    for (const line of lines.slice(1)) {
+      if (!line) continue
+      const parts = line.split('\t')
+      if (parts.length < 3) continue
+      const addedRaw = parts[0]!
+      const deletedRaw = parts[1]!
+      const path = parts.slice(2).join('\t')
+      const added = addedRaw === '-' ? null : Number(addedRaw)
+      const deleted = deletedRaw === '-' ? null : Number(deletedRaw)
+      allFiles.push({
+        path,
+        added: Number.isFinite(added) ? added : null,
+        deleted: Number.isFinite(deleted) ? deleted : null,
+      })
+    }
+    return {
+      sha,
+      subject,
+      files: allFiles.slice(0, 50),
+      filesTotal: allFiles.length,
+    }
+  } catch {
+    return null
+  }
+}

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import { parseCodexLine } from './codex.ts'
+import { commitSummary } from './git-effect.ts'
 import { DispatchClosedError, type HostEvent, type TurnRunner } from './runner.ts'
 import type { Runs } from './runs.ts'
 import {
@@ -402,11 +403,14 @@ export async function startHttpServer(d: {
           sendJson(res, 404, { error: 'run not found' })
           return
         }
+        const commitSha = run.observedSha ?? run.resultSha
+        const commit = commitSha ? await commitSummary(run.remote, commitSha) : null
         sendJson(res, 200, {
           run,
           turns: d.store.listRunTurns(runId),
           acceptedResult: d.store.acceptedResult(runId) ?? null,
           lastRejectedError: d.store.lastRejectedError(runId),
+          commit,
         })
         return
       }
