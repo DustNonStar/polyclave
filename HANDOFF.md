@@ -594,3 +594,24 @@ Not done: No changes outside the authorized test and this report. See the branch
 Branch `dot/fix-nocommit-test` (`ae31cd5`, `ba81f1a`) fast-forwarded into `main`. Only the named test changed: it now polls its own run's detail to a terminal status and keeps every assertion. CI on `ba81f1a` green on Node 22 and 24; locally the test passed 5 times in a row and `pnpm check` gave 132 passed, 1 skipped; privacy scan clean.
 
 Follow-up (not done): the same race remains in three other tests of `tests/http.spec.ts` that end with `await runs.idle()` right after `POST /api/runs` (`replays a run request id and rejects a changed one`, `maps busy and frozen to 409, never 500`, `POST /api/runs returns before the run finishes`). `runs.idle()` can resolve before the run started by the POST has registered, so temp-dir cleanup races a running git (`ENOTEMPTY`; the first one already failed once on CI run 45774170700). Prefer one fix at the root: make `Runs.idle()` also wait for runs whose start the HTTP handler has scheduled but not yet begun, with a test that calls `idle()` right after the POST and asserts the run is no longer pending/running; then the three tests need no change.
+
+## Wait for scheduled run starts in `Runs.idle()`
+
+Commits: `d50e7a9` fix: wait for scheduled run starts before going idle.
+
+Tests: The new HTTP regression returned `pending` before the fix and reached `done` with it. It holds worktree preparation at a gate and captures the run's status when `idle()` resolves, without polling for completion. The three existing HTTP tests were not changed. `pnpm check` on `d50e7a9` (Actions run 45776470621) passed on macOS Node 22 and 24, with the same summary on both:
+
+```
+ Test Files  11 passed | 1 skipped (12)
+      Tests  133 passed | 1 skipped (134)
+```
+
+Hand check: none (no UI change).
+
+Issues: No `PLAN-ISSUES.md` changes.
+
+Cleanup: No manually started host or browser; the test runner manages its fixtures and listening ports.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: No outstanding implementation items. Merge review is separate.
