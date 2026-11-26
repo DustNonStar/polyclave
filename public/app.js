@@ -982,18 +982,23 @@ function renderRunDetail(container, runId) {
           <button class="pill go" type="button" data-decide="accept"${acceptOff}>Accept ${obs7 ? `<span class="mono">${esc(obs7)}</span>` : ''}</button>
           <button class="pill" type="button" data-decide="fail">Mark failed</button>
           <button class="pill" type="button" data-decide="allow_retry"${retryOff}>Allow retry</button>
-        </div>
-        <p class="fine">${
+        </div>`
+    const fineHtml = `<p class="fine">${
           run.observedSha
             ? `Accept applies to ${esc(obs7)} only (${esc(run.observedSha)}). If the branch moves first, you will be asked to review the new tip.`
             : 'No branch sha is currently observed on the remote.'
-        }</p>
-        <p class="fine reason">${
+        }</p>`
+    const reasonHtml = pending
+      ? ''
+      : `<p class="fine reason">${
           run.observedSha
             ? 'Allow retry is disabled: the branch is on the remote.'
             : 'Accept is disabled: there is no observed sha to accept.'
         }</p>`
     const pendingSha7 = shortSha(state.pendingDecision?.sha)
+    const confirmArming = Boolean(
+      pending && state.pendingDecision?.armedAt && Date.now() < state.pendingDecision.armedAt,
+    )
     const confirmLabel =
       pending === 'accept'
         ? `Confirm accept ${pendingSha7 ? `<span class="mono">${esc(pendingSha7)}</span>` : ''}`
@@ -1001,8 +1006,8 @@ function renderRunDetail(container, runId) {
           ? 'Confirm fail'
           : 'Confirm retry'
     const confirmRow = `<div class="opts confirm">
-          <button class="pill${pending === 'accept' ? ' go' : ''}" type="button" id="confirm-decision">${confirmLabel}</button>
           <button class="pill quiet" type="button" id="back-from-confirm">Back</button>
+          <button class="pill${pending === 'accept' ? ' go' : ''}${confirmArming ? ' arming' : ''}" type="button" id="confirm-decision" aria-disabled="${confirmArming ? 'true' : 'false'}">${confirmLabel}</button>
         </div>`
     const questionHtml = frozen
       ? `<span>${esc(run.detail || 'This run needs review.')}</span>`
@@ -1029,7 +1034,9 @@ function renderRunDetail(container, runId) {
             : `<label class="field-label" for="resolve-note">Note</label>
         <textarea class="note-field" id="resolve-note" placeholder="Required for Mark failed and Allow retry">${esc(note)}</textarea>
         ${err ? `<p class="err-line">${esc(err)}</p>` : ''}
-        ${pending ? confirmRow : pills}`
+        ${pending ? confirmRow : pills}
+        ${fineHtml}
+        ${reasonHtml}`
         }
       </section>
     `
@@ -1109,7 +1116,12 @@ function renderRunDetail(container, runId) {
   const openConfirm = (decision) => {
     state.resolveErrors.delete(run.id)
     state.confirmMoved = null
-    state.pendingDecision = { runId: run.id, decision, sha: run.observedSha ?? null }
+    state.pendingDecision = {
+      runId: run.id,
+      decision,
+      sha: run.observedSha ?? null,
+      armedAt: Date.now() + 400,
+    }
     renderSide()
     focusAfter('#confirm-decision')
   }
@@ -1178,11 +1190,26 @@ function renderRunDetail(container, runId) {
   for (const btn of container.querySelectorAll('[data-decide]')) {
     btn.addEventListener('click', () => openConfirm(btn.dataset.decide))
   }
-  document.getElementById('confirm-decision')?.addEventListener('click', () => {
-    if (state.pendingDecision) {
-      void doResolve(state.pendingDecision.decision, state.pendingDecision.sha ?? undefined)
+  const confirmBtn = document.getElementById('confirm-decision')
+  if (confirmBtn) {
+    if (state.pendingDecision?.armedAt && Date.now() < state.pendingDecision.armedAt) {
+      const remaining = Math.max(0, state.pendingDecision.armedAt - Date.now())
+      if (state.confirmArmTimer) clearTimeout(state.confirmArmTimer)
+      state.confirmArmTimer = setTimeout(() => {
+        state.confirmArmTimer = null
+        const btn = document.getElementById('confirm-decision')
+        if (!btn) return
+        if (!state.pendingDecision || Date.now() < state.pendingDecision.armedAt) return
+        btn.classList.remove('arming')
+        btn.setAttribute('aria-disabled', 'false')
+      }, remaining)
     }
-  })
+    confirmBtn.addEventListener('click', () => {
+      if (!state.pendingDecision) return
+      if (state.pendingDecision.armedAt && Date.now() < state.pendingDecision.armedAt) return
+      void doResolve(state.pendingDecision.decision, state.pendingDecision.sha ?? undefined)
+    })
+  }
   document.getElementById('back-from-confirm')?.addEventListener('click', closeConfirm)
 
   if (focusAcceptAfterRender) focusAfter('[data-decide="accept"]')

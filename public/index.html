@@ -59,10 +59,11 @@ svg.i { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-widt
 .btn.quiet { background: transparent; box-shadow: none; color: var(--text-2); }
 .btn.quiet:hover { background: var(--raise-hi); color: var(--silver); }
 .pill { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 999px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); color: var(--silver); font-size: 14px; transition: background .15s, box-shadow .15s; }
-.pill:hover:not([disabled]) { background: var(--raise-hi); box-shadow: inset 0 0 0 1px var(--silver-edge); }
+.pill:hover:not([disabled]):not(.arming) { background: var(--raise-hi); box-shadow: inset 0 0 0 1px var(--silver-edge); }
 .pill[disabled] { color: var(--text-3); background: transparent; cursor: not-allowed; }
+.pill.arming { opacity: .45; cursor: default; }
 .pill.go { background: var(--green-btn); color: #f2fff4; box-shadow: none; }
-.pill.go:hover:not([disabled]) { background: var(--green-btn-hi); }
+.pill.go:hover:not([disabled]):not(.arming) { background: var(--green-btn-hi); }
 
 /* status glyphs */
 .g { width: 14px; height: 14px; flex: none; display: inline-block; vertical-align: -2px; overflow: visible; }
