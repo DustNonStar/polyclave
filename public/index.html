@@ -257,6 +257,17 @@ details.worked[open] summary svg.chev { transform: rotate(90deg); }
 .confirm-moved .g { margin-top: 3px; }
 .ask .ask-note { margin: 0; color: var(--text-2); font-size: 13.5px; padding-left: 24px; }
 .field-label { color: var(--text-3); font-size: 12.5px; }
+.commit-box { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); }
+.ask .commit-box { background: var(--side); box-shadow: inset 0 0 0 1px var(--line); }
+.commit-head { color: var(--text-3); font-size: 12.5px; font-weight: 500; }
+.commit-subj { color: var(--silver); font-weight: 500; font-size: 13.5px; overflow-wrap: anywhere; }
+.commit-files { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.commit-file { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 12.5px; min-width: 0; }
+.commit-stat { flex: none; color: var(--text-3); white-space: nowrap; }
+.commit-more { margin: 0; color: var(--text-3); font-size: 12.5px; }
+.mid-path { display: inline-flex; max-width: 100%; min-width: 0; color: var(--text-2); }
+.mid-a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mid-b { flex: none; white-space: nowrap; }
 .sys.lock-line { color: var(--text-2); }
 .sys.lock-line .g { color: var(--orange); }
 .ask .ask-note b { color: var(--silver); font-weight: 600; }

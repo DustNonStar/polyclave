@@ -183,6 +183,53 @@ function formatInlineText(text) {
   return escaped.replace(/`([^`]+)`/g, (_, code) => `<code class="inl">${code}</code>`)
 }
 
+function midPathHtml(path) {
+  const s = String(path ?? '')
+  const slash = s.lastIndexOf('/')
+  let cut = slash > 0 ? slash : s.length > 14 ? s.length - 10 : -1
+  if (cut > 0 && s.length - cut > 22) {
+    cut = s.length - 16
+  }
+  if (cut <= 0) {
+    return `<span class="mid-path" title="${esc(s)}"><span class="mid-a">${esc(s)}</span></span>`
+  }
+  const head = s.slice(0, cut)
+  const tail = s.slice(cut)
+  return `<span class="mid-path" title="${esc(s)}"><span class="mid-a">${esc(head)}</span><span class="mid-b">${esc(tail)}</span></span>`
+}
+
+function commitSummaryHtml(detailData, title) {
+  if (!detailData) return ''
+  const commit = detailData.commit
+  if (!commit) {
+    return `
+      <div class="commit-box">
+        <div class="commit-head">${esc(title)}</div>
+        <p class="commit-more">The host could not read this commit from the remote.</p>
+      </div>
+    `
+  }
+  const files = (commit.files || []).slice(0, 5)
+  const filesHtml = files
+    .map((f) => {
+      const stat =
+        f.added === null || f.deleted === null ? 'binary' : `+${f.added} \u2212${f.deleted}`
+      return `<div class="commit-file">${midPathHtml(f.path)}<span class="commit-stat">${esc(stat)}</span></div>`
+    })
+    .join('')
+  const more = (commit.filesTotal ?? files.length) - files.length
+  const moreHtml =
+    more > 0 ? `<p class="commit-more">and ${more} more file${more === 1 ? '' : 's'}</p>` : ''
+  return `
+    <div class="commit-box">
+      <div class="commit-head">${esc(title)}</div>
+      <div class="commit-subj">${esc(commit.subject || '(no subject)')}</div>
+      ${files.length > 0 ? `<div class="commit-files">${filesHtml}</div>` : ''}
+      ${moreHtml}
+    </div>
+  `
+}
+
 function newRequestId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID()
@@ -936,6 +983,7 @@ function renderRunDetail(container, runId) {
       <section class="ask" id="host-question">
         <div class="who"><span class="avatar sm" style="background:var(--silver-metal);color:#15161a;box-shadow:none"><svg class="i" style="width:11px;height:11px;stroke-width:2"><use href="#i-mark"/></svg></span><b>Host</b><time>${esc(fmtTime(run.updatedAt))}</time></div>
         <div class="q">${glyph('need')}<span>${esc(run.detail || 'This run needs review.')}</span></div>
+        ${commitSummaryHtml(detailData, 'What changed')}
         ${
           frozen
             ? lockNotice
@@ -972,7 +1020,7 @@ function renderRunDetail(container, runId) {
     ${confirmMovedLine}
     ${
       run.status === 'done'
-        ? `<p class="empty">The branch matches the accepted result. Whether the work meets the request is judged by tests or review.</p>`
+        ? `${commitSummaryHtml(detailData, 'Accepted commit')}<p class="empty">The branch matches the accepted result. Whether the work meets the request is judged by tests or review.</p>`
         : ''
     }
     <div class="chips">
