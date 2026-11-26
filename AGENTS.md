@@ -5,8 +5,9 @@ Several agents build this project. The user relays messages between them by hand
 ## Roles
 
 - **User:** decides direction, relays messages between agents, and approves anything destructive.
-- **Reviewer:** plans the work, writes the jobs, reviews the work and accepts it, and decides detail-level questions. Claude held this role until 2026-11-26; now it is a remote agent that works **only from GitHub**. It reads the `main` branch, the CI results and the committed screenshots, and it never touches the local machine or writes to the repository. Its handover notes are in `REVIEWER.md`.
-- **Implementer (DeepSeek, Gemini or any other agent):** works in the local checkout. It saves the reviewer's messages into the repository, writes the code and tests, runs the hand checks, and pushes. Implementers take turns: only one works in the checkout at a time.
+- **Dot (lead agent, GitHub only):** plans the work, decides detail-level questions, and since 2026-11-26 also **writes the code itself on a branch** (see "Dot's branch flow" below). It never touches the local machine. Its handover notes are in `REVIEWER.md`.
+- **Merge reviewer (Claude, on the user's machine):** when the user asks, reviews a Dot branch (code, CI, a browser check of the page at 1440 and 375 px), merges it into `main` if it passes, and deletes the branch. Only the merge reviewer merges into `main`.
+- **Local implementer (DeepSeek, Gemini or any other agent, optional):** works in the local checkout when the user gives it a job. It saves the reviewer's messages into the repository, writes the code and tests, runs the hand checks, and pushes `main`. Implementers take turns: only one works in the checkout at a time.
 
 ## Files
 
@@ -23,7 +24,15 @@ Several agents build this project. The user relays messages between them by hand
 | `handcheck/<job>/` | implementer | hand-check screenshots and measurements, committed with the report |
 | `scripts/privacy-scan.sh` | — | must pass before every push |
 
-## The loop
+## Dot's branch flow (the default since 2026-11-26)
+
+1. Dot writes the job (work list and `NEXT.md` if useful) and does it on a new branch `dot/<job>` from the latest `main`, one commit per item, with the commit messages from the work list. Dot never pushes to `main`, never force-pushes, and never edits another agent's branch.
+2. CI runs `pnpm check` on the branch (macOS, Node 22 and 24). Dot fixes red CI on the same branch before calling the job done.
+3. Dot appends its own report to `HANDOFF.md` on the branch (the report format below; "Hand check" says what the merge reviewer must look at in the browser, item by item), then tells the user the branch name.
+4. The user asks the merge reviewer to review it. The merge reviewer reads the diff, checks CI, runs the page in a browser at 1440 and 375 px for every UI item, and either merges into `main` (fast-forward or rebase, keeping Dot's commits), appends a short verdict to `HANDOFF.md` and deletes the branch, or reports what must change, which Dot fixes on the same branch.
+5. The rules below for tests, dependencies, privacy and conflicts apply to Dot exactly as to any implementer. Dot cannot run the hand checks itself, so it never claims a visual result it has not seen.
+
+## The loop with a local implementer
 
 1. The reviewer writes a message to the implementer with up to three parts:
    - **Verdict:** the review of the last job.

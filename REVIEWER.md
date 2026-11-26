@@ -4,7 +4,7 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 `AGENTS.md` holds the rules every agent follows, the file table, the loop and the report format. This file adds what only the reviewer needs: the current state, how to review, how to write a job, the decisions already made, and the lessons learned.
 
-**You work only from GitHub:** `https://github.com/DustNonStar/polyclave`, branch `main`. You never touch the user's machine and never write to the repository. You read the branch, the CI runs and the committed screenshots. Everything you want in the repository goes into your message to the implementer, and the implementer saves it (`AGENTS.md`, The loop).
+**You work only from GitHub:** `https://github.com/DustNonStar/polyclave`, branch `main`. You never touch the user's machine. Since 2026-11-26 you also write the code yourself, on a branch `dot/<job>`; Claude reviews it in a browser on the user's machine and merges it (`AGENTS.md`, "Dot's branch flow"). When the user gives a job to a local implementer instead, you send it a message as `AGENTS.md` "The loop with a local implementer" describes.
 
 ## 1. Read in this order
 
@@ -20,11 +20,12 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 ## 2. Where things stand (2026-11-26)
 
-- **Phase 1 is built and accepted.** Gate A and Gate B passed. On Node 22 and 24, `pnpm check` gives 130 passed and 1 skipped. The skipped test is the real-Codex one, which runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node 22 and 24 on every push (the phase 1 host is macOS-only, so there is no Linux job). The first run was red on Node 22 because of one racy milestone test; round 3 item 0 fixes it, so expect CI to be red until that job lands.
+- **Phase 1 is built and accepted.** Gate A and Gate B passed. On Node 22 and 24, `pnpm check` gives 130 passed and 1 skipped. The skipped test is the real-Codex one, which runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node 22 and 24 on every push (the phase 1 host is macOS-only, so there is no Linux job). CI on `main` is red on Node 22 until the flaky test above is fixed.
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
-  - **Round 3 (`2026-11-26-page-review-3.md`) is written. `NEXT.md` points to it, and nobody has started it yet.** The user is giving it to Gemini, so your first review will be of Gemini's round 3.
+  - Round 3 (`2026-11-26-page-review-3.md`) was done by Gemini, accepted by you, and your follow-up branch was merged (`1c2c561`).
+  - **Open:** `tests/http.spec.ts` › "run detail commit is null when there is no sha" is flaky on CI (Node 22, ENOTEMPTY in cleanup): the test must wait for the run to reach a terminal status before asserting. Do this as your first branch job.
 - **UI critique scores:** 25 → 26 → 26 out of 40 (the method is in section 5). Each round fixed what it targeted. The score stays flat because each fresh reviewer surfaces older defects, and reviewers differ by 4–5 points. Judge progress by the issue list, not by the number.
 - **Git:** all work is on `main` (user decision 2026-11-26: implementers push straight to `main`, you review `main`; a job that fails review is fixed in the next job, not reverted unless the user says so). The old `feat/phase1` branch on GitHub is retired; ignore it.
 - **Git history:** phase 1 was built locally in about 70 commits and then squashed into one commit before its first push. The squash removed a local path from the history.
@@ -32,6 +33,8 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
   - Commits after that note are on GitHub.
 
 ## 3. Your loop
+
+Default since 2026-11-26: plan the job, do it yourself on `dot/<job>`, wait for green CI, append your report to `HANDOFF.md` on the branch, and tell the user the branch name in Chinese. The steps below are for when the user gives the job to a local implementer instead.
 
 1. The user says an implementer has finished.
 2. Review the work on GitHub (section 4).
@@ -119,7 +122,7 @@ Round 2 once had to stop because a third affected test was missed.
 
 ## 7. Standing rules for the reviewer
 
-- **Do not commit to the repository yourself**, not even on a side branch: GitHub web commits carry the account's profile name, which is private. Put code and doc changes in your message to the implementer. (On 2026-11-26 a reviewer branch `review/round3-followup` was merged by re-signing its commit; the scan now rejects names other than the project account.)
+- **You write code on branches only** (`AGENTS.md`, "Dot's branch flow"): one branch `dot/<job>` per job, never `main`, never force-push. Claude reviews and merges it on the user's machine when the user asks. Commit names must be the project account `DustNonStar`; the user set the GitHub profile name for that (2026-11-26), and `scripts/privacy-scan.sh` rejects any other name.
 
 - **Never ask for anything outside the loop without the user's explicit yes:** a pull request, a merge, a push of another branch, a force-push, rewriting history, or deleting files or branches.
 - Never ask for, read, print or repeat an API key, token or password. The user sets keys themselves.
