@@ -692,3 +692,19 @@ Cleanup: No manually started host, browser, or listening port.
 Privacy scan: privacy-scan: clean (origin/main..HEAD)
 
 Not done: No changes to production source or tests. Merge review is separate.
+
+## Finish the Node.js 26 documentation cleanup
+
+Commits: docs: remove superseded runtime references.
+
+Tests: Searched all tracked text outside the append-only handoff for superseded runtime references; none remain. No source, tests, dependencies, or CI configuration changed in this follow-up. See the branch's Node.js 26 check for the final suite result.
+
+Hand check: none.
+
+Issues: No `PLAN-ISSUES.md` changes. Prior review findings remain historical and do not imply that those old reviews ran on the current runtime.
+
+Cleanup: No manually started host, browser, or listening port.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: Prior handoff entries and Git history are unchanged. No branch was deleted or merged.

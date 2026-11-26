@@ -8,9 +8,9 @@
 
 **Architecture:** The repository root is one standalone package. One Node process holds a SQLite store, a host MCP server (streamable HTTP, JSON responses, one tool `submit_result`), a turn runner that starts one `codex exec` / `codex exec resume` process per turn under a supervisor that waits for the host's go-ahead, a run manager that gives every task its own worktree, branch and fixed base commit, a recovery pass that runs before anything is dispatched, and an HTTP+SSE API serving one static page. The probe scripts in `docs/superpowers/research/probes/` are references for Codex flags, event shapes and the MCP handshake.
 
-> **Superseded runtime (user decision 2026-11-26):** Polyclave now supports Node.js 26.x only (`engines.node` `^26.0.0`, `@types/node` 26.x, CI on macOS Node.js 26). Where this historical plan names an older runtime, use Node.js 26.x.
+> **Superseded runtime (user decision 2026-11-26):** Polyclave now supports Node.js 26.x only (`engines.node` `^26.0.0`, `@types/node` 26.x, CI on macOS Node.js 26).
 
-**Tech Stack:** TypeScript run directly by Node type stripping (Node `^22.19.0 || >=24.0.0`, no build step), `node:sqlite`, `node:http`, `node:net`; zod 4.4.3; dev: vitest 4.1.8, typescript 6.0.3 (typecheck only), @types/node 22.20.0; git CLI; Codex CLI 0.172.0.
+**Tech Stack:** TypeScript run directly by Node type stripping (Node.js `^26.0.0`, no build step), `node:sqlite`, `node:http`, `node:net`; zod 4.4.3; dev: vitest 4.1.8, typescript 6.0.3 (typecheck only), @types/node 26.6.11; git CLI; Codex CLI 0.172.0.
 
 **Spec:** `docs/superpowers/specs/2026-11-25-agent-console-design-v4.md` — §6.4–§6.8, §7, §8.2–§8.3, §9.1–§9.2, §13.1, §17 stage 1, §17.1, §19, §20. Probe record: `docs/superpowers/research/2026-11-24-t3-probe-results.md` §8–§9. Orca note: `docs/superpowers/research/2026-11-25-orca-comparison.md`.
 
@@ -34,7 +34,7 @@
   - **R2 — A run holds its session** from acceptance until it is `done`, `failed`, `needs_review` or `interrupted` (database-enforced). User messages meanwhile are stored `queued`.
   - **R3 — One target.** Phase 1 accepts a run only if the session repo's `origin` has one fetch URL and one push URL, both the same absolute path to a local bare repository whose `receive.denyDeletes` and `receive.denyNonFastForwards` are both `true`. The host never changes that repo's config.
 - Tokens are per turn, valid only while the turn is `running` and `authorized` and owned by the current instance. They never appear in API responses, SSE, logs or the fake's log.
-- SQLite unique violations are detected by `error.errcode === 2067` (`SQLITE_CONSTRAINT_UNIQUE`); `error.code` is only `'ERR_SQLITE_ERROR'`. Hand-written transactions roll back with `try { db.exec('ROLLBACK') } catch {}` so a failed rollback cannot mask the original error. Child-process output from Node 22 may include an `ExperimentalWarning` on stderr; tests parse stdout only.
+- SQLite unique violations are detected by `error.errcode === 2067` (`SQLITE_CONSTRAINT_UNIQUE`); `error.code` is only `'ERR_SQLITE_ERROR'`. Hand-written transactions roll back with `try { db.exec('ROLLBACK') } catch {}` so a failed rollback cannot mask the original error. Tests parse child-process stdout only, not diagnostic messages on stderr.
 - **Test-only hooks** exist only behind environment variables named `POLYCLAVE_TEST_*` and are documented where they are used.
 - Ids: runs `r` + 8 hex, sessions `s` + 8 hex, host instances 16 hex.
 
@@ -57,7 +57,7 @@ Rules for implementers:
 - Handover: stop only at a task boundary (commit the task or discard its partial changes); write `HANDOFF.md` (last task and commit, verbatim `pnpm check` output, `PLAN-ISSUES.md` items, quirks) and commit it as `chore: handoff after Task N`. The reviewer does a handover review (Gate A steps 1, 3–6 for finished tasks) and writes findings under `## Review` in `HANDOFF.md`; the next implementer fixes those first.
 
 **Gate A — after Task 8.** The reviewer:
-1. runs `pnpm check` on a clean checkout, on Node 22.19+ and Node 24+ where available;
+1. runs `pnpm check` on a clean checkout, on macOS with Node.js 26.x;
 2. runs `pnpm test tests/milestone.spec.ts` three times in a row (no flakes);
 3. reads `classifyRun`, `recover`, `Runs` completion, `submit_result` and every place that starts a turn against R1–R3, Freeze and Writers; any write of `status = 'done'` outside a `classifyRun` verdict or a user `accept` resolution fails the gate;
 4. checks every agent start goes through `spawnSupervised` and `buildCodexArgs`, and that the supervisor cannot start the agent without `go`;
@@ -160,7 +160,7 @@ Transactions (`BEGIN IMMEDIATE`) and indexes the store must use:
 - `settleResult`: one transaction. Re-checks the token's turn is `running`, `authorized`, owned by `hostInstanceId`, with `runId` equal → else `turn_not_active`. If an accepted row exists: same branch and sha → `already_accepted`; else `different_result_accepted`. Otherwise insert the accepted row → `accepted`.
 - Indexes: `UNIQUE (session_id) WHERE status = 'running'` on turns; `UNIQUE (session_id) WHERE status IN ('pending','running')` on runs; `UNIQUE (session_id, request_id)` on runs; `UNIQUE (run_id) WHERE accepted = 1` on results.
 
-- [ ] **Step 1: Create the package files.** `package.json`: `"name": "polyclave"`, `"private": true`, `"type": "module"`, `engines.node` `^22.19.0 || >=24.0.0`, `packageManager` `pnpm@11.7.0`; deps/devDeps exactly as the Tech Stack line; scripts `start: node src/main.ts`, `test: vitest run`, `typecheck: tsc --noEmit`, `check: pnpm typecheck && pnpm test`. `tsconfig.json`: `target ES2024`, `module`/`moduleResolution NodeNext`, `lib ["ES2024"]`, `strict`, `skipLibCheck`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `allowImportingTsExtensions`, `rewriteRelativeImportExtensions`, `types ["node"]`, `noEmit`, `erasableSyntaxOnly`; include `src/**/*.ts`, `tests/**/*.ts`. `vitest.config.ts`: `test: { include: ['tests/**/*.spec.ts'], testTimeout: 20000 }`. `.gitignore` keeps its existing lines (`node_modules/`, `*.sqlite`, `*.sqlite-*`, `.DS_Store`, `.state-*/`).
+- [ ] **Step 1: Create the package files.** `package.json`: `"name": "polyclave"`, `"private": true`, `"type": "module"`, `engines.node` `^26.0.0`, `packageManager` `pnpm@11.7.0`; deps/devDeps exactly as the Tech Stack line; scripts `start: node src/main.ts`, `test: vitest run`, `typecheck: tsc --noEmit`, `check: pnpm typecheck && pnpm test`. `tsconfig.json`: `target ES2024`, `module`/`moduleResolution NodeNext`, `lib ["ES2024"]`, `strict`, `skipLibCheck`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `allowImportingTsExtensions`, `rewriteRelativeImportExtensions`, `types ["node"]`, `noEmit`, `erasableSyntaxOnly`; include `src/**/*.ts`, `tests/**/*.ts`. `vitest.config.ts`: `test: { include: ['tests/**/*.spec.ts'], testTimeout: 20000 }`. `.gitignore` keeps its existing lines (`node_modules/`, `*.sqlite`, `*.sqlite-*`, `.DS_Store`, `.state-*/`).
 
 - [ ] **Step 2: Write the failing tests** (`tests/store.spec.ts`)
 ```ts
