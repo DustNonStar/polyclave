@@ -311,6 +311,28 @@ async function loadRunDetail(runId) {
   } catch {}
 }
 
+async function openRun(runId, nextPhoneArea) {
+  const r = state.runs.find((x) => x.id === runId)
+  if (r && r.sessionId !== state.selectedSessionId) {
+    state.selectedSessionId = r.sessionId
+    state.composerError = ''
+  }
+  state.selectedRunId = runId
+  state.showNewTask = false
+  if (nextPhoneArea) state.phoneArea = nextPhoneArea
+  await Promise.all([
+    loadRunDetail(runId),
+    state.selectedSessionId ? loadSessionData(state.selectedSessionId) : Promise.resolve(),
+  ])
+  const detail = state.runDetailById.get(runId)
+  if (detail?.run && detail.run.sessionId !== state.selectedSessionId) {
+    state.selectedSessionId = detail.run.sessionId
+    state.composerError = ''
+    await loadSessionData(state.selectedSessionId)
+  }
+  render()
+}
+
 function attentionItems() {
   const frozen = state.sessions.filter((s) => Boolean(s.frozenReason))
   const reviewRuns = state.runs.filter((r) => r.status === 'needs_review')
@@ -451,6 +473,9 @@ function renderSidebarNow() {
 
   for (const btn of list.querySelectorAll('[data-session-id]')) {
     btn.addEventListener('click', async () => {
+      if (btn.dataset.sessionId !== state.selectedSessionId) {
+        state.composerError = ''
+      }
       state.selectedSessionId = btn.dataset.sessionId
       state.lockRemoved = null
       state.phoneArea = 'main'
@@ -465,17 +490,7 @@ function renderSidebarNow() {
   }
   for (const btn of list.querySelectorAll('[data-run-id]')) {
     btn.addEventListener('click', async () => {
-      const rId = btn.dataset.runId
-      const r = state.runs.find((x) => x.id === rId)
-      if (r) state.selectedSessionId = r.sessionId
-      state.selectedRunId = rId
-      state.showNewTask = false
-      state.phoneArea = 'side'
-      await Promise.all([
-        loadRunDetail(rId),
-        state.selectedSessionId ? loadSessionData(state.selectedSessionId) : Promise.resolve(),
-      ])
-      render()
+      await openRun(btn.dataset.runId, 'side')
     })
   }
 }
@@ -515,6 +530,9 @@ function renderStream() {
 
   for (const btn of tabbar.querySelectorAll('[data-tab-session]')) {
     btn.addEventListener('click', async () => {
+      if (btn.dataset.tabSession !== state.selectedSessionId) {
+        state.composerError = ''
+      }
       state.selectedSessionId = btn.dataset.tabSession
       state.lockRemoved = null
       const shown = state.runs.find((r) => r.id === state.selectedRunId)
@@ -628,11 +646,7 @@ function renderStream() {
   }
   for (const btn of log.querySelectorAll('[data-open-run]')) {
     btn.addEventListener('click', async () => {
-      state.selectedRunId = btn.dataset.openRun
-      state.showNewTask = false
-      state.phoneArea = 'side'
-      await loadRunDetail(state.selectedRunId)
-      render()
+      await openRun(btn.dataset.openRun, 'side')
     })
   }
 
@@ -1248,10 +1262,7 @@ function renderSideNow() {
   bindLockHandlers(body)
   for (const btn of body.querySelectorAll('[data-pick-run]')) {
     btn.addEventListener('click', async () => {
-      state.selectedRunId = btn.dataset.pickRun
-      await loadRunDetail(state.selectedRunId)
-      renderSide()
-      renderSidebar()
+      await openRun(btn.dataset.pickRun, null)
     })
   }
 }
