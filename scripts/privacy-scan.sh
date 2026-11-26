@@ -14,7 +14,7 @@ if git log -p --no-color "$base"..HEAD -- . ':!scripts/privacy-scan.sh' | grep -
 fi
 # 2. Email addresses other than placeholders and GitHub noreply.
 if git log -p --no-color "$base"..HEAD -- . ':!scripts/privacy-scan.sh' | grep -E '^\+' | grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
-  | grep -vE '@(users\.noreply\.github\.com|example\.(com|invalid|org)|anthropic\.com)$' | sort -u | grep .; then
+  | grep -vE '@(users\.noreply\.github\.com|example\.(com|invalid|org))$' | sort -u | grep .; then
   echo "privacy-scan: email address in added lines (above)"; fail=1
 fi
 # 3. Files that must never be committed, and large files.
@@ -25,12 +25,12 @@ for f in $(git diff --name-only --diff-filter=AM "$base"..HEAD); do
   if [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 400000 ]; then echo "privacy-scan: file over 400 KB: $f"; fail=1; fi
 done
 # 4. Commit authors must use a noreply address.
-if git log --format='%ae%n%ce' "$base"..HEAD | sort -u | grep -vE '@users\.noreply\.github\.com$|^noreply@anthropic\.com$' | grep .; then
+if git log --format='%ae%n%ce' "$base"..HEAD | sort -u | grep -vE '@users\.noreply\.github\.com$|^noreply@github\.com$' | grep .; then
   echo "privacy-scan: commit author/committer email is not a noreply address (above)"; fail=1
 fi
-# 5. Commit author/committer names must be the project account (web-UI commits use the profile name).
-if git log --format='%an%n%cn' "$base"..HEAD | sort -u | grep -vxE 'DustNonStar|GitHub' | grep .; then
-  echo "privacy-scan: commit author/committer name is not the project account (above)"; fail=1
+# 5. No AI contributors: no co-author or "generated with" lines in commit messages.
+if git log --format='%h %B' "$base"..HEAD | grep -inE '^(co-authored-by:|.*generated with \[?(claude|chatgpt|codex|gemini|deepseek))'; then
+  echo "privacy-scan: AI attribution in a commit message (above); the repository has no AI contributors"; fail=1
 fi
 [ "$fail" -eq 0 ] && echo "privacy-scan: clean ($base..HEAD)"
 exit "$fail"
