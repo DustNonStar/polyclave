@@ -665,3 +665,9 @@ Cleanup: No manually started host, browser, or listening port.
 Privacy scan: privacy-scan: clean (origin/main..HEAD)
 
 Not done: No Windows host port or changes to production source or tests. Merge review is separate.
+
+## Node.js 24 standardization review (Claude): passed, merged
+
+Branch `dot/node24-only` (`0954f8c`, `cc16cc7`) fast-forwarded into `main`: CI is one macOS job on Node 24, `engines.node` is `^24.0.0`, `@types/node` is 24.19.2 (lockfile updated, frozen install passes), and AGENTS.md, REVIEWER.md and README.md say Node 24 only. No source or test change. CI green on both commits (Node 24). Locally on Node 26 (the machine default) `pnpm install --frozen-lockfile` and `pnpm check` pass (133 passed, 1 skipped) with an "Unsupported engine" warning only. The phase 1 plan's Tech Stack still said Node 22, and AGENTS.md says its constraints always apply, so a dated note now says the runtime is Node 24 only.
+
+Not merged: `dot/diagnose-parallel-worktrees` is a diagnostic branch for the intermittent `two sessions on one repo work in separate worktrees` failure (a CI probe step and a diagnostic message on the existing assertion). It stays with Dot; its probe step is keyed to the removed Node 22 matrix entry, so it will not run on `main`'s workflow as written.
