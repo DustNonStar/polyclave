@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import {
   chmodSync,
   existsSync,
@@ -233,6 +234,7 @@ describe('proc and supervisor', () => {
       { cwd: dir, env: process.env },
     )
     cleanupPids.push(sup.pgid)
+    const supervisorExit = once(sup.child, 'exit')
     sup.go()
     await pollUntil(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '')
     const pid = Number(readFileSync(pidFile, 'utf8').trim())
@@ -240,6 +242,8 @@ describe('proc and supervisor', () => {
 
     await killGroup(sup.pgid, 500)
     expect(isPidAlive(pid)).toBe(false)
+    // The supervisor can have stopped before Node reaps this direct child.
+    await supervisorExit
     expect(isPidAlive(sup.pgid)).toBe(false)
   })
 
