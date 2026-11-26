@@ -564,3 +564,7 @@ Issues: none opened; `PLAN-ISSUES.md` unchanged.
 Cleanup: host, fake codex, and headless Chrome stopped; `ps` confirmed no remaining `polyclave`, `fake-codex`, or port 9340 processes; ports 4410 and 9340 closed.
 Privacy scan: privacy-scan: clean (origin/main..HEAD)
 Not done: "Stop turn" failure error message (`Could not stop the turn: …`) and `commit === null` ("The host could not read this commit from the remote.") were verified by code inspection and `tests/http.spec.ts` (`run detail commit is null when there is no sha`), not separately screenshotted in the browser.
+
+## Round 3 follow-up merge (2026-11-26)
+
+The reviewer accepted Gemini's page review 3 (`9873177`..`f81a2b6`, CI green) and pushed one follow-up fix on a side branch (`review/round3-followup`): per-session composer drafts, send state and errors; stale run navigation and commit summaries ignored; long task chips constrained on phones; `role="status"` on the composer error. Claude reviewed it (code read, `pnpm check` 132 passed / 1 skipped, and in a browser: drafts stay per session, a send with the host down keeps the text and shows "Not sent: …", the send after restart clears it) and merged it into `main` as `1c2c561`, re-signed with the project account because the web commit carried a personal profile name. `scripts/privacy-scan.sh` now also rejects commit names other than the project account. The reviewer's written verdict on round 3 is not in this file.

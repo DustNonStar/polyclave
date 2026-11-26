@@ -28,5 +28,9 @@ done
 if git log --format='%ae%n%ce' "$base"..HEAD | sort -u | grep -vE '@users\.noreply\.github\.com$|^noreply@anthropic\.com$' | grep .; then
   echo "privacy-scan: commit author/committer email is not a noreply address (above)"; fail=1
 fi
+# 5. Commit author/committer names must be the project account (web-UI commits use the profile name).
+if git log --format='%an%n%cn' "$base"..HEAD | sort -u | grep -vxE 'DustNonStar|GitHub' | grep .; then
+  echo "privacy-scan: commit author/committer name is not the project account (above)"; fail=1
+fi
 [ "$fail" -eq 0 ] && echo "privacy-scan: clean ($base..HEAD)"
 exit "$fail"

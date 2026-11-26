@@ -119,6 +119,8 @@ Round 2 once had to stop because a third affected test was missed.
 
 ## 7. Standing rules for the reviewer
 
+- **Do not commit to the repository yourself**, not even on a side branch: GitHub web commits carry the account's profile name, which is private. Put code and doc changes in your message to the implementer. (On 2026-11-26 a reviewer branch `review/round3-followup` was merged by re-signing its commit; the scan now rejects names other than the project account.)
+
 - **Never ask for anything outside the loop without the user's explicit yes:** a pull request, a merge, a push of another branch, a force-push, rewriting history, or deleting files or branches.
 - Never ask for, read, print or repeat an API key, token or password. The user sets keys themselves.
 - The repository is public. Any doc you write must contain no local user paths, account names or emails, subscription or plan names, names of other private projects, machine names, or secrets.
