@@ -671,3 +671,24 @@ Not done: No Windows host port or changes to production source or tests. Merge r
 Branch `dot/node24-only` (`0954f8c`, `cc16cc7`) fast-forwarded into `main`: CI is one macOS job on Node 24, `engines.node` is `^24.0.0`, `@types/node` is 24.19.2 (lockfile updated, frozen install passes), and AGENTS.md, REVIEWER.md and README.md say Node 24 only. No source or test change. CI green on both commits (Node 24). Locally on Node 26 (the machine default) `pnpm install --frozen-lockfile` and `pnpm check` pass (133 passed, 1 skipped) with an "Unsupported engine" warning only. The phase 1 plan's Tech Stack still said Node 22, and AGENTS.md says its constraints always apply, so a dated note now says the runtime is Node 24 only.
 
 Not merged: `dot/diagnose-parallel-worktrees` is a diagnostic branch for the intermittent `two sessions on one repo work in separate worktrees` failure (a CI probe step and a diagnostic message on the existing assertion). It stays with Dot; its probe step is keyed to the removed Node 22 matrix entry, so it will not run on `main`'s workflow as written.
+
+## Standardize on Node.js 26
+
+Commits: `379ba0f` build: standardize on Node.js 26.
+
+Tests: A clean `pnpm install --frozen-lockfile` and TypeScript check passed with Node.js 26.13.1 and pnpm 11.7.0. The single macOS CI job on `379ba0f` (Actions run 45789015255) ran `pnpm check` on Node.js 26.13.1 and passed:
+
+```
+ Test Files  11 passed | 1 skipped (12)
+      Tests  133 passed | 1 skipped (134)
+```
+
+Hand check: none.
+
+Issues: No `PLAN-ISSUES.md` changes. Node.js 26.x is the only supported runtime. The approved release-age exception applies only to `@types/node@26.6.11`; its required `undici-types` resolution is `8.9.0`. All other versions and release-age checks are unchanged. The Node 22 investigation is retired; `dot/diagnose-parallel-worktrees` was not merged and can be deleted by the merge reviewer after the owner approves. Treat a recurrence of the parallel-worktree failure on Node.js 26 as a new job.
+
+Cleanup: No manually started host, browser, or listening port.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: No changes to production source or tests. Merge review is separate.
