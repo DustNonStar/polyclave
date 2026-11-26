@@ -514,3 +514,53 @@ Third UI critique after this: 26/40 (trend 25 → 26 → 26). The earlier fixes 
 The reviewer role moves to a remote agent that reads only GitHub; implementers now push themselves after `scripts/privacy-scan.sh` passes, and commit hand-check screenshots to `handcheck/<job>/` (see `AGENTS.md`). CI runs `pnpm check` on every push. Before the first push the roughly 70 local commits were squashed into one, because the history carried a local path; **commit hashes mentioned above this line are local only and are not on GitHub.** Next: `NEXT.md` (page review 3, given to Gemini).
 
 Same day, user decision: `main` was fast-forwarded to the published branch and all work now goes straight to `main`; `feat/phase1` is retired.
+
+## Page review 3
+
+- 9873177 test: wait for the thread id before the token snapshot — pnpm check: 130 passed
+- bde90a7 feat: run detail includes a commit summary — pnpm check: 132 passed
+- 7a52383 feat: show the commit before accepting it — pnpm check: 132 passed
+- c734b2c fix: failed send or stop keeps the text and says why — pnpm check: 132 passed
+- cdf9558 fix: opening a run selects its session — pnpm check: 132 passed
+- 0e41aac fix: review question after unlock — pnpm check: 132 passed
+- 7595e68 fix: confirm sits away from the first tap — pnpm check: 132 passed
+- 566c1a5 fix: shorter lock card on a phone — pnpm check: 132 passed
+- 222ca0c fix: constrain host question width on phone — pnpm check: 132 passed
+
+Commits:
+- `9873177` `test: wait for the thread id before the token snapshot`
+- `bde90a7` `feat: run detail includes a commit summary`
+- `7a52383` `feat: show the commit before accepting it`
+- `c734b2c` `fix: failed send or stop keeps the text and says why`
+- `cdf9558` `fix: opening a run selects its session`
+- `0e41aac` `fix: review question after unlock`
+- `7595e68` `fix: confirm sits away from the first tap`
+- `566c1a5` `fix: shorter lock card on a phone`
+- `222ca0c` `fix: constrain host question width on phone`
+
+Tests:
+Final `pnpm check` on `222ca0c`:
+
+```
+ Test Files  11 passed | 1 skipped (12)
+      Tests  132 passed | 1 skipped (133)
+   Start at  01:44:11
+   Duration  17.97s (transform 847ms, setup 0ms, import 1.30s, tests 72.30s, environment 1ms)
+```
+
+`pnpm test tests/milestone.spec.ts` passed 5 consecutive runs (9/9 each) after `9873177`.
+Existing test changed: `tests/milestone.spec.ts` (`second host refused while the first lives; old token refused after restart`), polling SQLite with `waitFor` for non-null `runs.agent_session_id` between `bHold.waitReached()` and the DB snapshot (allowed by `docs/superpowers/plans/2026-11-26-page-review-3.md`, item 0). Two new tests added to `tests/http.spec.ts` (`run detail includes the commit subject and changed files` and `run detail commit is null when there is no sha`), allowed by item 1.
+
+Hand check:
+Fixture under `/tmp/polyclave-hc/page-review-3/` (bare remote + long-path clone + fake codex on port 4410, headless Chrome over CDP at 1440×900 and 375×812). Screenshots and JSON measurements in `handcheck/page-review-3/`. All 13 JPEGs are 32.8–127.7 KB (< 300 KB), and all 115 loaded page resources were same-origin (`external: []`).
+
+- **Item 7 (lock card at 1440 and 375):** On a fresh desktop load (`handcheck/page-review-3/item7-desktop-locked.jpg`), `How to check on the Mac` is open by default (`detailsOpen: true`) showing `ps -g 83715` and `git -C /private/tmp/polyclave-hc/page-review-3/state/worktrees/raaea020a status` in separate `code` lines, `Working directory` reads `…/worktrees/raaea020a`, and `Can't check from here? Keep it locked; nothing runs until you remove the lock.` sits above `Remove lock…`. On a fresh 375×812 load (`handcheck/page-review-3/item7-phone-locked-needs.jpg`), the Needs you tab opens, `How to check on the Mac` is closed (`detailsOpen: false`), `Remove lock…` ends at `y = 588.4` inside the `812` px viewport with `docOverflow: 0` and `badCount: 0`. Expanding `How to check on the Mac` at 375 (`handcheck/page-review-3/item7-phone-details-open.jpg`) wraps the full `git -C …` command inside the card with `docOverflow: 0` and `badCount: 0`.
+- **Item 4 (opening a run selects its session):** With `api-server` selected, opening `web`'s run from Needs you at 1440 (`handcheck/page-review-3/item4-desktop-open-run.jpg`) switches the session tab, sidebar selection, and composer placeholder (`Ask web — …`) to `web`. At 375 (`handcheck/page-review-3/item4-phone-open-run.jpg`), opening `web`'s run from Needs you keeps the active tab on `Needs you` (`side`), updates the hidden phone stream header (`#phone-head .name`) and composer placeholder to `web`, with `docOverflow: 0` and `badCount: 0`.
+- **Items 5 and 2 (unlocked question + What changed / Accepted commit):** After unlocking `web`, at 1440 (`handcheck/page-review-3/item5-desktop-unlocked-review.jpg`) and 375 (`handcheck/page-review-3/item2-phone-what-changed.jpg`), the question reads `Review 03be558: accept it, mark it failed, or allow a retry.` with `Host note: An agent process may still be writing.` below it. Directly above `Note` and the pills, `What changed` shows subject `feat: add nested widget, binary asset and styles (raaea020a)`, 5 files (`README.md +1 −0`, `assets/icon.bin binary`, `docs/notes.md +2 −0`, middle-ellipsised `src/components…omponent-name.ts +2 −0`, `src/styles/theme.css +1 −0`), and `and 2 more files`. At 375 after fixing `.ask` grid column sizing (`222ca0c`), `#host-question` stays inside its margins with `docOverflow: 0` and `badCount: 0`. After accepting (`handcheck/page-review-3/item2-desktop-accepted-commit.jpg`), `Accepted commit` renders directly under `delivered (verified)`.
+- **Item 6 (confirm row and 400 ms guard):** Fast double-tap on `Accept 03be558` plus an immediate click on `#confirm-decision` at 1440 (`handcheck/page-review-3/item6-desktop-confirm-arming.jpg`) opened the confirm row with `Back` on the left (`x = 1107`) and `Confirm accept 03be558` on the right (`x = 1178.8`) at `opacity: 0.45` (`aria-disabled="true"`), keeping the fine print (`Accept applies to 03be558 only …`) visible and sending `0` `/resolve` requests. After >400 ms at 375 (`handcheck/page-review-3/item6-phone-confirm.jpg`), `Confirm accept 03be558` is at `opacity: 1` (`aria-disabled="false"`) with `docOverflow: 0` and `badCount: 0`.
+- **Item 3 (failed send preserves text and shows error):** After `kill -9` on the host, submitting `Keep this draft when host is down` leaves the text in the composer, re-enables Send (`sendDisabled: false`), and shows orange `Not sent: Failed to fetch. Your message is still here.` below the composer box at 1440 (`handcheck/page-review-3/item3-desktop-send-failed.jpg`) and 375 (`handcheck/page-review-3/item3-phone-send-failed.jpg`). Note on 375 Stream (`item3-phone-send-failed.jpg`): the pre-existing `.act` task-chip row above the composer reports `scrollWidth 368 > clientWidth 343` (`overflow-x: visible`) because the long chip text meets the right edge; the composer and error line themselves do not overflow. After restarting the host and resubmitting (`handcheck/page-review-3/item3-desktop-send-recovered.jpg`), the message appears in the stream, the textarea clears, and the error line hides.
+
+Issues: none opened; `PLAN-ISSUES.md` unchanged.
+Cleanup: host, fake codex, and headless Chrome stopped; `ps` confirmed no remaining `polyclave`, `fake-codex`, or port 9340 processes; ports 4410 and 9340 closed.
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+Not done: "Stop turn" failure error message (`Could not stop the turn: …`) and `commit === null` ("The host could not read this commit from the remote.") were verified by code inspection and `tests/http.spec.ts` (`run detail commit is null when there is no sha`), not separately screenshotted in the browser.
