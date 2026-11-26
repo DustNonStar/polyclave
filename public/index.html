@@ -185,6 +185,7 @@ details.worked[open] summary svg.chev { transform: rotate(90deg); }
 .send[disabled] { opacity: .45; cursor: not-allowed; }
 .under { display: flex; gap: 16px; padding: 6px 4px 0; color: var(--text-3); font-size: 12.5px; flex-wrap: wrap; min-width: 0; }
 .under .mono { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-err { padding: 6px 4px 0; }
 
 /* right panel */
 .side { background: var(--side); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
@@ -386,6 +387,7 @@ details.worked[open] summary svg.chev { transform: rotate(90deg); }
             <button class="send" id="send-btn" type="submit" aria-label="Send"><svg class="i" style="stroke-width:2"><use href="#i-up"/></svg></button>
           </div>
         </div>
+        <p class="err-line composer-err" id="composer-error" hidden></p>
         <div class="under" id="composer-under"></div>
       </form>
     </section>

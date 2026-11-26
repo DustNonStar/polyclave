@@ -34,6 +34,8 @@ const state = {
   phoneArea: 'main',
   statusInfo: null,
   hostUnreachable: false,
+  composerSending: false,
+  composerError: '',
 }
 
 function esc(s) {
@@ -637,6 +639,13 @@ function renderStream() {
   updateComposer(s)
 }
 
+function renderComposerError() {
+  const errEl = document.getElementById('composer-error')
+  if (!errEl) return
+  errEl.textContent = state.composerError
+  errEl.hidden = !state.composerError
+}
+
 function updateComposer(session) {
   const input = document.getElementById('composer-input')
   const sendBtn = document.getElementById('send-btn')
@@ -649,14 +658,16 @@ function updateComposer(session) {
     cancelBtn.hidden = true
     input.placeholder = 'Create a session to start chatting'
     under.innerHTML = ''
+    renderComposerError()
     return
   }
 
   input.disabled = false
-  sendBtn.disabled = false
+  sendBtn.disabled = Boolean(state.composerSending)
   input.placeholder = `Ask ${session.name} — messages sent during a turn wait their turn`
   cancelBtn.hidden = !session.busy
   under.innerHTML = `<span>This Mac</span><span class="mono" title="${esc(session.cwd)}">${esc(session.cwd)}</span>`
+  renderComposerError()
 }
 
 function lockTurnOf(session) {
@@ -1431,26 +1442,47 @@ document.getElementById('cancel-btn').addEventListener('click', async () => {
     await api(`/api/sessions/${encodeURIComponent(state.selectedSessionId)}/cancel`, {
       method: 'POST',
     })
+    state.composerError = ''
+    renderComposerError()
     await refreshAll()
-  } catch {}
+  } catch (err) {
+    state.composerError = `Could not stop the turn: ${err?.message || 'request failed'}.`
+    renderComposerError()
+  }
+})
+
+document.getElementById('composer-input').addEventListener('input', () => {
+  if (!state.composerError) return
+  state.composerError = ''
+  renderComposerError()
 })
 
 document.getElementById('composer-form').addEventListener('submit', async (e) => {
   e.preventDefault()
+  if (state.composerSending) return
   const sid = state.selectedSessionId
   const input = document.getElementById('composer-input')
   const text = input.value.trim()
   if (!sid || !text) return
-  input.value = ''
+  state.composerSending = true
+  state.composerError = ''
+  updateComposer(state.sessions.find((x) => x.id === sid) ?? null)
   try {
     await api(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     })
+    input.value = ''
+    state.composerError = ''
+    state.composerSending = false
     await loadSessionData(sid)
     await refreshAll()
-  } catch {}
+  } catch (err) {
+    state.composerSending = false
+    state.composerError = `Not sent: ${err?.message || 'request failed'}. Your message is still here.`
+    updateComposer(state.sessions.find((x) => x.id === state.selectedSessionId) ?? null)
+  }
 })
 
 document.getElementById('composer-input').addEventListener('keydown', (e) => {
