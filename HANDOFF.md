@@ -644,3 +644,24 @@ Not done: No production process-management changes. Merge review is separate.
 ## killGroup test stabilization review (Claude): passed, merged
 
 Branch `dot/killgroup-supervisor-exit` (`c193636`, `1521885`) fast-forwarded into `main`. Test-only: `kills the whole group on killGroup` now subscribes to the supervisor's `exit` event before `go()` and checks the supervisor PID only after that event; both assertions stay, no production change. The diagnosis holds: `killGroup()` decides on `pgrep -g`, which skips an exited but unreaped process, while the test's `isPidAlive` uses `kill(pid, 0)`, which still succeeds on it, so the old check could see the supervisor in the window before Node reaps its direct child. The test failed on CI twice before (`main` `8a88628`, run 45773438030; the retired branch at `d89c8cc`, run 45765720845). Production callers (`runner.ts`, `recovery.ts`) never check the supervisor PID after `killGroup()`, so the host is unaffected. CI green on Node 22 and 24 for both commits; locally the test passed 20/20 and `pnpm check` gave 133 passed, 1 skipped; privacy scan clean.
+
+## Standardize on Node.js 24
+
+Commits: `0954f8c` build: standardize on Node.js 24.
+
+Tests: Frozen-lockfile install and TypeScript check passed. `pnpm check` on macOS Node.js 24.22.3 (Actions run 45785216685) ran as the sole CI job and passed:
+
+```
+ Test Files  11 passed | 1 skipped (12)
+      Tests  133 passed | 1 skipped (134)
+```
+
+Hand check: none (no UI or host behavior change).
+
+Issues: No `PLAN-ISSUES.md` changes. Node.js 24.x is the single supported runtime; the older Phase 1 reports remain historical. Windows support for Node.js does not change the host's macOS-only requirement. The parallel worktree investigation is separate and this change does not fix or close it.
+
+Cleanup: No manually started host, browser, or listening port.
+
+Privacy scan: privacy-scan: clean (origin/main..HEAD)
+
+Not done: No Windows host port or changes to production source or tests. Merge review is separate.
