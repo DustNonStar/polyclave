@@ -175,3 +175,11 @@
 4. **沙箱要把 git 元数据设为可写**（普通仓库的 `.git`；worktree 还要加上主仓库里的 `.git/worktrees/<name>` 和对象目录），否则 agent 会自己绕道，结果更难预测。
 5. **`--ignore-user-config` 挡不住 `~/.codex/skills`**：Codex 仍会读你的全局 skills，宿主要另外处理（例如单独的 `CODEX_HOME`）。
 6. 本脚本的会话锁是"先查再写"，两个宿主几乎同时启动时仍可能都通过；正式实现要用数据库唯一约束（同一会话只允许一行"进行中"）。
+
+## 10. Phase 1 acceptance (real Codex)
+
+- Date: 2026-11-25 (`codex-cli 0.172.0`)
+- Command: `POLYCLAVE_REAL_CODEX=1 pnpm test tests/real-codex.spec.ts`
+- Outcome: PASS (`Test Files 1 passed (1)`, `Tests 1 passed (1)`)
+- Duration: 52.66s total (52.52s test execution)
+- Verified checks: `codex-home/skills` resolves to `~/.codex/skills`; chat turn 1 (`PONG`) and resumed turn 2 share the same thread ID; run created `hello.txt` (`hi` without trailing newline), committed with `Run-Id` trailer, pushed to `agent/<runId>`, called `submit_result`, reached status `done`; SQLite `events` recorded `mcp_tool_call` entries only for server `host`.

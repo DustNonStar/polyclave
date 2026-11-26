@@ -461,7 +461,7 @@ Every exit from `running` uses `updateRun(..., ['running'])` and then `runner.dr
 
 `retry`: only from `interrupted` and an unfrozen session; `retries >= 3` → `needs_review` `retry limit reached`. Otherwise re-check (`writer: 'excluded'` — a run is only `interrupted` when writers were excluded), `classifyRun`: `done`/`needs_review` apply directly; `check_failed` keeps `interrupted`; `retryable` → `prepareWorktree`, then `runTurn` with `runBrief(run, true)` and `mode: 'retry'` (the claim checks `interrupted` and `retries < 3` atomically and increments `retries`). `retry` returns once the first turn is claimed (or the run settled directly); later turns continue in the background.
 
-`resolve` (user decisions on `needs_review` only, else `StaleStateError`): `accept` re-reads the bare repo: the tip must equal `r.sha`, `baseSha` must be its ancestor and the range non-empty; then `done`, `resultSha = r.sha`, `resultSource 'user'`. If the tip differs, update `observedSha` to the new tip and throw `StaleStateError` so the user reviews the new sha (Gemini B3). `fail` → `failed`. `allow_retry` → only if the remote branch is absent (else `ConflictError`) → `interrupted`. Each stores `resolution` = `<decision>: <note> (seen <sha8|none> at <time>)`. Resolving never unfreezes the session.
+`resolve` (user decisions on `needs_review` only, else `StaleStateError`): `accept` re-reads the bare repo: the tip must equal `r.sha`, `baseSha` must be its ancestor and the range non-empty; then `done`, `resultSha = r.sha`, `resultSource 'user'`. If the tip differs, update `observedSha` to the new tip and throw `StaleStateError` so the user reviews the new sha (Gemini B3). `fail` → `failed`. `allow_retry` → only if the remote branch is absent (else `ConflictError`) → `interrupted`. Each stores `resolution` = `<decision>: <note> (seen <sha8|none> at <time>)`. Resolving never unfreezes the session. A run whose session is frozen cannot be resolved: `resolve` throws `FrozenError` before any check, so the user removes the lock first (user decision 2026-11-26).
 
 - [ ] **Step 1: Write the failing tests**
 ```ts
@@ -511,7 +511,7 @@ Rules, idempotent (running it twice gives the same state and no new runs, prompt
    - `authorized`, recorded `bootTime` ≠ current → end `interrupted`, `host_lost`, writer `excluded` (rebooted).
    - `authorized`, same boot → `liveness(pgid, startedAt)`: `live` → `killGroup`, wait for `gone`; `gone` → nothing; `unverifiable` → no kill. End `interrupted`, `host_lost`, writer `possible`, `freezeReason: host stopped while an agent was running (turn <id>)` (one transaction).
 1a. Sessions not frozen whose latest turn has writer `possible` on the current boot and no `Unfrozen by user:` host message after it are frozen with the same reason (covers a cancel or a second-signal exit whose freeze was not recorded).
-2. For every run `pending`, `running` or `interrupted` with no running turn: facts from `lastRunTurn(run)` (`writer` = that turn's `writerCheck`, or `excluded` if it never had a turn) → `classifyRun` → same mapping as Task 6 except `retryable` → `interrupted`, detail `not on the remote; safe to retry`. A frozen session's runs still get the verdict (the first row makes them `needs_review`).
+2. For every run `pending`, `running` or `interrupted` with no running turn: facts from `lastRunTurn(run)` (`writer` = that turn's `writerCheck`, or `excluded` if it never had a turn, or `excluded` if the user resolved the run after that turn ended — a user decision is never undone by a restart; Gate A review item 1) → `classifyRun` → same mapping as Task 6 except `retryable` → `interrupted`, detail `not on the remote; safe to retry`. A frozen session's runs still get the verdict (the first row makes them `needs_review`).
 3. Queued messages and messages bound to interrupted turns stay as they are. Nothing is started or retried.
 
 - [ ] **Step 1: Write the failing tests**
@@ -578,7 +578,7 @@ Each test uses its own state dir, bare repo and logs. Barriers, not sleeps, deci
 | GET | `/api/runs` | — | runs |
 | POST | `/api/runs` | `{ sessionId, requestId, instructions, base? }` | `201` new (then `runs.start` in the background), `200` replay; `409` busy, frozen or conflicting replay; `400` preflight failure |
 | POST | `/api/runs/:id/retry` | — | `200` once the first turn is claimed or the run settled; `409` when the run is not `interrupted`, the session is frozen or busy, or a retry is already in progress |
-| POST | `/api/runs/:id/resolve` | `{ decision, sha?, note }` | `409` when the run is not `needs_review`, the sha is outdated, or `allow_retry` meets a pushed branch |
+| POST | `/api/runs/:id/resolve` | `{ decision, sha?, note }` | `409` when the run is not `needs_review`, its session is frozen, the sha is outdated, or `allow_retry` meets a pushed branch |
 | GET | `/api/stream` | — | SSE of `HostEvent`, `: ping` every 15 s |
 | GET | `/`, `/app.js` | — | `public/` |
 
@@ -604,7 +604,12 @@ it('returns 404 for an unknown session', async () => { /* … */ })
 
 **Files:** Create `public/index.html`, `public/app.js`; `tests/http.spec.ts` gains `serves the page`.
 
-Plain HTML + one script, no framework, no external requests, responsive (one column under 700 px):
+**Design (approved by the user 2026-11-25):** build the page to `DESIGN.md` (tokens, components, the status-glyph system and the motion rules) and match the approved mockup `docs/superpowers/design/page-mockup.html` — same palette, radii, glyphs and motion; the mockup's sample data and demo script are not shipped. Fluorescent colours only for in-progress motion; finished states use the normal colours. The direction note is `.impeccable/surfaces/public-index-html.md`. The mockup lays out three areas plus a status bar on desktop and tabs on phones; Task 10's feature list below is the requirement, the mockup shows how it looks.
+
+Mockup elements in phase 1 scope (build them, fed by the API): brand; session cards with avatar, status corner dot and nested run rows; session tabs for open sessions; the stream (system lines, user and agent messages, "Worked for" blocks with steps from agent events, activity lines with chips, queued messages); the composer with the send button and a read-only label of the model in use; the right panel's "Needs you" detail (title, status, chips, key-values, activity timeline from run and turn rows, the lock card with unlock, and the decision pills mapped to `resolve`/`retry`); the status bar from `/api/sessions` and `/api/runs`.
+Mockup elements NOT in phase 1 (leave them out, do not draw dead controls): search, the Runs and Activity nav entries and panel tabs, attach, model switching, the pause-dispatch, settings and help buttons. The design for them is kept for later stages.
+
+Plain HTML + one script, no framework, no external requests, responsive (one column under 860 px, tabs for Sessions / Stream / Needs you):
 - Sessions list with `running` / `queued` / `frozen` badges; a frozen session shows its reason and an "Unfreeze" button that asks for a note.
 - Messages in receipt order; queued ones marked "waiting"; each delivered user message shows which turn it went to; live agent events collapsible; Send and Cancel.
 - Runs: id, status, detail, sha. `done` is labelled **"delivered (verified)"** — the branch matches the accepted result; whether the work meets the request is judged by tests or review. "New task" form (`instructions`, `base`; target shown read-only; the page generates `requestId` once per form submission and reuses it on resend). Retry on `interrupted`. On `needs_review`: Accept / Fail / Allow retry with a note, showing the observed sha; Accept sends that sha, and a `409` shows the new sha to review. "Needs attention" lists frozen sessions and `needs_review` / `interrupted` runs first.

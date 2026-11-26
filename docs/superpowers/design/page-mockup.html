@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polyclave — page mockup (sample data)</title>
+<style>
+:root {
+  --bg: #000;
+  --side: #09090a;
+  --raise: #111113;
+  --raise-hi: #18181b;
+  --raise-top: #202024;
+  --line: #1c1c1f;
+  --line-hi: #2a2a2e;
+  --silver: #eceef2;
+  --silver-2: #c3c6cc;
+  --silver-edge: rgba(226, 230, 236, .46);
+  --silver-metal: linear-gradient(150deg, #f6f7f9 0%, #c9ccd2 45%, #8d9199 100%);
+  --text: #e8e8eb;
+  --text-2: #a7a7ae;
+  --text-3: #808087;
+  /* fluorescent: only for things in motion */
+  --neon-green: #2dff5c;
+  --neon-yellow: #ffe414;
+  --neon-orange: #ff6a00;
+  /* normal: finished states, static marks, buttons */
+  --green: #3fb950;
+  --green-btn: #238636;
+  --green-btn-hi: #1f7a32;
+  --yellow: #d4a72c;
+  --orange: #e8772e;
+  --orange-hi: #f08a45;
+  --orange-ink: #1c0a00;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14.5px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+::selection { background: rgba(195, 198, 204, .28); }
+:focus-visible { outline: 2px solid var(--silver-2); outline-offset: 2px; }
+* { scrollbar-width: thin; scrollbar-color: var(--line-hi) transparent; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.dim { color: var(--text-3); }
+button, input { font: inherit; color: inherit; background: none; border: 0; padding: 0; }
+button { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+svg.i { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.iconbtn { width: 28px; height: 28px; border-radius: 8px; display: inline-grid; place-items: center; color: var(--text-3); transition: background .15s, color .15s; }
+.iconbtn:hover { background: var(--raise-hi); color: var(--silver); }
+
+.btn { white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 34px; padding: 0 14px; border-radius: 10px; font-size: 13.5px; font-weight: 500; background: var(--raise-top); color: var(--silver); box-shadow: inset 0 0 0 1px var(--line-hi); transition: background .15s; }
+.btn:hover { background: #29292e; }
+.btn.warn { background: var(--orange); color: var(--orange-ink); box-shadow: none; }
+.btn.warn:hover { background: var(--orange-hi); }
+.btn.quiet { background: transparent; box-shadow: none; color: var(--text-2); }
+.btn.quiet:hover { background: var(--raise-hi); color: var(--silver); }
+.pill { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 999px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); color: var(--silver); font-size: 14px; transition: background .15s, box-shadow .15s; }
+.pill:hover { background: var(--raise-hi); box-shadow: inset 0 0 0 1px var(--silver-edge); }
+.pill[disabled] { color: var(--text-3); background: transparent; cursor: not-allowed; }
+.pill.go { background: var(--green-btn); color: #f2fff4; box-shadow: none; }
+.pill.go:hover { background: var(--green-btn-hi); }
+
+/* ---------- status glyphs ---------- */
+.g { width: 14px; height: 14px; flex: none; display: inline-block; vertical-align: -2px; overflow: visible; }
+.g * { fill: none; stroke-width: 1.8; }
+.g.run { color: var(--neon-green); } .g.run .track { stroke: var(--line-hi); } .g.run .arc { stroke: currentColor; stroke-linecap: round; animation: spin 1s linear infinite; transform-origin: 7px 7px; }
+.g.wait { color: var(--neon-yellow); } .g.wait circle { stroke: currentColor; stroke-dasharray: 2.88 2.88; stroke-linecap: round; animation: spin 6s linear infinite; transform-origin: 7px 7px; }
+.g.need { color: var(--neon-orange); } .g.need .core { fill: currentColor; stroke: none; }
+.g.need .ring { stroke: currentColor; stroke-width: 1.4; animation: ping 1.9s var(--ease) infinite; transform-origin: 7px 7px; }
+.g.done { color: var(--green); } .g.done circle, .g.done path { stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+.g.done.fresh path { stroke-dasharray: 12; stroke-dashoffset: 12; animation: draw .5s .1s var(--ease) forwards; }
+.g.int { color: var(--yellow); } .g.int circle, .g.int path { stroke: currentColor; stroke-linecap: round; }
+.g.lockg { color: var(--orange); } .g.lockg rect { fill: currentColor; stroke: none; } .g.lockg path { stroke: currentColor; stroke-linecap: round; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes ping { 0% { transform: scale(.55); opacity: .9; } 80%, 100% { transform: scale(1.7); opacity: 0; } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes settle { 0% { opacity: 0; transform: translateY(-8px) rotate(-1.2deg); } 60% { opacity: 1; transform: translateY(1px) rotate(.3deg); } 100% { transform: none; } }
+.enter { animation: rise .45s var(--ease); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .g.done.fresh path { stroke-dashoffset: 0; } }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px 1px 7px; border-radius: 8px; background: var(--raise-hi); color: var(--silver-2); font-size: 13.5px; line-height: 24px; white-space: nowrap; }
+.chip .mono { color: var(--text-3); font-size: 11.5px; }
+.chip .mono:only-of-type, .pill .mono { color: inherit; font-size: 12.5px; }
+code.inl { font-family: var(--mono); font-size: 12.5px; padding: 1px 6px; border-radius: 6px; background: var(--raise-hi); color: var(--silver); }
+.avatar { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; background: var(--raise-top); box-shadow: inset 0 0 0 1px var(--silver-edge); color: var(--silver); font: 600 11px/1 var(--sans); letter-spacing: .02em; position: relative; flex: none; }
+.avatar.sm { width: 22px; height: 22px; border-radius: 7px; font-size: 9px; }
+.avatar .dot { position: absolute; right: -3px; bottom: -3px; width: 13px; height: 13px; border-radius: 50%; background: var(--side); display: grid; place-items: center; }
+
+/* ---------- shell ---------- */
+.app { height: 100vh; display: grid; grid-template-rows: 1fr auto; }
+.work { display: grid; grid-template-columns: 284px 1fr 392px; min-height: 0; }
+.col { min-height: 0; overflow: auto; }
+.tabs { display: none; }
+
+/* sidebar */
+.rail { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 10px 10px 0; gap: 2px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 6px 10px; }
+.brand .mark { width: 24px; height: 24px; border-radius: 8px; background: var(--silver-metal); display: grid; place-items: center; color: #15161a; }
+.brand b { font-weight: 650; letter-spacing: -.01em; color: var(--silver); flex: 1; }
+.search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; border-radius: 10px; background: var(--raise); color: var(--text-3); margin-bottom: 4px; }
+.search input { flex: 1; outline: none; color: var(--text); }
+.search:focus-within { box-shadow: inset 0 0 0 1px var(--silver-edge); }
+.search input::placeholder { color: var(--text-3); }
+.nav { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; border-radius: 10px; color: var(--text-2); }
+.nav:hover { background: var(--raise); color: var(--silver); }
+.nav .n { margin-left: auto; font-size: 12px; color: var(--text-3); }
+.nav .count { margin-left: auto; }
+.count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--orange); color: var(--orange-ink); font-size: 11px; font-weight: 700; display: inline-grid; place-items: center; }
+.sect { display: flex; align-items: center; gap: 2px; padding: 14px 6px 6px 10px; color: var(--text-3); font-size: 12.5px; font-weight: 500; }
+.sect span { flex: 1; }
+.sess { width: 100%; text-align: left; display: grid; grid-template-columns: 32px 1fr auto; gap: 0 12px; align-items: center; padding: 9px 10px; border-radius: 12px; transition: background .15s, box-shadow .15s; }
+.sess:hover { background: var(--raise); }
+.sess[aria-current="true"] { background: var(--raise-hi); box-shadow: inset 0 0 0 1px var(--silver-edge); }
+.sess .avatar { grid-row: span 2; }
+.sess .name { font-weight: 600; color: var(--silver); }
+.sess .meta { color: var(--text-3); font-size: 13px; }
+.sess .right { grid-row: 1 / span 2; grid-column: 3; display: inline-flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 12.5px; }
+.child { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; padding: 6px 10px 6px 30px; border-radius: 10px; font-size: 13.5px; color: var(--text-2); }
+.child:hover { background: var(--raise); }
+.child span, .sess .name, .sess .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.child time { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+.rail .foot { margin-top: auto; padding: 8px 0; border-top: 1px solid var(--line); display: flex; gap: 2px; }
+.rail .foot .grow { flex: 1; }
+
+/* main */
+.main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; overflow: hidden; }
+.tabbar { display: flex; align-items: stretch; height: 44px; border-bottom: 1px solid var(--line); padding: 0 8px; gap: 2px; }
+.tab { display: inline-flex; align-items: center; gap: 8px; padding: 0 14px; color: var(--text-3); font-size: 13.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab:hover { color: var(--text-2); }
+.tab[aria-selected="true"] { color: var(--silver); border-bottom-color: var(--silver-2); }
+.tabbar .iconbtn { align-self: center; }
+.log { overflow: auto; padding: 22px 32px 28px; display: grid; gap: 16px; align-content: start; }
+.log > * { max-width: 74ch; }
+.sys { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 13.5px; }
+.msg p { margin: 0; }
+.msg b { color: var(--silver); font-weight: 600; }
+.msg.user { justify-self: end; background: var(--raise-hi); padding: 10px 15px; border-radius: 16px 16px 6px 16px; }
+.act { display: flex; align-items: center; gap: 9px; color: var(--text-2); flex-wrap: wrap; }
+.act > .i { color: var(--text-3); }
+details.worked summary { cursor: pointer; list-style: none; display: inline-flex; gap: 6px; align-items: center; color: var(--text-3); border-radius: 8px; padding: 2px 6px; margin-left: -6px; }
+details.worked summary:hover { color: var(--silver-2); background: var(--raise); }
+details.worked summary::-webkit-details-marker { display: none; }
+details.worked summary svg { transition: transform .25s var(--ease); }
+details.worked[open] summary svg { transform: rotate(90deg); }
+.steps { display: grid; gap: 8px; margin-top: 10px; padding: 12px 14px; border-radius: 12px; background: var(--side); box-shadow: inset 0 0 0 1px var(--line); }
+.step { display: flex; align-items: center; gap: 9px; color: var(--text-2); font-size: 13.5px; }
+.step code { font-family: var(--mono); font-size: 12.5px; color: var(--silver); }
+.step .i { color: var(--text-3); }
+.queued { justify-self: end; border-radius: 16px 16px 6px 16px; padding: 10px 15px; box-shadow: inset 0 0 0 1px rgba(212, 167, 44, .4); color: var(--text-2); }
+.queued .who { display: flex; gap: 6px; align-items: center; color: var(--yellow); font-size: 12.5px; margin-bottom: 3px; }
+.composer { padding: 10px 32px 10px; }
+.box { border-radius: 18px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); padding: 14px 12px 10px 16px; display: grid; gap: 10px; transition: box-shadow .2s; }
+.box:focus-within { box-shadow: inset 0 0 0 1px var(--silver-edge); }
+.box textarea { width: 100%; min-height: 40px; resize: none; border: 0; background: transparent; color: var(--text); font: inherit; caret-color: var(--silver); outline: none; }
+.box textarea::placeholder { color: var(--text-3); }
+.box .row { display: flex; align-items: center; gap: 6px; }
+.box .model { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 9px; color: var(--text-2); font-size: 13px; }
+.box .model:hover { background: var(--raise-hi); color: var(--silver); }
+.send { width: 32px; height: 32px; border-radius: 50%; background: var(--silver-metal); color: #15161a; display: grid; place-items: center; }
+.under { display: flex; gap: 16px; padding: 6px 4px 0; color: var(--text-3); font-size: 12.5px; }
+
+/* right panel */
+.side { background: var(--side); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+.ptabs { display: flex; gap: 2px; padding: 8px; border-bottom: 1px solid var(--line); }
+.ptab { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 9px; color: var(--text-3); font-size: 13.5px; }
+.ptab:hover { color: var(--silver-2); background: var(--raise); }
+.ptab[aria-selected="true"] { background: var(--raise-hi); color: var(--silver); }
+.detail { padding: 14px 18px 22px; display: grid; gap: 16px; }
+.crumb { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13.5px; }
+.title { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--silver); letter-spacing: -.01em; }
+.title .mono { color: var(--text-3); font-size: 15px; font-weight: 500; margin-right: 6px; }
+.statusrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--text-3); }
+.statusbtn { display: inline-flex; align-items: center; gap: 7px; color: var(--silver); font-weight: 500; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.kv { display: grid; grid-template-columns: 96px 1fr; gap: 8px 12px; margin: 0; font-size: 13.5px; padding-top: 14px; border-top: 1px solid var(--line); }
+.kv dt { color: var(--text-3); }
+.kv dd { margin: 0; color: var(--text); }
+.h4 { margin: 0 0 4px; font-size: 13.5px; font-weight: 500; color: var(--text-3); }
+.tl { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: start; padding: 5px 0; font-size: 13.5px; color: var(--text-2); }
+.tl b { color: var(--silver); font-weight: 500; }
+.tl time { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); padding-top: 2px; }
+.tl .i, .tl .g { margin-top: 3px; color: var(--text-3); }
+.tl .g.lockg { color: var(--orange); }
+.tl .sub { display: block; color: var(--text-3); }
+
+.lock { border-radius: 16px; background: rgba(232, 119, 46, .06); box-shadow: inset 0 0 0 1px rgba(232, 119, 46, .45); padding: 14px 16px 16px; display: grid; gap: 10px; }
+.lock.arrive { animation: settle .7s var(--ease); }
+.lock .top { display: flex; align-items: center; gap: 8px; color: var(--orange); font-size: 13px; font-weight: 600; }
+.lock .top time { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--text-3); font-weight: 400; }
+.lock p { margin: 0; color: var(--text-2); font-size: 13.5px; }
+.unlock { display: none; gap: 10px; }
+.lock.open .unlock { display: grid; animation: rise .35s var(--ease); }
+.lock.open .open-btn { display: none; }
+.unlock textarea { min-height: 60px; border-radius: 12px; border: 0; box-shadow: inset 0 0 0 1px rgba(232, 119, 46, .45); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; padding: 10px 12px; resize: none; outline: none; }
+.unlock textarea:focus { box-shadow: inset 0 0 0 1px var(--orange); }
+.unlock .row { display: flex; gap: 8px; justify-content: flex-end; }
+
+.ask { border-radius: 16px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--line-hi); padding: 16px; display: grid; gap: 12px; }
+.ask .who { display: flex; align-items: center; gap: 10px; }
+.ask .who b { color: var(--silver); font-weight: 600; flex: 1; }
+.ask .who time { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+.ask .q { display: flex; gap: 10px; align-items: baseline; color: var(--silver); font-weight: 500; }
+.ask .opts { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 24px; }
+.ask .fine { color: var(--text-3); font-size: 12.5px; padding-left: 24px; }
+
+/* status bar */
+.statusbar { display: flex; align-items: center; gap: 18px; height: 30px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--side); color: var(--text-3); font-size: 12.5px; }
+.statusbar span { display: inline-flex; align-items: center; gap: 6px; }
+.statusbar .grow { flex: 1; }
+.sample { color: var(--text-3); font-size: 12px; padding: 0 18px 18px; margin: 0; }
+
+/* phone */
+@media (max-width: 860px) {
+  .app { grid-template-rows: auto 1fr; }
+  .statusbar { display: none; }
+  .tabs { display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--side); }
+  .tabs button { flex: 1; height: 36px; border-radius: 10px; color: var(--text-2); font-size: 13.5px; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .tabs button[aria-selected="true"] { background: var(--raise-hi); color: var(--silver); box-shadow: inset 0 0 0 1px var(--silver-edge); }
+  .work { grid-template-columns: 1fr; }
+  .work > .col { display: none; border: 0; }
+  .work > .col.shown { display: grid; }
+  .work > .rail.shown, .work > .side.shown { display: flex; }
+  .tabbar { display: none; }
+  .log, .composer { padding-left: 16px; padding-right: 16px; }
+  .under { display: none; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></symbol>
+  <symbol id="i-down" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
+  <symbol id="i-back" viewBox="0 0 16 16"><path d="M13 8H3M7 4L3 8l4 4"/></symbol>
+  <symbol id="i-up" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+  <symbol id="i-list" viewBox="0 0 16 16"><path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z M6.5 14h3"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 16 16"><path d="M1.5 8h3l2-5 3 10 2-5h3"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2.5 4h11M4.5 8h7M6.5 12h3"/></symbol>
+  <symbol id="i-link" viewBox="0 0 16 16"><path d="M7 9a3 3 0 0 0 4.2 0l2-2a3 3 0 0 0-4.2-4.2l-.7.7M9 7a3 3 0 0 0-4.2 0l-2 2A3 3 0 0 0 7 13.2l.7-.7"/></symbol>
+  <symbol id="i-term" viewBox="0 0 16 16"><path d="M3 4l4 4-4 4M8.5 12H13"/></symbol>
+  <symbol id="i-file" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z M9 2.5v3h3"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="5.5" r="1.5"/><path d="M4.5 5v6M11.5 7c0 3-7 2-7 4"/></symbol>
+  <symbol id="i-commit" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/></symbol>
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5l7 4.5-7 4.5z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 16 16"><path d="M8 2.5v5M4.8 4.6a4.5 4.5 0 1 0 6.4 0"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+  <symbol id="i-help" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.6 1.6c-.6.3-.9.7-.9 1.3M8 11.3h.01"/></symbol>
+  <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.5L8 3l5.5 4.5V13h-3.5V9.5h-4V13H2.5z"/></symbol>
+  <symbol id="i-mark" viewBox="0 0 16 16"><path d="M3 8l5-5 5 5-5 5z M8 5.5L10.5 8 8 10.5 5.5 8z"/></symbol>
+</svg>
+
+<div class="app">
+  <nav class="tabs" role="tablist" aria-label="Areas">
+    <button role="tab" data-tab="rail" aria-selected="false">Sessions</button>
+    <button role="tab" data-tab="main" aria-selected="true">Stream</button>
+    <button role="tab" data-tab="side" aria-selected="false">Needs you <span class="count">3</span></button>
+  </nav>
+
+  <main class="work">
+    <!-- sidebar -->
+    <section class="col rail" data-area="rail" aria-label="Sessions">
+      <div class="brand"><span class="mark"><svg class="i" style="width:14px;height:14px;stroke-width:1.9"><use href="#i-mark"/></svg></span><b>Polyclave</b><button class="iconbtn" aria-label="New session"><svg class="i"><use href="#i-plus"/></svg></button></div>
+      <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search sessions and runs"></label>
+      <a class="nav" href="#"><svg class="i"><use href="#i-bell"/></svg>Needs you<span class="count">3</span></a>
+      <a class="nav" href="#"><svg class="i"><use href="#i-list"/></svg>Runs<span class="n">6</span></a>
+      <a class="nav" href="#"><svg class="i"><use href="#i-pulse"/></svg>Activity</a>
+
+      <div class="sect"><span>Sessions</span><button class="iconbtn" aria-label="Filter"><svg class="i"><use href="#i-filter"/></svg></button></div>
+      <button class="sess" aria-current="true">
+        <span class="avatar">CX<span class="dot"><svg class="g run" viewBox="0 0 14 14" style="width:10px;height:10px"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg></span></span>
+        <span class="name">polyclave · main</span>
+        <span class="right">1 running</span>
+        <span class="meta">Turn 14 · 2m 41s</span>
+      </button>
+      <div class="child"><svg class="g run" viewBox="0 0 14 14"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg><span>Chat</span><time>2m 41s</time></div>
+      <div class="child"><svg class="g done" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/><path d="M4.4 7.2l1.8 1.8 3.5-3.6"/></svg><span>Queue messages during a run</span><time>41m</time></div>
+
+      <button class="sess">
+        <span class="avatar">CX<span class="dot"><svg class="g need" viewBox="0 0 14 14" style="width:10px;height:10px"><circle class="ring" cx="7" cy="7" r="4.5"/><circle class="core" cx="7" cy="7" r="4"/></svg></span></span>
+        <span class="name">web-shop · checkout</span>
+        <span class="right"><svg class="g lockg" viewBox="0 0 14 14"><path d="M4.5 6.5V4.8a2.5 2.5 0 0 1 5 0v1.7"/><rect x="2.5" y="6.5" width="9" height="6" rx="1.5"/></svg></span>
+        <span class="meta">Locked · needs you</span>
+      </button>
+      <button class="sess">
+        <span class="avatar">CX<span class="dot"><svg class="g wait" viewBox="0 0 14 14" style="width:10px;height:10px"><circle cx="7" cy="7" r="5.5"/></svg></span></span>
+        <span class="name">docs-site</span>
+        <span class="right">4m</span>
+        <span class="meta">1 message queued</span>
+      </button>
+
+      <div class="foot"><button class="iconbtn" aria-label="Settings"><svg class="i"><use href="#i-gear"/></svg></button><button class="iconbtn" aria-label="Help"><svg class="i"><use href="#i-help"/></svg></button><span class="grow"></span><button class="iconbtn" aria-label="Pause dispatch"><svg class="i"><use href="#i-power"/></svg></button></div>
+    </section>
+
+    <!-- main -->
+    <section class="col main shown" data-area="main" aria-label="Stream">
+      <div class="tabbar" role="tablist">
+        <button class="tab" role="tab" aria-selected="true"><svg class="g run" viewBox="0 0 14 14"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg>polyclave · main</button>
+        <button class="tab" role="tab" aria-selected="false"><svg class="g lockg" viewBox="0 0 14 14"><path d="M4.5 6.5V4.8a2.5 2.5 0 0 1 5 0v1.7"/><rect x="2.5" y="6.5" width="9" height="6" rx="1.5"/></svg>web-shop · checkout</button>
+        <button class="iconbtn" aria-label="Open session"><svg class="i"><use href="#i-plus"/></svg></button>
+      </div>
+      <div class="log">
+        <div class="sys"><svg class="i"><use href="#i-play"/></svg>Session resumed · thread <span class="mono">01a21402</span> · <span class="mono">14:28</span></div>
+        <div class="msg user"><p>Add a retry counter to the run card and keep the existing layout.</p></div>
+        <details class="worked"><summary><span>Worked for 48s</span><svg class="i"><use href="#i-chev"/></svg></summary></details>
+        <div class="msg"><p>Looked at how the card renders today. The count comes from <code class="inl">run.retries</code>, and the limit of three lives in the host, so the card only needs to read it.</p></div>
+        <div class="act"><svg class="i"><use href="#i-link"/></svg>Linked <span class="chip"><svg class="g int" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/><path d="M5.6 4.8v4.4M8.4 4.8v4.4"/></svg><span class="mono">r0a44be1c</span>Generate API reference pages</span></div>
+        <details class="worked" open>
+          <summary><span>Working for 2m 41s</span><svg class="i"><use href="#i-chev"/></svg></summary>
+          <div class="steps">
+            <div class="step"><svg class="g done" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/><path d="M4.4 7.2l1.8 1.8 3.5-3.6"/></svg><svg class="i"><use href="#i-term"/></svg><code>git status --short</code></div>
+            <div class="step"><svg class="g done" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/><path d="M4.4 7.2l1.8 1.8 3.5-3.6"/></svg><svg class="i"><use href="#i-file"/></svg>Edited <code>public/app.js</code><span class="mono dim">+18 −4</span></div>
+            <div class="step" id="live"><svg class="g run" viewBox="0 0 14 14"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg><svg class="i"><use href="#i-term"/></svg><code>pnpm test tests/http.spec.ts</code></div>
+          </div>
+        </details>
+        <div class="msg"><p>The run card now shows <b>Retry 1 of 3</b> next to the status. Unit tests pass, <b>14 of 14</b>; running the HTTP suite before I report back.</p></div>
+        <div class="queued"><div class="who"><svg class="g wait" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/></svg>Waiting · sent 14:33</div>After that, make the queued label match the new card style.</div>
+      </div>
+      <form class="composer" onsubmit="return false">
+        <div class="box">
+          <textarea placeholder="Ask polyclave · main — messages sent during a turn wait their turn" aria-label="Message"></textarea>
+          <div class="row">
+            <button class="iconbtn" type="button" aria-label="Attach"><svg class="i"><use href="#i-plus"/></svg></button>
+            <button class="model" type="button">codex · gpt-6-luna<svg class="i" style="width:14px;height:14px"><use href="#i-down"/></svg></button>
+            <button class="send" aria-label="Send"><svg class="i" style="stroke-width:2"><use href="#i-up"/></svg></button>
+          </div>
+        </div>
+        <div class="under"><span>This Mac</span><span class="mono">~/Developer/polyclave</span></div>
+      </form>
+    </section>
+
+    <!-- right panel -->
+    <aside class="col side" data-area="side" aria-label="Needs you">
+      <div class="ptabs" role="tablist">
+        <button class="ptab" role="tab" aria-selected="true"><svg class="i"><use href="#i-home"/></svg>Needs you<span class="count">3</span></button>
+        <button class="ptab" role="tab" aria-selected="false"><svg class="i"><use href="#i-list"/></svg>Runs</button>
+        <button class="ptab" role="tab" aria-selected="false"><svg class="i"><use href="#i-pulse"/></svg>Activity</button>
+      </div>
+      <div class="detail">
+        <div class="crumb"><svg class="i"><use href="#i-back"/></svg>Needs you<span class="dim">/</span><span class="avatar sm">CX</span>web-shop · checkout</div>
+        <h1 class="title"><span class="mono">r7c1e09a2</span>Fix double-charge on payment retry</h1>
+        <div class="statusrow">
+          <button class="statusbtn"><svg class="g need" viewBox="0 0 14 14"><circle class="ring" cx="7" cy="7" r="4.5"/><circle class="core" cx="7" cy="7" r="4"/></svg>Needs review<svg class="i" style="width:14px;height:14px;color:var(--text-3)"><use href="#i-down"/></svg></button>
+          <span>Run · web-shop · 14:09</span>
+        </div>
+        <div class="chips">
+          <span class="chip"><svg class="i" style="width:14px;height:14px"><use href="#i-branch"/></svg><span class="mono">agent/r7c1e09a2</span></span>
+          <span class="chip"><svg class="i" style="width:14px;height:14px"><use href="#i-commit"/></svg>tip <span class="mono">3e1a9f0</span></span>
+          <span class="chip"><svg class="i" style="width:14px;height:14px"><use href="#i-commit"/></svg>base <span class="mono">91bd2c4</span></span>
+        </div>
+
+        <article class="lock" id="lock">
+          <div class="top"><svg class="g lockg" viewBox="0 0 14 14"><path d="M4.5 6.5V4.8a2.5 2.5 0 0 1 5 0v1.7"/><rect x="2.5" y="6.5" width="9" height="6" rx="1.5"/></svg>Session locked<time>14:07</time></div>
+          <p>The host stopped while this run’s agent was working. Tools it started may still be writing, so nothing runs in web-shop · checkout until you remove the lock.</p>
+          <div><button class="btn warn open-btn" type="button" onclick="document.getElementById('lock').classList.add('open')">Remove lock…</button></div>
+          <form class="unlock" onsubmit="return false">
+            <textarea placeholder="Why it is safe now, e.g. no git or test processes left" aria-label="Why it is safe now"></textarea>
+            <div class="row"><button class="btn quiet" type="button" onclick="document.getElementById('lock').classList.remove('open')">Keep locked</button><button class="btn warn" type="submit">Sign &amp; remove lock</button></div>
+          </form>
+        </article>
+
+        <dl class="kv">
+          <dt>Session</dt><dd>web-shop · checkout</dd>
+          <dt>Done means</dt><dd>An accepted result whose sha is the branch tip, built on base <span class="mono">91bd2c4</span>.</dd>
+        </dl>
+
+        <div>
+          <h3 class="h4">Activity</h3>
+          <div class="tl"><svg class="i"><use href="#i-plus"/></svg><span><b>You</b> started this run</span><time>14:01</time></div>
+          <div class="tl"><svg class="i"><use href="#i-play"/></svg><span>Codex worked in <b>agent/r7c1e09a2</b></span><time>14:02</time></div>
+          <div class="tl"><svg class="i"><use href="#i-branch"/></svg><span>Pushed <b class="mono">3e1a9f0</b><span class="sub">The branch is on the remote; no result was submitted</span></span><time>14:06</time></div>
+          <div class="tl"><svg class="g lockg" viewBox="0 0 14 14"><path d="M4.5 6.5V4.8a2.5 2.5 0 0 1 5 0v1.7"/><rect x="2.5" y="6.5" width="9" height="6" rx="1.5"/></svg><span>Host restarted, <b>session locked</b></span><time>14:07</time></div>
+        </div>
+
+        <section class="ask">
+          <div class="who"><span class="avatar sm" style="background:var(--silver-metal);color:#15161a;box-shadow:none"><svg class="i" style="width:11px;height:11px;stroke-width:2"><use href="#i-mark"/></svg></span><b>Host</b><time>14:09</time></div>
+          <div class="q"><svg class="g need" viewBox="0 0 14 14"><circle class="ring" cx="7" cy="7" r="4.5"/><circle class="core" cx="7" cy="7" r="4"/></svg>The branch was pushed but no result was accepted. What should happen to this run?</div>
+          <div class="opts">
+            <button class="pill go" type="button">Accept <span class="mono">3e1a9f0</span></button>
+            <button class="pill" type="button">Mark failed</button>
+            <button class="pill" type="button" disabled title="The branch is on the remote">Allow retry</button>
+          </div>
+          <div class="fine">Accept applies to 3e1a9f0 only. If the branch moves first, you’ll be asked to review the new tip.</div>
+        </section>
+      </div>
+      <p class="sample">Sample data. A run marked done means the pushed branch matches the accepted result; it does not judge the work itself.</p>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span><svg class="g run" viewBox="0 0 14 14"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg>1 running</span>
+    <span><svg class="g wait" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/></svg>1 queued</span>
+    <span><svg class="g need" viewBox="0 0 14 14"><circle class="ring" cx="7" cy="7" r="4.5"/><circle class="core" cx="7" cy="7" r="4"/></svg>3 need you</span>
+    <span class="grow"></span>
+    <span>Dispatch open · up <span class="mono">3h 12m</span> · codex <span class="mono">0.172.0</span></span>
+  </footer>
+</div>
+<script>
+for (const b of document.querySelectorAll('.tabs button')) {
+  b.addEventListener('click', () => {
+    for (const x of document.querySelectorAll('.tabs button')) x.setAttribute('aria-selected', String(x === b))
+    for (const a of document.querySelectorAll('[data-area]')) a.classList.toggle('shown', a.dataset.area === b.dataset.tab)
+  })
+}
+// Demo of the motion grammar: a running step finishes, the next rises in, the lock card settles.
+const DONE = '<svg class="g done fresh" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5"/><path d="M4.4 7.2l1.8 1.8 3.5-3.6"/></svg>'
+const RUN = '<svg class="g run" viewBox="0 0 14 14"><circle class="track" cx="7" cy="7" r="5.5"/><path class="arc" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5"/></svg>'
+setTimeout(() => {
+  const live = document.getElementById('live')
+  live.firstElementChild.outerHTML = DONE
+  const next = document.createElement('div')
+  next.className = 'step enter'
+  next.innerHTML = RUN + '<svg class="i"><use href="#i-file"/></svg>Submitting result for <code>r5b2d7e11</code>'
+  live.after(next)
+}, 2500)
+setTimeout(() => document.getElementById('lock').classList.add('arrive'), 3500)
+</script>
+</body>
+</html>
