@@ -1004,10 +1004,24 @@ function renderRunDetail(container, runId) {
           <button class="pill${pending === 'accept' ? ' go' : ''}" type="button" id="confirm-decision">${confirmLabel}</button>
           <button class="pill quiet" type="button" id="back-from-confirm">Back</button>
         </div>`
+    const questionHtml = frozen
+      ? `<span>${esc(run.detail || 'This run needs review.')}</span>`
+      : `<span>${
+          obs7
+            ? `Review <span class="mono">${esc(obs7)}</span>: accept it, mark it failed, or allow a retry.`
+            : 'Review this run: mark it failed or allow a retry.'
+        }</span>`
+    const trimmedDetail = (run.detail || '').trim()
+    const capDetail = trimmedDetail ? trimmedDetail.charAt(0).toUpperCase() + trimmedDetail.slice(1) : ''
+    const hostNoteHtml =
+      !frozen && capDetail
+        ? `<p class="host-note">Host note: ${esc(capDetail.endsWith('.') ? capDetail : `${capDetail}.`)}</p>`
+        : ''
     askHtml = `
       <section class="ask" id="host-question">
         <div class="who"><span class="avatar sm" style="background:var(--silver-metal);color:#15161a;box-shadow:none"><svg class="i" style="width:11px;height:11px;stroke-width:2"><use href="#i-mark"/></svg></span><b>Host</b><time>${esc(fmtTime(run.updatedAt))}</time></div>
-        <div class="q">${glyph('need')}<span>${esc(run.detail || 'This run needs review.')}</span></div>
+        <div class="q">${glyph('need')}${questionHtml}</div>
+        ${hostNoteHtml}
         ${commitSummaryHtml(detailData, 'What changed')}
         ${
           frozen
