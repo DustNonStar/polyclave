@@ -360,7 +360,7 @@ A black-and-silver neutral world with two parallel sets of state colour: fluores
 
 **The Two Metal Objects Rule.** The brushed-silver gradient appears on the logo mark (including where it stands for the host) and the send button. Nothing else is metal.
 
-**The Orange Means Locked Rule.** Static orange belongs to locks and to the counts of sessions that need the user. It is never decoration, and warn buttons are the only filled orange controls.
+**The Orange Means Locked Rule.** Static orange belongs to locks and to the counts of sessions that need the user. Composer send/stop failures may use standard orange text to name an action that needs attention. Orange is never decoration, and warn buttons are the only filled orange controls.
 
 ## Typography
 

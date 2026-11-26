@@ -36,8 +36,9 @@ const state = {
   phoneArea: 'main',
   statusInfo: null,
   hostUnreachable: false,
-  composerSending: false,
-  composerError: '',
+  composerDrafts: new Map(),
+  composerSending: new Set(),
+  composerErrors: new Map(),
 }
 
 function esc(s) {
@@ -202,9 +203,12 @@ function midPathHtml(path) {
   return `<span class="mid-path" title="${esc(s)}"><span class="mid-a">${esc(head)}</span><span class="mid-b">${esc(tail)}</span></span>`
 }
 
-function commitSummaryHtml(detailData, title) {
-  if (!detailData) return ''
-  const commit = detailData.commit
+function commitSummaryHtml(run, detailData, title) {
+  const sha = run.observedSha ?? run.resultSha
+  const detailSha = detailData?.run && (detailData.run.observedSha ?? detailData.run.resultSha)
+  const commit = sha && detailSha === sha && detailData?.commit?.sha === sha
+    ? detailData.commit
+    : null
   if (!commit) {
     return `
       <div class="commit-box">
@@ -223,7 +227,7 @@ function commitSummaryHtml(detailData, title) {
     .join('')
   const more = (commit.filesTotal ?? files.length) - files.length
   const moreHtml =
-    more > 0 ? `<p class="commit-more">and ${more} more file${more === 1 ? '' : 's'}</p>` : ''
+    more > 0 ? `<p class="commit-more">and ${esc(more)} more file${more === 1 ? '' : 's'}</p>` : ''
   return `
     <div class="commit-box">
       <div class="commit-head">${esc(title)}</div>
@@ -313,26 +317,25 @@ async function loadRunDetail(runId) {
   } catch {}
 }
 
-async function openRun(runId, nextPhoneArea) {
-  const r = state.runs.find((x) => x.id === runId)
-  if (r && r.sessionId !== state.selectedSessionId) {
-    state.selectedSessionId = r.sessionId
-    state.composerError = ''
+async function loadSelectedSession(sessionId) {
+  try {
+    await loadSessionData(sessionId)
+    if (state.selectedSessionId === sessionId) render()
+  } catch {
+    // Keep the selected session visible; the stream will refresh it on reconnect.
   }
+}
+
+async function openRun(runId, nextPhoneArea) {
+  const run = state.runs.find((r) => r.id === runId)
+  if (!run) return
+  state.selectedSessionId = run.sessionId
   state.selectedRunId = runId
   state.showNewTask = false
   if (nextPhoneArea) state.phoneArea = nextPhoneArea
-  await Promise.all([
-    loadRunDetail(runId),
-    state.selectedSessionId ? loadSessionData(state.selectedSessionId) : Promise.resolve(),
-  ])
-  const detail = state.runDetailById.get(runId)
-  if (detail?.run && detail.run.sessionId !== state.selectedSessionId) {
-    state.selectedSessionId = detail.run.sessionId
-    state.composerError = ''
-    await loadSessionData(state.selectedSessionId)
-  }
   render()
+  await Promise.all([loadRunDetail(runId), loadSelectedSession(run.sessionId)])
+  if (state.selectedRunId === runId && state.selectedSessionId === run.sessionId) render()
 }
 
 function attentionItems() {
@@ -475,9 +478,6 @@ function renderSidebarNow() {
 
   for (const btn of list.querySelectorAll('[data-session-id]')) {
     btn.addEventListener('click', async () => {
-      if (btn.dataset.sessionId !== state.selectedSessionId) {
-        state.composerError = ''
-      }
       state.selectedSessionId = btn.dataset.sessionId
       state.lockRemoved = null
       state.phoneArea = 'main'
@@ -486,8 +486,9 @@ function renderSidebarNow() {
         state.selectedRunId = null
         state.pendingDecision = null
       }
-      await loadSessionData(state.selectedSessionId)
+      const sessionId = state.selectedSessionId
       render()
+      await loadSelectedSession(sessionId)
     })
   }
   for (const btn of list.querySelectorAll('[data-run-id]')) {
@@ -532,9 +533,6 @@ function renderStream() {
 
   for (const btn of tabbar.querySelectorAll('[data-tab-session]')) {
     btn.addEventListener('click', async () => {
-      if (btn.dataset.tabSession !== state.selectedSessionId) {
-        state.composerError = ''
-      }
       state.selectedSessionId = btn.dataset.tabSession
       state.lockRemoved = null
       const shown = state.runs.find((r) => r.id === state.selectedRunId)
@@ -542,8 +540,9 @@ function renderStream() {
         state.selectedRunId = null
         state.pendingDecision = null
       }
-      await loadSessionData(state.selectedSessionId)
+      const sessionId = state.selectedSessionId
       render()
+      await loadSelectedSession(sessionId)
     })
   }
   document.getElementById('tab-new-session')?.addEventListener('click', () => {
@@ -615,7 +614,7 @@ function renderStream() {
       const r = runById.get(t.runId)
       const rg = runGlyph(r)
       const fresh = state.freshDoneIds.has(`run:${r.id}`)
-      html += `<div class="act"><svg class="i"><use href="#i-link"/></svg>Task <button class="act-btn" type="button" data-open-run="${esc(r.id)}"><span class="chip" title="${esc(r.instructions)}">${glyph(rg, 14, fresh)}<span class="mono">${esc(r.id)}</span>${esc(r.instructions)}</span></button></div>`
+      html += `<div class="act"><svg class="i"><use href="#i-link"/></svg>Task <button class="act-btn" type="button" data-open-run="${esc(r.id)}"><span class="chip" title="${esc(r.instructions)}">${glyph(rg, 14, fresh)}<span class="mono">${esc(r.id)}</span><span class="act-title">${esc(r.instructions)}</span></span></button></div>`
     }
     html += renderWorkedFor(t)
   }
@@ -658,8 +657,9 @@ function renderStream() {
 function renderComposerError() {
   const errEl = document.getElementById('composer-error')
   if (!errEl) return
-  errEl.textContent = state.composerError
-  errEl.hidden = !state.composerError
+  const error = state.composerErrors.get(state.selectedSessionId) ?? ''
+  errEl.textContent = error
+  errEl.hidden = !error
 }
 
 function updateComposer(session) {
@@ -667,6 +667,8 @@ function updateComposer(session) {
   const sendBtn = document.getElementById('send-btn')
   const cancelBtn = document.getElementById('cancel-btn')
   const under = document.getElementById('composer-under')
+  const draft = state.composerDrafts.get(session?.id)?.text ?? ''
+  if (input.value !== draft) input.value = draft
 
   if (!session) {
     input.disabled = true
@@ -679,7 +681,7 @@ function updateComposer(session) {
   }
 
   input.disabled = false
-  sendBtn.disabled = Boolean(state.composerSending)
+  sendBtn.disabled = state.composerSending.has(session.id)
   input.placeholder = `Ask ${session.name} — messages sent during a turn wait their turn`
   cancelBtn.hidden = !session.busy
   under.innerHTML = `<span>This Mac</span><span class="mono" title="${esc(session.cwd)}">${esc(session.cwd)}</span>`
@@ -780,8 +782,8 @@ function lockCardHtml(session) {
 
 function bindLockHandlers(container) {
   for (const det of container.querySelectorAll('details[data-lock-check]')) {
-    det.addEventListener('toggle', () => {
-      state.lockCheckOpen.set(det.dataset.lockCheck, det.open)
+    det.querySelector('summary').addEventListener('click', () => {
+      state.lockCheckOpen.set(det.dataset.lockCheck, !det.open)
     })
   }
   for (const btn of container.querySelectorAll('[data-open-unlock]')) {
@@ -1052,7 +1054,7 @@ function renderRunDetail(container, runId) {
         <div class="who"><span class="avatar sm" style="background:var(--silver-metal);color:#15161a;box-shadow:none"><svg class="i" style="width:11px;height:11px;stroke-width:2"><use href="#i-mark"/></svg></span><b>Host</b><time>${esc(fmtTime(run.updatedAt))}</time></div>
         <div class="q">${glyph('need')}${questionHtml}</div>
         ${hostNoteHtml}
-        ${commitSummaryHtml(detailData, 'What changed')}
+        ${commitSummaryHtml(run, detailData, 'What changed')}
         ${
           frozen
             ? lockNotice
@@ -1091,7 +1093,7 @@ function renderRunDetail(container, runId) {
     ${confirmMovedLine}
     ${
       run.status === 'done'
-        ? `${commitSummaryHtml(detailData, 'Accepted commit')}<p class="empty">The branch matches the accepted result. Whether the work meets the request is judged by tests or review.</p>`
+        ? `${commitSummaryHtml(run, detailData, 'Accepted commit')}<p class="empty">The branch matches the accepted result. Whether the work meets the request is judged by tests or review.</p>`
         : ''
     }
     <div class="chips">
@@ -1513,53 +1515,65 @@ for (const b of document.querySelectorAll('.tabs button')) {
   })
 }
 
-document.getElementById('cancel-btn').addEventListener('click', async () => {
-  if (!state.selectedSessionId) return
+async function refreshAfterComposerAction() {
   try {
-    await api(`/api/sessions/${encodeURIComponent(state.selectedSessionId)}/cancel`, {
-      method: 'POST',
-    })
-    state.composerError = ''
-    renderComposerError()
     await refreshAll()
-  } catch (err) {
-    state.composerError = `Could not stop the turn: ${err?.message || 'request failed'}.`
-    renderComposerError()
+  } catch {
+    // The write already succeeded. A failed refresh must not report it as failed.
   }
+}
+
+document.getElementById('cancel-btn').addEventListener('click', async () => {
+  const sid = state.selectedSessionId
+  if (!sid) return
+  try {
+    await api(`/api/sessions/${encodeURIComponent(sid)}/cancel`, { method: 'POST' })
+  } catch (err) {
+    state.composerErrors.set(sid, `Could not stop the turn: ${err?.message || 'request failed'}.`)
+    renderComposerError()
+    return
+  }
+  state.composerErrors.delete(sid)
+  renderComposerError()
+  await refreshAfterComposerAction()
 })
 
-document.getElementById('composer-input').addEventListener('input', () => {
-  if (!state.composerError) return
-  state.composerError = ''
+document.getElementById('composer-input').addEventListener('input', (e) => {
+  const sid = state.selectedSessionId
+  if (!sid) return
+  state.composerDrafts.set(sid, { text: e.currentTarget.value })
+  state.composerErrors.delete(sid)
   renderComposerError()
 })
 
 document.getElementById('composer-form').addEventListener('submit', async (e) => {
   e.preventDefault()
-  if (state.composerSending) return
   const sid = state.selectedSessionId
-  const input = document.getElementById('composer-input')
-  const text = input.value.trim()
-  if (!sid || !text) return
-  state.composerSending = true
-  state.composerError = ''
-  updateComposer(state.sessions.find((x) => x.id === sid) ?? null)
+  if (!sid || state.composerSending.has(sid)) return
+  const draft = state.composerDrafts.get(sid)
+  const text = draft?.text.trim()
+  if (!text) return
+
+  state.composerSending.add(sid)
+  state.composerErrors.delete(sid)
+  const update = () => updateComposer(state.sessions.find((x) => x.id === state.selectedSessionId))
+  update()
   try {
     await api(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     })
-    input.value = ''
-    state.composerError = ''
-    state.composerSending = false
-    await loadSessionData(sid)
-    await refreshAll()
   } catch (err) {
-    state.composerSending = false
-    state.composerError = `Not sent: ${err?.message || 'request failed'}. Your message is still here.`
-    updateComposer(state.sessions.find((x) => x.id === state.selectedSessionId) ?? null)
+    state.composerErrors.set(sid, `Not sent: ${err?.message || 'request failed'}. Your message is still here.`)
+    return
+  } finally {
+    state.composerSending.delete(sid)
+    update()
   }
+  if (state.composerDrafts.get(sid) === draft) state.composerDrafts.delete(sid)
+  update()
+  await refreshAfterComposerAction()
 })
 
 document.getElementById('composer-input').addEventListener('keydown', (e) => {
