@@ -6,7 +6,7 @@ A local host that runs coding agents from several vendors (Codex first; Claude, 
 
 ## Starting the host
 
-Requires Node (`^22.19.0 || >=24.0.0`), `git`, and the `codex` CLI (signed in at `~/.codex/auth.json`) on `PATH`.
+The Polyclave host requires macOS, Node.js 24.x, pnpm, `git`, and the signed-in `codex` CLI on `PATH`. CI runs on macOS with Node.js 24.x only.
 
 ```sh
 pnpm install

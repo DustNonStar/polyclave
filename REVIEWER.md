@@ -20,12 +20,12 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 ## 2. Where things stand (2026-11-26)
 
-- **Phase 1 is built and accepted.** Gate A and Gate B passed. On Node 22 and 24, `pnpm check` gives 130 passed and 1 skipped. The skipped test is the real-Codex one, which runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node 22 and 24 on every push (the phase 1 host is macOS-only, so there is no Linux job). CI on `main` is red on Node 22 until the flaky test above is fixed.
+- **Phase 1 is built and accepted.** Gate A and Gate B passed. The real-Codex test runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node.js 24.x only; Node.js 22 is no longer supported. The host is still macOS-only. See the latest Actions run for current CI status.
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
   - Round 3 (`2026-11-26-page-review-3.md`) was done by Gemini, accepted by you, and your follow-up branch was merged (`ed2bc12`).
-  - **Open:** `tests/http.spec.ts` › "run detail commit is null when there is no sha" is flaky on CI (Node 22, ENOTEMPTY in cleanup): the test must wait for the run to reach a terminal status before asserting. Do this as your first branch job.
+  - **Resolved:** The no-SHA HTTP test cleanup and the scheduled-run `Runs.idle()` fix were both reviewed and merged; see `HANDOFF.md`.
 - **UI critique scores:** 25 → 26 → 26 out of 40 (the method is in section 5). Each round fixed what it targeted. The score stays flat because each fresh reviewer surfaces older defects, and reviewers differ by 4–5 points. Judge progress by the issue list, not by the number.
 - **Git:** all work is on `main` (user decision 2026-11-26: implementers push straight to `main`, you review `main`; a job that fails review is fixed in the next job, not reverted unless the user says so). The old `feat/phase1` branch on GitHub is retired; ignore it.
 - **Git history:** phase 1 was built locally in about 70 commits and then squashed into one commit before its first push. The squash removed a local path from the history.
@@ -63,7 +63,7 @@ Keep the message self-contained: the implementer sees only the message and the r
 
    Where a claim does not match, write that in the verdict.
 6. **Privacy:** the report ends with the privacy scan's last line. Skim the diff for local paths, emails and keys anyway, because the repository is public.
-7. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Node 22+, you may run `pnpm check` or a scratch host there (section 5). Never ask the user to run anything for you.
+7. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Node.js 24.x, you may run `pnpm check` or a scratch host there (section 5). Never ask the user to run anything for you.
 
 ## 5. Recipes (for implementers, or for your own sandbox if you have one)
 

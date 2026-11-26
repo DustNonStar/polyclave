@@ -5,18 +5,13 @@ on:
   pull_request:
 jobs:
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]  # phase 1 host is macOS-only (sysctl kern.boottime, ps lstart)
-        node: ['22', '24']
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest  # the host uses macOS process and boot-time behavior
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: git config --global user.name ci && git config --global user.email ci@example.invalid

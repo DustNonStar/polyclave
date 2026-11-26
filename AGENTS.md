@@ -27,7 +27,7 @@ Several agents build this project. The user relays messages between them by hand
 ## Dot's branch flow (the default since 2026-11-26)
 
 1. Dot writes the job (work list and `NEXT.md` if useful) and does it on a new branch `dot/<job>` from the latest `main`, one commit per item, with the commit messages from the work list. Dot never pushes to `main`, never force-pushes, and never edits another agent's branch.
-2. CI runs `pnpm check` on the branch (macOS, Node 22 and 24). Dot fixes red CI on the same branch before calling the job done.
+2. CI runs `pnpm check` on the branch (macOS, Node.js 24.x only). Dot fixes red CI on the same branch before calling the job done.
 3. Dot appends its own report to `HANDOFF.md` on the branch (the report format below; "Hand check" says what the merge reviewer must look at in the browser, item by item), then tells the user the branch name.
 4. The user asks the merge reviewer to review it. The merge reviewer reads the diff, checks CI, runs the page in a browser at 1440 and 375 px for every UI item, and either merges into `main` (fast-forward or rebase, keeping Dot's commits), appends a short verdict to `HANDOFF.md` and deletes the branch, or reports what must change, which Dot fixes on the same branch.
 5. The rules below for tests, dependencies, privacy and conflicts apply to Dot exactly as to any implementer. Dot cannot run the hand checks itself, so it never claims a visual result it has not seen.
