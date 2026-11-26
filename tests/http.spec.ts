@@ -632,7 +632,7 @@ describe('HTTP API and SSE', () => {
 
   it('run detail commit is null when there is no sha', async () => {
     const dir = trackTemp(tempDir('polyclave-http-nocommit-'))
-    const { work, http, runs } = await setupHttp(dir, {
+    const { work, http } = await setupHttp(dir, {
       '1': [{ exit: 1 }],
     })
 
@@ -651,11 +651,21 @@ describe('HTTP API and SSE', () => {
     })
     expect(runRes.status).toBe(201)
     const run = (await runRes.json()) as RunRow
-    await runs.idle()
-
-    const res = await fetch(`${http.url}/api/runs/${run.id}`)
-    expect(res.status).toBe(200)
-    const detail = (await res.json()) as { run: RunRow; commit: CommitSummary | null }
+    const { status, detail } = await waitFor(async () => {
+      const res = await fetch(`${http.url}/api/runs/${run.id}`)
+      if (res.status !== 200) return null
+      const detail = (await res.json()) as { run: RunRow; commit: CommitSummary | null }
+      switch (detail.run.status) {
+        case 'done':
+        case 'failed':
+        case 'needs_review':
+        case 'interrupted':
+          return { status: res.status, detail }
+        default:
+          return null
+      }
+    })
+    expect(status).toBe(200)
     expect(detail.run.observedSha).toBeNull()
     expect(detail.run.resultSha).toBeNull()
     expect(detail.commit).toBeNull()
