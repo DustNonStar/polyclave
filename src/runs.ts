@@ -101,7 +101,7 @@ export class Runs {
     bus: EventEmitter
   }
   private readonly inFlight = new Set<string>()
-  private readonly settling = new Set<Promise<RunRow>>()
+  private readonly pending = new Set<Promise<RunRow>>()
 
   constructor(d: {
     store: Store
@@ -136,14 +136,19 @@ export class Runs {
   }
 
   async idle(): Promise<void> {
-    while (this.settling.size > 0 || !this.settlingAndRunnerIdle()) {
-      await Promise.allSettled([...this.settling])
+    while (this.pending.size > 0) {
+      await Promise.allSettled([...this.pending])
       await this.d.runner.idle()
     }
   }
 
-  private settlingAndRunnerIdle(): boolean {
-    return this.settling.size === 0
+  private track(operation: Promise<RunRow>): Promise<RunRow> {
+    this.pending.add(operation)
+    void operation.then(
+      () => this.pending.delete(operation),
+      () => this.pending.delete(operation),
+    )
+    return operation
   }
 
   async create(i: {
@@ -202,7 +207,12 @@ export class Runs {
     return res
   }
 
-  async start(runId: string): Promise<RunRow> {
+  start(runId: string): Promise<RunRow> {
+    // Track the start before worktree preparation or any agent turn begins.
+    return this.track(Promise.resolve().then(() => this.startRun(runId)))
+  }
+
+  private async startRun(runId: string): Promise<RunRow> {
     if (this.inFlight.has(runId)) {
       throw new BusyError(`run ${runId} already has an operation in progress`)
     }
@@ -263,13 +273,7 @@ export class Runs {
       }
       this.emitRun(this.d.store.getRun(run.id)!)
 
-      const settleP = this.settleLoop(run.id, turnPromise)
-      this.settling.add(settleP)
-      void settleP.then(
-        () => this.settling.delete(settleP),
-        () => this.settling.delete(settleP),
-      )
-      return await settleP
+      return await this.settleLoop(run.id, turnPromise)
     } finally {
       this.inFlight.delete(runId)
     }
@@ -400,12 +404,7 @@ export class Runs {
       }
       this.emitRun(claimedRun)
 
-      const settleP = this.settleLoop(run.id, turnPromise)
-      this.settling.add(settleP)
-      void settleP.then(
-        () => this.settling.delete(settleP),
-        () => this.settling.delete(settleP),
-      )
+      this.track(this.settleLoop(run.id, turnPromise))
 
       return claimedRun
     } finally {

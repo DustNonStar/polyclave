@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { prepareCodexHome } from '../src/codex.ts'
 import { checkRunBranch, type CommitSummary } from '../src/git-effect.ts'
+import * as gitEffect from '../src/git-effect.ts'
 import { startHttpServer, type HttpServer } from '../src/http.ts'
 import { hostInstanceId } from '../src/ids.ts'
 import { startHostMcp, type HostMcp } from '../src/mcp.ts'
@@ -441,6 +442,51 @@ describe('HTTP API and SSE', () => {
     b1.release()
     await runs.idle()
     expect(store.getRun(created.id)?.status).toBe('done')
+  })
+
+  it('idle waits for a newly posted run before worktree preparation finishes', async () => {
+    const dir = trackTemp(tempDir('polyclave-http-idle-'))
+    const { work, store, http, runs } = await setupHttp(dir, {
+      '1': [
+        { commit: { file: 'a.txt', content: 'a\n', trailer: true } },
+        { push: true },
+        { submitPushed: true },
+        { reply: 'done' },
+      ],
+    })
+
+    const session = (await (
+      await fetch(`${http.url}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 's1', cwd: work }),
+      })
+    ).json()) as SessionRow
+
+    const gate = Promise.withResolvers<void>()
+    const prepareWorktree = gitEffect.prepareWorktree
+    const prepare = vi.spyOn(gitEffect, 'prepareWorktree').mockImplementationOnce(async (input) => {
+      await gate.promise
+      return prepareWorktree(input)
+    })
+
+    try {
+      const res = await fetch(`${http.url}/api/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id, requestId: 'req-idle', instructions: 'do A' }),
+      })
+      expect(res.status).toBe(201)
+      const run = (await res.json()) as RunRow
+
+      // Observe status at idle resolution, not after the fixture has caught up.
+      const statusAtIdle = runs.idle().then(() => store.getRun(run.id)?.status)
+      gate.resolve()
+      expect(await statusAtIdle).toBe('done')
+    } finally {
+      gate.resolve()
+      prepare.mockRestore()
+    }
   })
 
   it('unfreeze delivers waiting messages', async () => {
