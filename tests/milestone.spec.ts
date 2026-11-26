@@ -778,6 +778,17 @@ describe('milestone crash experiments', () => {
     const startP = s1.call('start-run', { runId: run.id })
     startP.catch(() => {})
     await bHold.waitReached()
+    await waitFor(() => {
+      const db = new DatabaseSync(join(stateDir, 'polyclave.sqlite'))
+      try {
+        const row = db
+          .prepare('SELECT agent_session_id FROM runs WHERE id = ?')
+          .get(run.id) as { agent_session_id: string | null } | undefined
+        return Boolean(row?.agent_session_id)
+      } finally {
+        db.close()
+      }
+    })
 
     const dbBefore = new DatabaseSync(join(stateDir, 'polyclave.sqlite'))
     const snapRuns = dbBefore.prepare('SELECT * FROM runs ORDER BY id').all()
