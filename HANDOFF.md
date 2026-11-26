@@ -517,29 +517,29 @@ Same day, user decision: `main` was fast-forwarded to the published branch and a
 
 ## Page review 3
 
-- 9873177 test: wait for the thread id before the token snapshot — pnpm check: 130 passed
-- bde90a7 feat: run detail includes a commit summary — pnpm check: 132 passed
-- 7a52383 feat: show the commit before accepting it — pnpm check: 132 passed
-- c734b2c fix: failed send or stop keeps the text and says why — pnpm check: 132 passed
-- cdf9558 fix: opening a run selects its session — pnpm check: 132 passed
-- 0e41aac fix: review question after unlock — pnpm check: 132 passed
-- 7595e68 fix: confirm sits away from the first tap — pnpm check: 132 passed
-- 566c1a5 fix: shorter lock card on a phone — pnpm check: 132 passed
-- 222ca0c fix: constrain host question width on phone — pnpm check: 132 passed
+- 189ebd6 test: wait for the thread id before the token snapshot — pnpm check: 130 passed
+- 6b0a4c9 feat: run detail includes a commit summary — pnpm check: 132 passed
+- 3d0f519 feat: show the commit before accepting it — pnpm check: 132 passed
+- 964f909 fix: failed send or stop keeps the text and says why — pnpm check: 132 passed
+- 0b2bd5f fix: opening a run selects its session — pnpm check: 132 passed
+- 0571866 fix: review question after unlock — pnpm check: 132 passed
+- 943aeed fix: confirm sits away from the first tap — pnpm check: 132 passed
+- 092906e fix: shorter lock card on a phone — pnpm check: 132 passed
+- 4e3cb4e fix: constrain host question width on phone — pnpm check: 132 passed
 
 Commits:
-- `9873177` `test: wait for the thread id before the token snapshot`
-- `bde90a7` `feat: run detail includes a commit summary`
-- `7a52383` `feat: show the commit before accepting it`
-- `c734b2c` `fix: failed send or stop keeps the text and says why`
-- `cdf9558` `fix: opening a run selects its session`
-- `0e41aac` `fix: review question after unlock`
-- `7595e68` `fix: confirm sits away from the first tap`
-- `566c1a5` `fix: shorter lock card on a phone`
-- `222ca0c` `fix: constrain host question width on phone`
+- `189ebd6` `test: wait for the thread id before the token snapshot`
+- `6b0a4c9` `feat: run detail includes a commit summary`
+- `3d0f519` `feat: show the commit before accepting it`
+- `964f909` `fix: failed send or stop keeps the text and says why`
+- `0b2bd5f` `fix: opening a run selects its session`
+- `0571866` `fix: review question after unlock`
+- `943aeed` `fix: confirm sits away from the first tap`
+- `092906e` `fix: shorter lock card on a phone`
+- `4e3cb4e` `fix: constrain host question width on phone`
 
 Tests:
-Final `pnpm check` on `222ca0c`:
+Final `pnpm check` on `4e3cb4e`:
 
 ```
  Test Files  11 passed | 1 skipped (12)
@@ -548,7 +548,7 @@ Final `pnpm check` on `222ca0c`:
    Duration  17.97s (transform 847ms, setup 0ms, import 1.30s, tests 72.30s, environment 1ms)
 ```
 
-`pnpm test tests/milestone.spec.ts` passed 5 consecutive runs (9/9 each) after `9873177`.
+`pnpm test tests/milestone.spec.ts` passed 5 consecutive runs (9/9 each) after `189ebd6`.
 Existing test changed: `tests/milestone.spec.ts` (`second host refused while the first lives; old token refused after restart`), polling SQLite with `waitFor` for non-null `runs.agent_session_id` between `bHold.waitReached()` and the DB snapshot (allowed by `docs/superpowers/plans/2026-11-26-page-review-3.md`, item 0). Two new tests added to `tests/http.spec.ts` (`run detail includes the commit subject and changed files` and `run detail commit is null when there is no sha`), allowed by item 1.
 
 Hand check:
@@ -556,7 +556,7 @@ Fixture under `/tmp/polyclave-hc/page-review-3/` (bare remote + long-path clone 
 
 - **Item 7 (lock card at 1440 and 375):** On a fresh desktop load (`handcheck/page-review-3/item7-desktop-locked.jpg`), `How to check on the Mac` is open by default (`detailsOpen: true`) showing `ps -g 83715` and `git -C /private/tmp/polyclave-hc/page-review-3/state/worktrees/raaea020a status` in separate `code` lines, `Working directory` reads `…/worktrees/raaea020a`, and `Can't check from here? Keep it locked; nothing runs until you remove the lock.` sits above `Remove lock…`. On a fresh 375×812 load (`handcheck/page-review-3/item7-phone-locked-needs.jpg`), the Needs you tab opens, `How to check on the Mac` is closed (`detailsOpen: false`), `Remove lock…` ends at `y = 588.4` inside the `812` px viewport with `docOverflow: 0` and `badCount: 0`. Expanding `How to check on the Mac` at 375 (`handcheck/page-review-3/item7-phone-details-open.jpg`) wraps the full `git -C …` command inside the card with `docOverflow: 0` and `badCount: 0`.
 - **Item 4 (opening a run selects its session):** With `api-server` selected, opening `web`'s run from Needs you at 1440 (`handcheck/page-review-3/item4-desktop-open-run.jpg`) switches the session tab, sidebar selection, and composer placeholder (`Ask web — …`) to `web`. At 375 (`handcheck/page-review-3/item4-phone-open-run.jpg`), opening `web`'s run from Needs you keeps the active tab on `Needs you` (`side`), updates the hidden phone stream header (`#phone-head .name`) and composer placeholder to `web`, with `docOverflow: 0` and `badCount: 0`.
-- **Items 5 and 2 (unlocked question + What changed / Accepted commit):** After unlocking `web`, at 1440 (`handcheck/page-review-3/item5-desktop-unlocked-review.jpg`) and 375 (`handcheck/page-review-3/item2-phone-what-changed.jpg`), the question reads `Review 03be558: accept it, mark it failed, or allow a retry.` with `Host note: An agent process may still be writing.` below it. Directly above `Note` and the pills, `What changed` shows subject `feat: add nested widget, binary asset and styles (raaea020a)`, 5 files (`README.md +1 −0`, `assets/icon.bin binary`, `docs/notes.md +2 −0`, middle-ellipsised `src/components…omponent-name.ts +2 −0`, `src/styles/theme.css +1 −0`), and `and 2 more files`. At 375 after fixing `.ask` grid column sizing (`222ca0c`), `#host-question` stays inside its margins with `docOverflow: 0` and `badCount: 0`. After accepting (`handcheck/page-review-3/item2-desktop-accepted-commit.jpg`), `Accepted commit` renders directly under `delivered (verified)`.
+- **Items 5 and 2 (unlocked question + What changed / Accepted commit):** After unlocking `web`, at 1440 (`handcheck/page-review-3/item5-desktop-unlocked-review.jpg`) and 375 (`handcheck/page-review-3/item2-phone-what-changed.jpg`), the question reads `Review 03be558: accept it, mark it failed, or allow a retry.` with `Host note: An agent process may still be writing.` below it. Directly above `Note` and the pills, `What changed` shows subject `feat: add nested widget, binary asset and styles (raaea020a)`, 5 files (`README.md +1 −0`, `assets/icon.bin binary`, `docs/notes.md +2 −0`, middle-ellipsised `src/components…omponent-name.ts +2 −0`, `src/styles/theme.css +1 −0`), and `and 2 more files`. At 375 after fixing `.ask` grid column sizing (`4e3cb4e`), `#host-question` stays inside its margins with `docOverflow: 0` and `badCount: 0`. After accepting (`handcheck/page-review-3/item2-desktop-accepted-commit.jpg`), `Accepted commit` renders directly under `delivered (verified)`.
 - **Item 6 (confirm row and 400 ms guard):** Fast double-tap on `Accept 03be558` plus an immediate click on `#confirm-decision` at 1440 (`handcheck/page-review-3/item6-desktop-confirm-arming.jpg`) opened the confirm row with `Back` on the left (`x = 1107`) and `Confirm accept 03be558` on the right (`x = 1178.8`) at `opacity: 0.45` (`aria-disabled="true"`), keeping the fine print (`Accept applies to 03be558 only …`) visible and sending `0` `/resolve` requests. After >400 ms at 375 (`handcheck/page-review-3/item6-phone-confirm.jpg`), `Confirm accept 03be558` is at `opacity: 1` (`aria-disabled="false"`) with `docOverflow: 0` and `badCount: 0`.
 - **Item 3 (failed send preserves text and shows error):** After `kill -9` on the host, submitting `Keep this draft when host is down` leaves the text in the composer, re-enables Send (`sendDisabled: false`), and shows orange `Not sent: Failed to fetch. Your message is still here.` below the composer box at 1440 (`handcheck/page-review-3/item3-desktop-send-failed.jpg`) and 375 (`handcheck/page-review-3/item3-phone-send-failed.jpg`). Note on 375 Stream (`item3-phone-send-failed.jpg`): the pre-existing `.act` task-chip row above the composer reports `scrollWidth 368 > clientWidth 343` (`overflow-x: visible`) because the long chip text meets the right edge; the composer and error line themselves do not overflow. After restarting the host and resubmitting (`handcheck/page-review-3/item3-desktop-send-recovered.jpg`), the message appears in the stream, the textarea clears, and the error line hides.
 
@@ -567,4 +567,8 @@ Not done: "Stop turn" failure error message (`Could not stop the turn: …`) and
 
 ## Round 3 follow-up merge (2026-11-26)
 
-The reviewer accepted Gemini's page review 3 (`9873177`..`f81a2b6`, CI green) and pushed one follow-up fix on a side branch (`review/round3-followup`): per-session composer drafts, send state and errors; stale run navigation and commit summaries ignored; long task chips constrained on phones; `role="status"` on the composer error. Claude reviewed it (code read, `pnpm check` 132 passed / 1 skipped, and in a browser: drafts stay per session, a send with the host down keeps the text and shows "Not sent: …", the send after restart clears it) and merged it into `main` as `1c2c561`, re-signed with the project account because the web commit carried a personal profile name. `scripts/privacy-scan.sh` now also rejects commit names other than the project account. The reviewer's written verdict on round 3 is not in this file.
+The reviewer accepted Gemini's page review 3 (`189ebd6`..`c6642db`, CI green) and pushed one follow-up fix on a side branch (`review/round3-followup`): per-session composer drafts, send state and errors; stale run navigation and commit summaries ignored; long task chips constrained on phones; `role="status"` on the composer error. Claude reviewed it (code read, `pnpm check` 132 passed / 1 skipped, and in a browser: drafts stay per session, a send with the host down keeps the text and shows "Not sent: …", the send after restart clears it) and merged it into `main` as `ed2bc12`, re-signed with the project account because the web commit carried a personal profile name. `scripts/privacy-scan.sh` now also rejects commit names other than the project account. The reviewer's written verdict on round 3 is not in this file.
+
+## History rewrite (2026-11-26)
+
+User decision: the repository has no AI contributors. The history of `main` was rewritten once to drop `Co-authored-by:` lines from commit messages (code unchanged) and force-pushed with a lease. Hashes of commits on `main` in this file were updated to the new ones; hashes from before the first push were never on GitHub. `scripts/privacy-scan.sh` now rejects AI attribution lines, and commit names are no longer restricted to the account login (the profile name is fine).

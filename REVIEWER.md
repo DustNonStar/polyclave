@@ -24,7 +24,7 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
   - Round 2 (`2026-11-26-page-review-2.md`) and its follow-up are done and accepted.
-  - Round 3 (`2026-11-26-page-review-3.md`) was done by Gemini, accepted by you, and your follow-up branch was merged (`1c2c561`).
+  - Round 3 (`2026-11-26-page-review-3.md`) was done by Gemini, accepted by you, and your follow-up branch was merged (`ed2bc12`).
   - **Open:** `tests/http.spec.ts` › "run detail commit is null when there is no sha" is flaky on CI (Node 22, ENOTEMPTY in cleanup): the test must wait for the run to reach a terminal status before asserting. Do this as your first branch job.
 - **UI critique scores:** 25 → 26 → 26 out of 40 (the method is in section 5). Each round fixed what it targeted. The score stays flat because each fresh reviewer surfaces older defects, and reviewers differ by 4–5 points. Judge progress by the issue list, not by the number.
 - **Git:** all work is on `main` (user decision 2026-11-26: implementers push straight to `main`, you review `main`; a job that fails review is fixed in the next job, not reverted unless the user says so). The old `feat/phase1` branch on GitHub is retired; ignore it.
