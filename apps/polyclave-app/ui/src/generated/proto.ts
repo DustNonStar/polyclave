@@ -75,7 +75,19 @@ export type PrGateDto = { id: string, run_id: string, ticket_id: string, repo_sl
 
 export type PauseStateDto = { paused: boolean, reason: string | null, updated_at: string, };
 
-export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox" | "council" | "pr_gate" | "pause";
+export type PairingTicketDto = { id: string, client_kind: ClientKind, device_label: string, expires_at: string, used_at: string | null, created_at: string, };
+
+export type PairedDeviceDto = { id: string, label: string, client_kind: ClientKind, peer_identity: string | null, last_seen_at: string | null, revoked_at: string | null, created_at: string, };
+
+export type MeshNodeStatus = "online" | "offline" | "revoked";
+
+export type MeshNodeDto = { id: string, name: string, endpoint: string, os_family: string, allowed_repos: Array<string>, allowed_actions: Array<string>, status: MeshNodeStatus, last_heartbeat_at: string | null, created_at: string, };
+
+export type NotificationChannelKind = "ntfy" | "unified_push";
+
+export type NotificationChannelDto = { id: string, kind: NotificationChannelKind, label: string, endpoint: string, topic: string, enabled: boolean, created_at: string, };
+
+export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox" | "council" | "pr_gate" | "pause" | "device" | "mesh_node" | "notification";
 
 export type SseEnvelope = { seq: number, topic: ChangeTopic, entity_id: string, payload: JsonValue, created_at: string, };
 

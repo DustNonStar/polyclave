@@ -441,3 +441,63 @@ pub struct PauseStateDto {
     pub reason: Option<String>,
     pub updated_at: String,
 }
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PairingTicketDto {
+    pub id: String,
+    pub client_kind: ClientKind,
+    pub device_label: String,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PairedDeviceDto {
+    pub id: String,
+    pub label: String,
+    pub client_kind: ClientKind,
+    pub peer_identity: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshNodeStatus {
+    Online,
+    Offline,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct MeshNodeDto {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub os_family: String,
+    pub allowed_repos: Vec<String>,
+    pub allowed_actions: Vec<String>,
+    pub status: MeshNodeStatus,
+    pub last_heartbeat_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannelKind {
+    Ntfy,
+    UnifiedPush,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct NotificationChannelDto {
+    pub id: String,
+    pub kind: NotificationChannelKind,
+    pub label: String,
+    pub endpoint: String,
+    pub topic: String,
+    pub enabled: bool,
+    pub created_at: String,
+}

@@ -16,6 +16,9 @@ pub enum ChangeTopic {
     Council,
     PrGate,
     Pause,
+    Device,
+    MeshNode,
+    Notification,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
