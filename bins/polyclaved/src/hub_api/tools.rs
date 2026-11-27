@@ -213,6 +213,16 @@ impl Hub {
                 {
                     return Err(Error::Policy);
                 }
+                // The ledger key stays the Hub's own request_id; the value on
+                // the wire is namespaced with the calling Hub session, because
+                // the receiver keys admission on (its per-repository mesh Hub
+                // session, request_id) and two Hub sessions would otherwise
+                // collide on a name like "fix-1". 200 leaves room for the prefix
+                // under the receiver's 256-byte limit.
+                let ledger_request_id = input.request_id.clone().unwrap_or_default();
+                if ledger_request_id.len() > 200 {
+                    return Err(Error::Policy);
+                }
                 let hub = self.clone();
                 let caller_repo = caller.repo.clone();
                 let caller_session = caller.session.clone();
@@ -281,7 +291,7 @@ impl Hub {
                     req.vendor = input.vendor;
                     req.model = input.model;
                     req.base_branch = input.base_branch;
-                    req.request_id = input.request_id;
+                    req.request_id = input.request_id.map(|id| format!("{caller_session}/{id}"));
                     req.run_id = input.run_id;
                     Ok((node.endpoint, req))
                 })
@@ -309,12 +319,11 @@ impl Hub {
                 };
                 let hub = self.clone();
                 let session = caller.session.clone();
-                let request_id = req.request_id.clone().unwrap_or_default();
                 let _ = blocking(move || {
                     hub.store
                         .record_remote_dispatch_outcome(
                             &session,
-                            &request_id,
+                            &ledger_request_id,
                             outcome,
                             run_id,
                             detail,

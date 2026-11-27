@@ -1997,7 +1997,9 @@ async fn mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote(
     assert_eq!(run.vendor, Vendor::Codex);
     assert_eq!(run.model.as_deref(), Some("gpt-5"));
     assert_eq!(run.base_branch, "main");
-    assert_eq!(run.request_id, "req-mesh-1");
+    // The wire request_id carries the calling Hub session, so two sessions can
+    // never collide on the same name at the receiver.
+    assert_eq!(run.request_id, "hub/req-mesh-1");
     let (source, max_runs, session_name): (String, u32, String) = remote
         .store
         .read(|db| {
@@ -2736,7 +2738,9 @@ async fn dispatch_remote_resend_after_a_crash_is_not_charged_twice_and_exhaustio
     let mut direct =
         polyclave_mesh::RemoteDispatchRequest::new(&p.repo, "worker_run", mandate_text, token);
     direct.base_branch = Some("main".into());
-    direct.request_id = Some("req-lost".into());
+    // Exactly what `dispatch_remote` puts on the wire for `req-lost`: the Hub
+    // session namespaces the request_id so two sessions cannot collide.
+    direct.request_id = Some("hub/req-lost".into());
     let (code, delivered) = post_mesh_dispatch(&p.remote, json!(direct)).await;
     assert_eq!(code, StatusCode::OK, "{delivered}");
     // The last slot was used, so the Ticket is exhausted yet still resendable.
@@ -3162,4 +3166,66 @@ async fn pairing_never_trusts_a_peer_identity_from_the_request_body() {
     let body: Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
     assert_eq!(body["device"]["peer_identity"], Value::Null);
+}
+
+/// Two Hub sessions that both use `fix-1` must get two Runs, not one shared.
+#[tokio::test]
+async fn two_hub_sessions_with_the_same_request_id_get_two_remote_runs() {
+    let p = mesh_pair().await;
+    p.primary
+        .store
+        .write(|db| {
+            db.execute_batch(
+                "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                 SELECT 'hub2','Second hub',role,repo_cwd,profile_id,provider_model,created_at
+                 FROM sessions WHERE id='hub';",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    insert_ticket(&p.primary.store, "t-a", "hub", &p.repo, 2, "active");
+    insert_ticket(&p.primary.store, "t-b", "hub2", &p.repo, 2, "active");
+
+    let first = p
+        .primary
+        .call_tool(
+            &ToolScope::new(1, "hub", "hub", &p.repo),
+            "dispatch_remote",
+            remote_worker_run("t-a", "fix-1"),
+        )
+        .await
+        .unwrap();
+    let second = p
+        .primary
+        .call_tool(
+            &ToolScope::new(2, "hub2", "hub", &p.repo),
+            "dispatch_remote",
+            remote_worker_run("t-b", "fix-1"),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first["run_id"], second["run_id"]);
+    assert_eq!(ticket_use(&p.primary.store, "t-a"), (1, "active".into()));
+    assert_eq!(ticket_use(&p.primary.store, "t-b"), (1, "active".into()));
+    let a = p
+        .primary
+        .store
+        .remote_dispatch("hub", "fix-1")
+        .unwrap()
+        .unwrap();
+    let b = p
+        .primary
+        .store
+        .remote_dispatch("hub2", "fix-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.remote_run_id.as_deref(), first["run_id"].as_str());
+    assert_eq!(b.remote_run_id.as_deref(), second["run_id"].as_str());
+
+    mesh_run_settled(&p.remote, first["run_id"].as_str().unwrap()).await;
+    mesh_run_settled(&p.remote, second["run_id"].as_str().unwrap()).await;
+    p.srv.abort();
+    p.remote.close().await;
+    p.primary.close().await;
 }
