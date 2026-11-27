@@ -1119,6 +1119,147 @@ async fn mesh_dispatch(
             Ok(hits) => Json(json!({ "ok": true, "matches": hits })).into_response(),
             Err(_) => StatusCode::FORBIDDEN.into_response(),
         },
+        "worker_run" => mesh_worker_run(hub, node.id, req).await,
+        "run_status" => mesh_run_status(hub, node.id, req).await,
         _ => StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+/// Name of the per-repository Hub session that owns Runs admitted over the mesh.
+/// Keeping them apart from the user's own Hub chat means a remote Run never wakes
+/// a local Hub turn, and `request_id` repeats map to one stable admission key.
+const MESH_HUB_SESSION_NAME: &str = "Mesh remote";
+
+fn remote_worker_result(node_id: String, run: polyclave_proto::RunDto) -> Response {
+    let status = serde_json::to_value(run.status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    Json(polyclave_mesh::RemoteWorkerResult {
+        ok: !matches!(
+            run.status,
+            polyclave_proto::RunStatus::Failed | polyclave_proto::RunStatus::Interrupted
+        ),
+        node_id,
+        run_id: run.id,
+        status,
+        result_sha: run.result_sha,
+        observed_sha: run.observed_sha,
+        detail: run.detail,
+    })
+    .into_response()
+}
+
+/// Finds or creates the mesh Hub session for one canonical repository in a single
+/// write, so concurrent admissions agree on the same idempotency scope.
+fn mesh_hub_session(store: &Store, repo_text: String) -> polyclave_store::Result<String> {
+    store.write(move |db| {
+        let existing: Option<String> = db
+            .query_row(
+                "SELECT id FROM sessions WHERE role='hub' AND repo_cwd=?1 AND name=?2
+                 ORDER BY created_at,id LIMIT 1",
+                params![repo_text, MESH_HUB_SESSION_NAME],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        let stamp = now(db)?;
+        db.execute(
+            "INSERT OR IGNORE INTO provider_profiles(id,display_name,kind,models_json,created_at)
+             VALUES('builtin-hub','Codex CLI','codex_cli','[\"default\"]',?1)",
+            [&stamp],
+        )?;
+        let id = format!("mesh-{}", uuid::Uuid::new_v4().simple());
+        db.execute(
+            "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+             VALUES(?1,?2,'hub',?3,'builtin-hub','default',?4)",
+            params![id, MESH_HUB_SESSION_NAME, repo_text, stamp],
+        )?;
+        Ok(id)
+    })
+}
+
+async fn mesh_worker_run(
+    hub: Hub,
+    node_id: String,
+    req: polyclave_mesh::RemoteDispatchRequest,
+) -> Response {
+    if hub.is_closed() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let Ok(vendor) = serde_json::from_value::<Vendor>(json!(req.vendor_or_default())) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Ok(repo) = polyclave_os::canonical_real_path(FsPath::new(&req.repo_cwd)) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Some(repo_text) = repo.to_str().map(str::to_owned) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let request_id = req
+        .request_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("mesh-{}", uuid::Uuid::new_v4().simple()));
+    let model = req.model.clone().filter(|m| !m.trim().is_empty());
+    let base_branch = req.base_branch_or_default().to_owned();
+    let admitted = run_blocking(move || {
+        let session = mesh_hub_session(&hub.store, repo_text).map_err(HttpError::from)?;
+        let request = RunRequest {
+            hub_session_id: session,
+            request_id,
+            vendor,
+            model,
+            repo_cwd: repo,
+            instructions: req.instructions,
+            base_branch,
+            ticket_id: None,
+        };
+        let (run, new) = hub.runs.accept(request).map_err(HttpError::from)?;
+        if !new {
+            return Ok(run);
+        }
+        let worker = hub
+            .runner
+            .schedule(&run.id, TurnMode::Start, run.instructions.clone())
+            .map_err(HttpError::from)?;
+        // The Worker thread finishes on its own and records its outcome in this
+        // node's ledger. No local Hub turn is woken: the primary polls `run_status`
+        // and keeps R1 verification of the result for itself.
+        drop(worker);
+        hub.runs.get(&run.id).map_err(HttpError::from)
+    })
+    .await;
+    match admitted {
+        Ok(run) => remote_worker_result(node_id, run),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn mesh_run_status(
+    hub: Hub,
+    node_id: String,
+    req: polyclave_mesh::RemoteDispatchRequest,
+) -> Response {
+    let Some(run_id) = req.run_id.clone().filter(|id| !id.trim().is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Ok(repo) = polyclave_os::canonical_real_path(FsPath::new(&req.repo_cwd)) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let found = run_blocking(move || match hub.runs.get(&run_id) {
+        Ok(run) => Ok(Some(run)),
+        Err(polyclave_store::Error::NotFound) => Ok(None),
+        Err(err) => Err(HttpError::from(err)),
+    })
+    .await;
+    match found {
+        Ok(Some(run)) if FsPath::new(&run.repo_cwd) == repo => remote_worker_result(node_id, run),
+        // A token for one repository must not read Runs of another. A missing Run
+        // gets the same answer, so a probe cannot tell the two apart.
+        Ok(_) => StatusCode::FORBIDDEN.into_response(),
+        Err(err) => err.into_response(),
     }
 }

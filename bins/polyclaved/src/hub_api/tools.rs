@@ -205,12 +205,12 @@ impl Hub {
                     let token = hub.mesh_policy().issue(scope).map_err(|_| Error::Policy)?;
                     Ok((
                         node.endpoint,
-                        polyclave_mesh::RemoteDispatchRequest {
-                            repo_cwd: caller_repo,
+                        polyclave_mesh::RemoteDispatchRequest::new(
+                            caller_repo,
                             action,
-                            instructions: input.instructions,
+                            input.instructions,
                             token,
-                        },
+                        ),
                     ))
                 })
                 .await?;
