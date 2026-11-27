@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS community_preferences (
 );
 INSERT OR IGNORE INTO community_preferences (singleton, opt_in, updated_at)
 VALUES (1, 0, '2026-11-27T00:00:00.000Z');
+
+CREATE TRIGGER IF NOT EXISTS memory_items_invalidate_emb
+AFTER UPDATE OF title, content, tags_json ON memory_items
+BEGIN
+  UPDATE memory_items SET embedding_blob = NULL WHERE rowid = new.rowid;
+END;
 ";
 
 #[derive(Clone, Debug)]
@@ -140,7 +146,40 @@ fn read_skill(db: &Connection, id: &str) -> Result<LocalSkillDto> {
     .ok_or(Error::NotFound)
 }
 
-fn encode_f32_le(vec: &[f32]) -> Vec<u8> {
+/// Deterministic 128-dim unit-normalized FNV-1a hashed character-trigram embedding.
+pub fn local_embedding(text: &str) -> Vec<f32> {
+    let mut vec = vec![0.0f32; 128];
+    let bytes = text.to_lowercase().into_bytes();
+    if bytes.is_empty() {
+        return vec;
+    }
+    for win in bytes.windows(3.min(bytes.len())) {
+        let mut h = 2166136261u32;
+        for &b in win {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(16777619);
+        }
+        vec[(h as usize) % 128] += 1.0;
+    }
+    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for v in &mut vec {
+            *v /= norm;
+        }
+    }
+    vec
+}
+
+pub(crate) fn memory_embedding_blob(title: &str, content: &str, tags: &[String]) -> Vec<u8> {
+    let combined = if tags.is_empty() {
+        format!("{title}\n{content}")
+    } else {
+        format!("{title}\n{content}\n{}", tags.join(" "))
+    };
+    encode_f32_le(&local_embedding(&combined))
+}
+
+pub(crate) fn encode_f32_le(vec: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vec.len() * 4);
     for &f in vec {
         out.extend_from_slice(&f.to_le_bytes());
@@ -148,7 +187,7 @@ fn encode_f32_le(vec: &[f32]) -> Vec<u8> {
     out
 }
 
-fn decode_f32_le(bytes: &[u8]) -> Vec<f32> {
+pub(crate) fn decode_f32_le(bytes: &[u8]) -> Vec<f32> {
     bytes
         .as_chunks::<4>()
         .0
@@ -158,7 +197,7 @@ fn decode_f32_le(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }

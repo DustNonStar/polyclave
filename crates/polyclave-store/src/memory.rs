@@ -1,7 +1,9 @@
+use crate::stage4::{cosine, decode_f32_le, local_embedding, memory_embedding_blob};
 use crate::{decode_enum, enum_value, new_id, now, parse_json, Error, Result, Store};
 use polyclave_proto::{ChangeTopic, MemoryItemDto, MemoryKind, MemoryScope};
 use rusqlite::{named_params, params, Connection};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct CandidateMemory {
@@ -66,9 +68,10 @@ impl Store {
                [turn_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let Some((repo,run,author))=source else {return Err(Error::ConflictError)};
             let id = new_id('m');
+            let blob = memory_embedding_blob(&input.title, &input.content, &input.tags);
             db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,tags_json,status,created_by,
-                 source_run_id,source_turn_id,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate',?7,?8,?9,?10,?10)",
-                 params![id,repo,enum_value(input.kind)?,input.title,input.content,serde_json::to_string(&input.tags)?,author,run,turn_id,now(db)?])?;
+                 source_run_id,source_turn_id,embedding_blob,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate',?7,?8,?9,?10,?11,?11)",
+                 params![id,repo,enum_value(input.kind)?,input.title,input.content,serde_json::to_string(&input.tags)?,author,run,turn_id,blob,now(db)?])?;
             let record = db.query_row(&format!("SELECT {COLUMNS} FROM memory_items m WHERE m.id=?1"),[&id],read_memory)?;
             Store::append_change(db,ChangeTopic::Memory,&id,&serde_json::to_value(&record)?)?;
             Ok(record)
@@ -84,9 +87,10 @@ impl Store {
         sha: Option<&str>,
     ) -> Result<()> {
         let id = new_id('m');
+        let blob = memory_embedding_blob(title, title, &[]);
         db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,evidence_json,status,created_by,
-           source_run_id,created_at,updated_at) VALUES(?1,'run',?2,'receipt',?3,?3,?4,'verified','host',?5,?6,?6)",
-           params![id,repo,title,json!({"run_id":run,"sha":sha}).to_string(),run,now(db)?])?;
+           source_run_id,embedding_blob,created_at,updated_at) VALUES(?1,'run',?2,'receipt',?3,?3,?4,'verified','host',?5,?6,?7,?7)",
+           params![id,repo,title,json!({"run_id":run,"sha":sha}).to_string(),run,blob,now(db)?])?;
         let record = db.query_row(
             &format!("SELECT {COLUMNS} FROM memory_items m WHERE m.id=?1"),
             [&id],
@@ -101,13 +105,13 @@ impl Store {
             .query
             .map(|q| q.replace('\0', " "))
             .unwrap_or_default();
-        let query = clean.trim();
-        if query.len() > 2048 {
+        let raw_query = clean.trim().to_owned();
+        if raw_query.len() > 2048 {
             return Err(Error::Invalid("memory query too long"));
         }
-        let query = (!query.is_empty())
+        let query = (!raw_query.is_empty())
             .then(|| {
-                query
+                raw_query
                     .split_whitespace()
                     .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
                     .collect::<Vec<_>>()
@@ -118,16 +122,64 @@ impl Store {
         let scope = filter.scope.map(enum_value).transpose()?;
         let limit = filter.limit.unwrap_or(20).clamp(1, 100) as u32;
         self.read(|db|{
-            let joins=if query.is_some() {"JOIN memory_items_fts ON memory_items_fts.rowid=m.rowid"} else {""};
-            let pred=if query.is_some() {"AND memory_items_fts MATCH :query"} else {"AND :query IS NULL"};
-            let mut stmt=db.prepare(&format!("SELECT {COLUMNS} FROM memory_items m {joins}
+            let Some(fts_query) = query.as_deref() else {
+                let mut stmt=db.prepare(&format!("SELECT {COLUMNS} FROM memory_items m
+                      WHERE m.status='verified' AND (:scope IS NULL OR m.scope=:scope)
+                      AND (:repo IS NULL OR m.repo_cwd=:repo OR m.scope='global')
+                      AND (:kinds='[]' OR m.kind IN (SELECT value FROM json_each(:kinds)))
+                      ORDER BY m.updated_at DESC,m.id LIMIT :limit"))?;
+                let result=stmt.query_map(named_params!{":scope":scope,":repo":filter.repo,":kinds":kinds,":limit":limit},read_memory)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                return Ok(result);
+            };
+
+            let fetch_limit = (limit * 2).min(200);
+            let mut stmt=db.prepare(&format!("SELECT {COLUMNS} FROM memory_items m JOIN memory_items_fts ON memory_items_fts.rowid=m.rowid
                   WHERE m.status='verified' AND (:scope IS NULL OR m.scope=:scope)
                   AND (:repo IS NULL OR m.repo_cwd=:repo OR m.scope='global')
-                  AND (:kinds='[]' OR m.kind IN (SELECT value FROM json_each(:kinds))) {pred}
+                  AND (:kinds='[]' OR m.kind IN (SELECT value FROM json_each(:kinds))) AND memory_items_fts MATCH :query
                   ORDER BY m.updated_at DESC,m.id LIMIT :limit"))?;
-            let result=stmt.query_map(named_params!{":scope":scope,":repo":filter.repo,":kinds":kinds,":query":query,":limit":limit},read_memory)?
+            let fts_results=stmt.query_map(named_params!{":scope":scope,":repo":filter.repo,":kinds":kinds,":query":fts_query,":limit":fetch_limit},read_memory)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(result)
+
+            let q_vec = local_embedding(&raw_query);
+            let mut sem_stmt = db.prepare(&format!("SELECT {COLUMNS}, m.embedding_blob FROM memory_items m
+                  WHERE m.status='verified' AND m.embedding_blob IS NOT NULL
+                  AND (:scope IS NULL OR m.scope=:scope)
+                  AND (:repo IS NULL OR m.repo_cwd=:repo OR m.scope='global')
+                  AND (:kinds='[]' OR m.kind IN (SELECT value FROM json_each(:kinds)))"))?;
+            let mut sem_scored: Vec<(MemoryItemDto, f32)> = sem_stmt
+                .query_map(named_params!{":scope":scope,":repo":filter.repo,":kinds":kinds}, |r| {
+                    let dto = read_memory(r)?;
+                    let blob: Vec<u8> = r.get(15)?;
+                    Ok((dto, blob))
+                })?
+                .filter_map(|res| {
+                    let (dto, blob) = res.ok()?;
+                    let score = cosine(&q_vec, &decode_f32_le(&blob));
+                    (score >= 0.45).then_some((dto, score))
+                })
+                .collect();
+            sem_scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            sem_scored.truncate(fetch_limit as usize);
+
+            let mut fused: HashMap<String, (MemoryItemDto, f32)> = HashMap::new();
+            for (rank, item) in fts_results.into_iter().enumerate() {
+                let s = 1.0 / (60.0 + rank as f32);
+                fused.entry(item.id.clone()).and_modify(|e| e.1 += s).or_insert((item, s));
+            }
+            for (rank, (item, _)) in sem_scored.into_iter().enumerate() {
+                let s = 0.75 / (60.0 + rank as f32);
+                fused.entry(item.id.clone()).and_modify(|e| e.1 += s).or_insert((item, s));
+            }
+            let mut merged: Vec<(MemoryItemDto, f32)> = fused.into_values().collect();
+            merged.sort_by(|a, b| {
+                b.1.total_cmp(&a.1)
+                    .then_with(|| b.0.updated_at.cmp(&a.0.updated_at))
+                    .then_with(|| a.0.id.cmp(&b.0.id))
+            });
+            merged.truncate(limit as usize);
+            Ok(merged.into_iter().map(|(dto, _)| dto).collect())
         })
     }
 }
@@ -173,9 +225,10 @@ impl Store {
                 params![message,session],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let Some((repo,turn))=row else{return Err(Error::NotFound);};
             let id=new_id('m');
+            let blob = memory_embedding_blob(&title, &content, &[]);
             db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,evidence_json,status,created_by,
-                source_turn_id,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?8)",
-                params![id,repo,enum_value(kind)?,title,content,json!({"source_msg_id":message,"requires_user_confirmation":true}).to_string(),turn,now(db)?])?;
+                source_turn_id,embedding_blob,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?9,?9)",
+                params![id,repo,enum_value(kind)?,title,content,json!({"source_msg_id":message,"requires_user_confirmation":true}).to_string(),turn,blob,now(db)?])?;
             publish_memory(db,&id)
         })
     }
@@ -199,10 +252,11 @@ impl Store {
                 return Err(Error::ConflictError);
             }
             let stamp=now(db)?;
+            let blob = memory_embedding_blob(&existing.title, &existing.content, &existing.tags);
             match action {
                 MemoryAction::Commit=>{
                     if existing.status!=polyclave_proto::MemoryStatus::Candidate{return Err(Error::ConflictError);}
-                    db.execute("UPDATE memory_items SET status='verified',updated_at=?2 WHERE id=?1",params![id,stamp])?;
+                    db.execute("UPDATE memory_items SET status='verified',embedding_blob=COALESCE(embedding_blob,?3),updated_at=?2 WHERE id=?1",params![id,stamp,blob])?;
                 },
                 MemoryAction::Supersede(prior)=>{
                     if id==prior || existing.status!=polyclave_proto::MemoryStatus::Candidate {return Err(Error::ConflictError);}
@@ -214,7 +268,7 @@ impl Store {
                     }
                     db.execute("UPDATE memory_items SET status='superseded',updated_at=?2 WHERE id=?1",params![prior,stamp])?;
                     publish_memory(db,&prior)?;
-                    db.execute("UPDATE memory_items SET status='verified',supersedes_id=?2,updated_at=?3 WHERE id=?1",params![id,prior,stamp])?;
+                    db.execute("UPDATE memory_items SET status='verified',supersedes_id=?2,embedding_blob=COALESCE(embedding_blob,?4),updated_at=?3 WHERE id=?1",params![id,prior,stamp,blob])?;
                 },
                 MemoryAction::Archive=>{
                     if matches!(existing.status,polyclave_proto::MemoryStatus::Archived|polyclave_proto::MemoryStatus::Superseded){
@@ -268,9 +322,10 @@ impl Store {
                 AND resolution IN ('fail','allow_retry')",params![run,repo],|r|r.get(0)).optional()?;
             let Some(decision)=decision else{return Err(Error::NotFound);};
             let id=new_id('m');
+            let blob = memory_embedding_blob(&title, &content, &[]);
             db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,evidence_json,status,created_by,
-                source_run_id,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?8)",
-                params![id,repo,enum_value(kind)?,title,content,json!({"run_id":run,"resolution":decision,"requires_user_confirmation":true}).to_string(),run,now(db)?])?;
+                source_run_id,embedding_blob,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?9,?9)",
+                params![id,repo,enum_value(kind)?,title,content,json!({"run_id":run,"resolution":decision,"requires_user_confirmation":true}).to_string(),run,blob,now(db)?])?;
             publish_memory(db,&id)
         })
     }

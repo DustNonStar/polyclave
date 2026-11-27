@@ -12,28 +12,9 @@ use polyclave_store::{MemoryFilter, Store};
 use serde_json::json;
 use std::path::Path;
 
-/// Deterministic 64-dim unit-normalized hashed trigram embedding (zero external APIs).
+/// Deterministic 128-dim unit-normalized hashed trigram embedding (zero external APIs).
 pub fn local_embedding(text: &str) -> Vec<f32> {
-    let mut vec = vec![0.0f32; 64];
-    let bytes = text.to_lowercase().into_bytes();
-    if bytes.is_empty() {
-        return vec;
-    }
-    for win in bytes.windows(3.min(bytes.len())) {
-        let mut h = 2166136261u32;
-        for &b in win {
-            h ^= u32::from(b);
-            h = h.wrapping_mul(16777619);
-        }
-        vec[(h as usize) % 64] += 1.0;
-    }
-    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for v in &mut vec {
-            *v /= norm;
-        }
-    }
-    vec
+    polyclave_store::local_embedding(text)
 }
 
 /// Distills versioned evolution suggestions from local SQLite history without
@@ -92,7 +73,7 @@ pub fn distill_local_suggestions(store: &Store) -> Result<Vec<EvolutionSuggestio
                     ),
                     payload_json: json!({
                         "verified_memories": verified_memories,
-                        "dim": 64
+                        "dim": 128
                     }),
                     supersedes_id: None,
                 })

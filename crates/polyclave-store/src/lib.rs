@@ -11,6 +11,7 @@ pub use memory::{CandidateMemory, Curator, MemoryAction, MemoryFilter};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 pub use stage2::{CouncilCheckpoint, NewCouncil, NewPrGate, NewPrReview, NewProposal, ScmCursor};
+pub use stage4::local_embedding;
 pub use writer::{Changes, Store};
 
 #[derive(Debug, thiserror::Error)]

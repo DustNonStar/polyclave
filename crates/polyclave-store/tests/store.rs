@@ -813,3 +813,57 @@ fn stage4_cua_mutex_hybrid_memory_evolution_and_skills_work() {
     assert!(!store.community_opt_in().unwrap());
     assert!(store.set_community_opt_in(true).unwrap());
 }
+
+#[test]
+fn memory_auto_embeds_and_fuses_fts_with_semantic_search() {
+    let (_dir, store) = fixture();
+    store
+        .write(|db| {
+            worker(db, 0)?;
+            Store::record_run_memory(db, "run", "repo", "Use rustls without openssl", None)
+        })
+        .unwrap();
+
+    // Auto-populated embedding_blob is present immediately on verified memory.
+    let has_blob: bool = store
+        .read(|db| {
+            db.query_row(
+                "SELECT embedding_blob IS NOT NULL FROM memory_items WHERE repo_cwd='repo' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert!(has_blob);
+
+    // Exact FTS match works.
+    let fts_hits = store
+        .find_memory(MemoryFilter {
+            repo: Some("repo"),
+            query: Some("rustls"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(fts_hits.len(), 1);
+
+    // Morphological / trigram-similar query that FTS5 alone misses still matches via hybrid fusion.
+    let sem_hits = store
+        .find_memory(MemoryFilter {
+            repo: Some("repo"),
+            query: Some("rustlss openssll"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(sem_hits.len(), 1);
+
+    // Unrelated query still returns empty.
+    let miss = store
+        .find_memory(MemoryFilter {
+            repo: Some("repo"),
+            query: Some("zzzz_qqqq_xxxx"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(miss.is_empty());
+}

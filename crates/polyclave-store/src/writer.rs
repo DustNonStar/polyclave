@@ -108,7 +108,17 @@ impl Store {
             // Stage 4: additive and idempotent.
             migration.execute_batch(crate::stage4::SCHEMA)?;
             migration.pragma_update(None, "user_version", 8)?;
-        } else if version != 8 {
+        }
+        if version <= 8 {
+            migration.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS memory_items_invalidate_emb
+                 AFTER UPDATE OF title, content, tags_json ON memory_items
+                 BEGIN
+                   UPDATE memory_items SET embedding_blob = NULL WHERE rowid = new.rowid;
+                 END;",
+            )?;
+            migration.pragma_update(None, "user_version", 9)?;
+        } else if version != 9 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;
