@@ -7,6 +7,7 @@ pub mod evolution;
 pub mod notify;
 pub mod pr_gate;
 pub mod provider;
+pub mod publish_origin;
 pub mod repo_tools;
 pub mod scm;
 pub mod scm_observer;

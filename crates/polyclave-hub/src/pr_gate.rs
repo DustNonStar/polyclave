@@ -1,6 +1,7 @@
 //! PR gate orchestration: preflight, 3-layer scope check, disposable
 //! heterogeneous review, crash-safe auto-merge, and global Pause revocation.
 use crate::{
+    publish_origin::{resolve_publish_target, PublishTarget},
     scm::{BoxFuture, OpenPrRequest, ReviewEvent, ScmClient, ScmError, SubmitReviewRequest},
     Error, Result,
 };
@@ -118,8 +119,9 @@ pub trait WorkerReviseExecutor: Send + Sync {
 
 /// Publishes an R1-verified commit to the remote PR branch.
 pub trait MirrorPusher: Send + Sync {
-    /// Pushes exactly `sha` from the host mirror to `refs/heads/<branch>` on the
-    /// remote, then confirms the remote branch tip equals `sha`.
+    /// Pushes exactly `sha` from the host mirror to `refs/heads/<branch>` of
+    /// the validated GitHub repository `target`, then confirms the remote
+    /// branch tip equals `sha`.
     ///
     /// `expected_remote_tip` is the lease: `Some(tip)` requires the remote branch
     /// to be at `tip` before the push (a revise round leases on the SHA the gate
@@ -127,6 +129,7 @@ pub trait MirrorPusher: Send + Sync {
     /// the push, or on the branch being absent.
     fn push_verified_sha<'a>(
         &'a self,
+        target: &'a PublishTarget,
         mirror_path: &'a Path,
         sha: &'a str,
         branch: &'a str,
@@ -134,15 +137,46 @@ pub trait MirrorPusher: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 }
 
-#[derive(Clone, Default)]
+const GITHUB_BASE_URL: &str = "https://github.com/";
+
+/// Pushes from the host mirror to `https://github.com/<repo_slug>.git`, given
+/// to git as an explicit URL. The mirror has no remote, and none is added.
+#[derive(Clone)]
 pub struct GitMirrorPusher {
-    pub remote: String,
+    base_url: String,
+}
+
+impl Default for GitMirrorPusher {
+    fn default() -> Self {
+        Self {
+            base_url: GITHUB_BASE_URL.to_owned(),
+        }
+    }
 }
 
 impl GitMirrorPusher {
-    pub fn new(remote: impl Into<String>) -> Self {
-        Self {
-            remote: remote.into(),
+    /// Maps `<repo_slug>` to `<base>/<repo_slug>.git` on the local disk, so tests
+    /// can stand a bare repository in for GitHub without the network.
+    #[cfg(test)]
+    pub(crate) fn with_local_base(base: &Path) -> Self {
+        let mut base_url = base.to_string_lossy().replace('\\', "/");
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
+        Self { base_url }
+    }
+
+    /// The URL git is given for `target`.
+    pub fn remote_url(&self, target: &PublishTarget) -> String {
+        format!("{}{}.git", self.base_url, target.repo_slug())
+    }
+
+    /// Transports git may use: HTTPS for GitHub, the local disk only in tests.
+    fn allowed_protocol(&self) -> &'static str {
+        if self.base_url.starts_with("https://") {
+            "https"
+        } else {
+            "file"
         }
     }
 }
@@ -172,10 +206,23 @@ fn clean_git(git: &Path, mirror: &Path) -> Command {
     cmd
 }
 
+/// A git command that talks to the publish URL: only `protocol` is allowed.
+fn remote_git(git: &Path, mirror: &Path, protocol: &str) -> Command {
+    let mut cmd = clean_git(git, mirror);
+    cmd.env("GIT_ALLOW_PROTOCOL", protocol);
+    cmd
+}
+
 /// Reads the remote tip of `dest` (`None` when the branch is absent).
-fn remote_tip(git: &Path, mirror: &Path, remote: &str, dest: &str) -> Result<Option<String>> {
-    let out = clean_git(git, mirror)
-        .args(["ls-remote", "--refs", remote, dest])
+fn remote_tip(
+    git: &Path,
+    mirror: &Path,
+    protocol: &str,
+    url: &str,
+    dest: &str,
+) -> Result<Option<String>> {
+    let out = remote_git(git, mirror, protocol)
+        .args(["ls-remote", "--refs", url, dest])
         .output()
         .map_err(|_| Error::Transport)?;
     if !out.status.success() {
@@ -199,6 +246,7 @@ fn remote_tip(git: &Path, mirror: &Path, remote: &str, dest: &str) -> Result<Opt
 impl MirrorPusher for GitMirrorPusher {
     fn push_verified_sha<'a>(
         &'a self,
+        target: &'a PublishTarget,
         mirror_path: &'a Path,
         sha: &'a str,
         branch: &'a str,
@@ -209,11 +257,8 @@ impl MirrorPusher for GitMirrorPusher {
                 return Err(Error::Policy);
             }
             let git = resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?;
-            let remote = if self.remote.is_empty() {
-                "origin".to_owned()
-            } else {
-                self.remote.clone()
-            };
+            let url = self.remote_url(target);
+            let protocol = self.allowed_protocol();
             let dest = format!("refs/heads/{branch}");
             let mirror = mirror_path.to_path_buf();
             let sha = sha.to_owned();
@@ -234,7 +279,7 @@ impl MirrorPusher for GitMirrorPusher {
                 if !commit.status.success() {
                     return Err(Error::Policy);
                 }
-                let observed = remote_tip(&git, &mirror, &remote, &dest)?;
+                let observed = remote_tip(&git, &mirror, protocol, &url, &dest)?;
                 if let Some(expected) = &expected {
                     if observed.as_deref() != Some(expected.as_str())
                         && observed.as_deref() != Some(sha.as_str())
@@ -247,12 +292,12 @@ impl MirrorPusher for GitMirrorPusher {
                         "--force-with-lease={dest}:{}",
                         observed.as_deref().unwrap_or("")
                     );
-                    let out = clean_git(&git, &mirror)
+                    let out = remote_git(&git, &mirror, protocol)
                         .args([
                             "push",
                             "--porcelain",
                             &lease,
-                            &remote,
+                            &url,
                             &format!("{sha}:{dest}"),
                         ])
                         .output()
@@ -262,7 +307,9 @@ impl MirrorPusher for GitMirrorPusher {
                     }
                 }
                 // Confirm what the remote now serves is exactly the verified SHA.
-                if remote_tip(&git, &mirror, &remote, &dest)?.as_deref() != Some(sha.as_str()) {
+                if remote_tip(&git, &mirror, protocol, &url, &dest)?.as_deref()
+                    != Some(sha.as_str())
+                {
                     return Err(Error::Policy);
                 }
                 Ok(())
@@ -444,6 +491,29 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         })
         .map_err(map_store_err)?;
 
+    // Publish target: only the origin snapshotted at admission, and only when
+    // it names exactly this GitHub repository. Checked before anything is
+    // pushed or a PR is opened.
+    let snapshot = deps
+        .store
+        .run_origin_snapshot(&req.run_id)
+        .map_err(map_store_err)?;
+    let target = match resolve_publish_target(snapshot.as_ref(), &req.repo_slug) {
+        Ok(target) => target,
+        Err(rejection) => {
+            return escalate(
+                deps,
+                &gate.id,
+                req.hub_session_id.as_deref(),
+                "publish_origin",
+                &format!(
+                    "cannot publish to {}: {rejection}; nothing was pushed",
+                    req.repo_slug
+                ),
+            );
+        }
+    };
+
     // Reviewer preflight: never push or open a PR that no reviewer can review.
     let unavailable: Vec<String> = selected_reviewers
         .iter()
@@ -571,7 +641,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
     // Push exactly the R1-verified SHA from the authoritative mirror, then
     // open/find the PR. The pusher confirms the remote tip equals that SHA.
     deps.pusher
-        .push_verified_sha(&req.mirror_path, &current_head, &req.branch, None)
+        .push_verified_sha(&target, &req.mirror_path, &current_head, &req.branch, None)
         .await?;
 
     let pr = deps
@@ -760,6 +830,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
 
         deps.pusher
             .push_verified_sha(
+                &target,
                 &req.mirror_path,
                 &new_head,
                 &req.branch,
@@ -1091,7 +1162,9 @@ mod tests {
                      INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,runs_used,status,created_at,updated_at)
                      VALUES('t1','hub','/tmp/repo','t1','{}','explicit_user',4,1,'active','now','now');
                      INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,status,created_at,updated_at)
-                     VALUES('run1','t1','hub','w1','req1','/tmp/repo','codex','gpt-5.3-codex','do it','origin','main','base','done','now','now');",
+                     VALUES('run1','t1','hub','w1','req1','/tmp/repo','codex','gpt-5.3-codex','do it','origin','main','base','done','now','now');
+                     INSERT INTO run_publish_origins(run_id,urls_json,push_urls_json,captured_at)
+                     VALUES('run1','[\"https://github.com/org/repo.git\"]','[]','now');",
                 )?;
                 Ok(())
             })
@@ -1114,6 +1187,7 @@ mod tests {
     impl MirrorPusher for MockPusher {
         fn push_verified_sha<'a>(
             &'a self,
+            _target: &'a PublishTarget,
             _mirror_path: &'a Path,
             sha: &'a str,
             branch: &'a str,
@@ -1389,17 +1463,20 @@ mod tests {
     #[tokio::test]
     async fn git_pusher_pushes_exact_sha_with_lease_and_confirms_remote_tip() {
         let fix = setup_git_and_store();
-        let remote = fix._dir.path().join("remote.git");
+        let github = fix._dir.path().join("github");
+        let remote = github.join("org/repo.git");
+        std::fs::create_dir_all(&remote).unwrap();
         git(
             fix._dir.path(),
             &["init", "--bare", "--template=", remote.to_str().unwrap()],
         );
-        let pusher = GitMirrorPusher::new(remote.to_str().unwrap());
+        let pusher = GitMirrorPusher::with_local_base(&github);
+        let target = PublishTarget::for_tests("org/repo");
         let tip = |branch: &str| git(&remote, &["rev-parse", &format!("refs/heads/{branch}")]);
 
         // First push: the branch is absent, so the lease is "must not exist".
         pusher
-            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "feat/x", None)
+            .push_verified_sha(&target, &fix.mirror, &fix.good_head_sha, "feat/x", None)
             .await
             .unwrap();
         assert_eq!(tip("feat/x"), fix.good_head_sha);
@@ -1409,7 +1486,7 @@ mod tests {
 
         // Re-pushing the same SHA is a no-op that still confirms the tip.
         pusher
-            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "feat/x", None)
+            .push_verified_sha(&target, &fix.mirror, &fix.good_head_sha, "feat/x", None)
             .await
             .unwrap();
 
@@ -1417,6 +1494,7 @@ mod tests {
         // and leaves the remote untouched.
         let stale = pusher
             .push_verified_sha(
+                &target,
                 &fix.mirror,
                 &fix.bad_head_sha_2,
                 "feat/x",
@@ -1429,6 +1507,7 @@ mod tests {
         // With the right lease a non-fast-forward revise head is published exactly.
         pusher
             .push_verified_sha(
+                &target,
                 &fix.mirror,
                 &fix.bad_head_sha_2,
                 "feat/x",
@@ -1440,15 +1519,21 @@ mod tests {
 
         // Abbreviated SHAs, unknown commits and bad branch names are refused.
         assert!(pusher
-            .push_verified_sha(&fix.mirror, &fix.good_head_sha[..12], "feat/y", None)
+            .push_verified_sha(
+                &target,
+                &fix.mirror,
+                &fix.good_head_sha[..12],
+                "feat/y",
+                None
+            )
             .await
             .is_err());
         assert!(pusher
-            .push_verified_sha(&fix.mirror, &"a".repeat(40), "feat/y", None)
+            .push_verified_sha(&target, &fix.mirror, &"a".repeat(40), "feat/y", None)
             .await
             .is_err());
         assert!(pusher
-            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "bad..name", None)
+            .push_verified_sha(&target, &fix.mirror, &fix.good_head_sha, "bad..name", None)
             .await
             .is_err());
         assert!(git(&remote, &["for-each-ref", "--format=%(refname)"]) == "refs/heads/feat/x");
@@ -1899,6 +1984,188 @@ mod tests {
         assert!(pusher.pushed.lock().unwrap().is_empty());
         assert!(gh.submitted_reviews.lock().unwrap().is_empty());
         assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    fn replace_origin_snapshot(store: &Store, snapshot: Option<polyclave_store::OriginSnapshot>) {
+        store
+            .write(move |db| {
+                db.execute("DELETE FROM run_publish_origins WHERE run_id='run1'", [])?;
+                if let Some(snapshot) = snapshot {
+                    polyclave_store::insert_run_origin_snapshot(db, "run1", &snapshot)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn origin(urls: &[&str], push_urls: &[&str]) -> Option<polyclave_store::OriginSnapshot> {
+        Some(polyclave_store::OriginSnapshot {
+            urls: urls.iter().map(|s| (*s).to_owned()).collect(),
+            push_urls: push_urls.iter().map(|s| (*s).to_owned()).collect(),
+        })
+    }
+
+    #[tokio::test]
+    async fn unusable_origin_snapshot_escalates_before_any_push_or_pr() {
+        // `\u{40}` is '@': scripts/privacy-scan.sh reads a user, an at sign and a host as an email address.
+        let cases = [
+            ("no snapshot", None),
+            ("missing origin", origin(&[], &[])),
+            (
+                "non-GitHub host",
+                origin(&["https://gitlab.com/org/repo.git"], &[]),
+            ),
+            (
+                "slug mismatch",
+                origin(&["git\u{40}github.com:org/other.git"], &[]),
+            ),
+            (
+                "separate pushurl",
+                origin(
+                    &["https://github.com/org/repo.git"],
+                    &["https://github.com/org/repo.git"],
+                ),
+            ),
+            (
+                "several URLs",
+                origin(
+                    &[
+                        "https://github.com/org/repo.git",
+                        "git\u{40}github.com:org/repo.git",
+                    ],
+                    &[],
+                ),
+            ),
+        ];
+        for (label, snapshot) in cases {
+            let fix = setup_git_and_store();
+            replace_origin_snapshot(&fix.store, snapshot);
+            let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+            let scm = Arc::new(
+                GitHubScmClient::new(
+                    GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                        .with_base_urls(&base_url, format!("{base_url}/graphql")),
+                )
+                .unwrap(),
+            );
+            let reviewer = Arc::new(PartlyAvailableReviewer {
+                available: vec![Vendor::Claude],
+                checked: Mutex::new(Vec::new()),
+                reviews: AtomicUsize::new(0),
+            });
+            let pusher = Arc::new(MockPusher {
+                pushed: Mutex::new(Vec::new()),
+            });
+            let deps = PrGateDeps {
+                store: fix.store.clone(),
+                scm,
+                reviewer: reviewer.clone(),
+                worker_revise: None,
+                pusher: pusher.clone(),
+            };
+            let mut request = range_request(&fix, &fix.good_head_sha, "feat/origin");
+            request.hub_session_id = Some("hub".into());
+            let gate = run_pr_gate(&deps, request).await.unwrap();
+
+            assert_eq!(gate.status, PrGateStatus::Escalated, "{label}");
+            assert_eq!(gate.pr_number, None, "{label}");
+            assert!(pusher.pushed.lock().unwrap().is_empty(), "{label}");
+            assert!(reviewer.checked.lock().unwrap().is_empty(), "{label}");
+            assert!(gh.submitted_reviews.lock().unwrap().is_empty(), "{label}");
+            assert!(
+                gh.enable_auto_merge_calls.lock().unwrap().is_empty(),
+                "{label}"
+            );
+            let notices = fix.store.hub_messages("hub").unwrap();
+            let notice = notices
+                .iter()
+                .find(|m| m.text.contains(&gate.id))
+                .unwrap_or_else(|| panic!("{label}: no Hub notice"));
+            assert!(
+                notice.text.contains("cannot publish to org/repo")
+                    && notice.text.contains("nothing was pushed"),
+                "{label}: {}",
+                notice.text
+            );
+            assert!(!notice.text.contains("://"), "{label}: {}", notice.text);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_publishes_to_the_admission_origin_even_after_origin_changes() {
+        let fix = setup_git_and_store();
+        let work = fix._dir.path().join("work");
+        git(
+            &work,
+            &["remote", "add", "origin", "https://github.com/Org/Repo.git"],
+        );
+        let state = fix._dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mirrors = polyclave_core::mirror::MirrorManager::new(&state).unwrap();
+        replace_origin_snapshot(&fix.store, Some(mirrors.origin_snapshot(&work)));
+        // Re-pointing origin after admission must not redirect the publish.
+        git(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/evil/repo.git",
+            ],
+        );
+
+        // Local bare repositories stand in for GitHub.
+        let github = fix._dir.path().join("github");
+        for slug in ["org/repo.git", "evil/repo.git"] {
+            let remote = github.join(slug);
+            std::fs::create_dir_all(&remote).unwrap();
+            git(&remote, &["init", "--bare", "--template="]);
+        }
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: Arc::new(GitMirrorPusher::with_local_base(&github)),
+        };
+        let gate = run_pr_gate(
+            &deps,
+            range_request(&fix, &fix.good_head_sha, "feat/origin"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
+        assert_eq!(
+            git(
+                &github.join("org/repo.git"),
+                &["rev-parse", "refs/heads/feat/origin"]
+            ),
+            fix.good_head_sha
+        );
+        assert_eq!(
+            git(
+                &github.join("evil/repo.git"),
+                &["for-each-ref", "--format=%(refname)"]
+            ),
+            ""
+        );
+        assert_eq!(
+            gh.enable_auto_merge_calls.lock().unwrap()[0].1,
+            fix.good_head_sha
+        );
         server.abort();
     }
 }

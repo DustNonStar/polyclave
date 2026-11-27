@@ -510,6 +510,7 @@ impl MockPusher {
 impl MirrorPusher for MockPusher {
     fn push_verified_sha<'a>(
         &'a self,
+        _target: &'a polyclave_hub::publish_origin::PublishTarget,
         _mirror_path: &'a FsPath,
         sha: &'a str,
         branch: &'a str,
@@ -661,6 +662,14 @@ fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
                 "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,result_sha,status,created_at,updated_at)
                  VALUES(?1,'t-gate','hub','w-gate','req-gate',?2,'codex','gpt-5','do it',?3,'main',?4,?5,'done','now','now')",
                 params![run_clone, repo_str, mirror_str, base_clone, head_clone],
+            )?;
+            polyclave_store::insert_run_origin_snapshot(
+                db,
+                &run_clone,
+                &polyclave_store::OriginSnapshot {
+                    urls: vec!["https://github.com/org/repo.git".into()],
+                    push_urls: vec![],
+                },
             )?;
             Ok(())
         })
