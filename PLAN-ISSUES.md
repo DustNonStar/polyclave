@@ -190,3 +190,13 @@ The task asked for a store migration that keeps existing databases upgradable. T
 Also a detail choice to confirm: a mesh Run holds one of the node's slots while it is `pending` or `running`. `needs_review`, `interrupted`, `done` and `failed` free it, because no Worker process is running and on the receiver nothing would otherwise release a Run waiting for review. Counting every non-terminal state instead is a one-line change in `crates/polyclave-store/src/mesh_limits.rs` (`ACTIVE_SQL`).
 
 **Resolved:** Accepted by merge reviewer 2026-11-27: no `user_version` bump (live-schema steps), `needs_review` and `interrupted` free a slot, and the limit lives in the separate `MeshNodeLimitDto`.
+
+## [direction, resolved] Narrow the next milestone to one end-to-end user story
+
+Raised by the 2026-11-27 audit (an external review plus the merge reviewer's check). The code has grown wide (mesh dispatch, desktop control/CUA, self-evolution and community distillation), but the core chain has never run end to end with real tools.
+
+**Resolved (project owner, 2026-11-27): narrow it.** The next milestone is one user story, run with real vendor CLIs and real GitHub:
+
+> On a Mac, the developer dispatches a real task to a Worker. Mid-run the host restarts, and afterwards the page shows the same task's accurate state. A Reviewer from another vendor asks for changes, the Worker submits a new version, and on the phone the developer sees the new diff, its tests and what is not yet accepted, then approves exactly that last SHA.
+
+Until this story passes and its evidence (commits, platform, screenshots or logs) is recorded in `HANDOFF.md`, new feature work on mesh dispatch, desktop control/CUA, and self-evolution/community distillation is paused. Fixes to existing code and anything the story needs (for example the approval card's evidence) continue. Success measures for a later comparison with T3 Code and Orca: how many times a human has to relay messages, how long after recovery until the next decision can be made, and whether the approved SHA and the evidence for it can be named.

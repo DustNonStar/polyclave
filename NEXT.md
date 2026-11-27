@@ -4,6 +4,8 @@ There is no assigned local-implementer job right now. The last job here, the Nod
 
 Since 2026-11-26, Dot writes code on `dot/<job>` branches and the merge reviewer merges them (see `AGENTS.md`). Wait for the reviewer to write a new job here.
 
+Milestone (owner decision 2026-11-27): the single end-to-end user story in `PLAN-ISSUES.md`, "Narrow the next milestone to one end-to-end user story". New feature work on mesh, desktop control and self-evolution is paused until it passes.
+
 Open before new work:
 
 - The open `direction` items in `PLAN-ISSUES.md` (none open today; the mesh `worker_run` budget was resolved as A + C on 2026-11-27 and is being implemented). Only the user decides these.
