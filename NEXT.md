@@ -8,5 +8,5 @@ Milestone (owner decision 2026-11-27): the single end-to-end user story in `PLAN
 
 Open before new work:
 
-- The open `direction` items in `PLAN-ISSUES.md` (none open today; the mesh `worker_run` budget was resolved as A + C on 2026-11-27 and is being implemented). Only the user decides these.
+- The open `direction` items in `PLAN-ISSUES.md` (none open today; the mesh `worker_run` budget was resolved as A + C on 2026-11-27 and is merged). Open `detail` items: how `dsh` chooses a model, and recording test results per SHA. Only the user decides these.
 - The pending real-environment acceptance at the end of `HANDOFF.md`: real vendor CLI Worker and CLI Hub probes, live DeepSeek API calls, the installed desktop WebView, a real GitHub push and PR, and a real phone pairing scan. The same list is the verification table in `README.md`.

@@ -106,7 +106,7 @@ Once a Run is `done`, the host fetches the verified SHA into your repository as 
 
 ## Verification status
 
-What the records show today. "Offline" means tests with fake CLIs, fake HTTP servers and local bare repositories. Native CI last passed on `3dec8e4` (the current `origin/main`). The commits merged locally after it (PR gate fixes, pairing QR, publish target, mesh `request_id`) were checked on macOS only; Windows CI has not run on them.
+What the records show today. "Offline" means tests with fake CLIs, fake HTTP servers and local bare repositories. Native CI last passed on `3dec8e4` (the current `origin/main`). The commits merged locally after it (PR gate fixes, pairing QR, publish target, mesh `request_id`, mesh budget A + C, the `dsh` model fix, the approval evidence card) were checked on macOS only; Windows CI has not run on them.
 
 Nothing below has passed a real-environment acceptance. The pending list is in `HANDOFF.md` under "v5 Phase 1B Hub and optical desktop review handoff" (hand checks 1 to 5) and "v5 Phase 1B review: passed, merged".
 
@@ -114,13 +114,13 @@ Nothing below has passed a real-environment acceptance. The pending list is in `
 |---|---|---|
 | Worker Run, Codex | Adapter, handshake, staging import, R1 and recovery tests; native CI on macOS and Windows ("v5 Phase 1A Rust host and native checks") | Real `codex` Worker probe (Phase 1B hand check 4) |
 | Worker Run, Claude Code | Adapter and stream tests; refusal without confinement; macOS Seatbelt isolation (`78b9a13`), which has no HANDOFF report | Real `claude` Worker probe on macOS (hand check 4); the refusal elsewhere is not a passed probe |
-| Worker Run, Antigravity and DeepSeek Harness | Adapter tests with fake scripts only (`69ca86d`); no HANDOFF report | No real run recorded. `docs/LESSONS.md` item 9 says the real `dsh headless` has no `--model` flag; `dsh_args` still passes one when a model is set |
+| Worker Run, Antigravity and DeepSeek Harness | Adapter tests with fake scripts only (`69ca86d`); no HANDOFF report | No real run recorded. The real `dsh headless` has no `--model` flag, so a `dsh` Worker with a model set is refused (`2aec8e4`); how to choose a `dsh` model is an open `detail` item in `PLAN-ISSUES.md` |
 | CLI Hub (Codex, Claude) | Thread resume, delta continuation and dual-write tests ("v5 Phase 1B review") | Real CLI Hub probe (hand check 5) |
 | API Hub (DeepSeek) | Stream and tool-call parsing, durable reasoning replay against a local fake endpoint ("Final DeepSeek follow-up") | Live `deepseek-flash` and `deepseek-v4-pro` calls (hand check 5, "Local addendum") |
 | Desktop app and page | Offline Chrome checks at 1440×900 and 375×812 in CI | Installed WKWebView and WebView2, tray, notifications, keychain (hand checks 1 to 3) |
 | PR gate | Pushes the exact R1-verified SHA, full-range review, reviewer preflight, origin-based target, one-shot token helper; tested against local bare remotes ("PR gate fixes review", "PR push target from origin review") | Has never pushed to real GitHub. No real PR, auto-merge, or bot-token login over HTTPS |
 | Phone pairing | The pairing QR decodes back to the exact URI in Chrome (`tests/qr-roundtrip.mjs`, "Pairing QR fix review") | Never scanned by a phone. Pairing approval and revocation on a real device not checked |
-| Mesh dispatch | `worker_run` and `run_status` end to end in daemon tests, with token scope checks; `request_id` idempotency ("Mesh worker_run idempotency review") | No two-machine run. Ticket budget for remote Runs is an open `direction` item in `PLAN-ISSUES.md` |
+| Mesh dispatch | `worker_run` and `run_status` end to end in daemon tests, with token scope checks; `request_id` idempotency ("Mesh worker_run idempotency review") | No two-machine run. Remote Runs are charged to the primary Ticket, and each receiver caps concurrent Runs per sending node (default 3); tested in one process over loopback only |
 | Memory | FTS5 search, candidate and verified states, fused with a local vector score (store tests) | No real-use record. The vector is a 128-dimension hashed byte-trigram count, not a learned embedding |
 
 ## Checks
