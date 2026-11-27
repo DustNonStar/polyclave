@@ -931,3 +931,35 @@ Branch `claude/approval-card-evidence-a09726` (`35aece8`, `b117cc4`) was fast-fo
 - No source records tests per SHA, so the tests row always says "No test result recorded for <sha>". A `detail` entry in `PLAN-ISSUES.md` describes what recording them would need.
 - The merge reviewer checked the 375 px screenshot `handcheck/approval-card-evidence/r1-phone-light-card.jpg`. The summary reads "Commit not verified · no test result for bbbbbbb · waiting for your decision", and the three rows are distinct.
 - Local macOS: fmt and Clippy clean, 152 passed, 0 failed, the `proto.ts` check clean, privacy scan clean. UI `tsc` and the browser tests were run by the branch session; this checkout has no UI dependencies installed. Not verified: Windows CI and a real phone.
+
+## 2026-11-27 全项目审查总结（合并审查者）
+
+范围：对照外部审核（ChatGPT，基于 `52bc69f`）和 `main@3dec8e4` 的代码做全面审查，之后用子会话逐项修复，由合并审查者审完后快进合并或 cherry-pick 进本地 `main`。最终状态：macOS 本地 fmt、Clippy 干净，152 个测试通过、0 失败，隐私扫描 clean。**32 个提交尚未推送，Windows CI 未运行。**
+
+### 发现的问题、原因和修复
+
+| # | 问题 | 原因 | 修复（提交） |
+|---|---|---|---|
+| 1 | PR 门禁推送的 `refs/polyclave/runs/<id>/final` 在生产代码里从未被创建，真实推送必然失败 | 测试夹具手工造出这个 ref，跨模块约定只在测试里成立（LESSONS 第 5 条） | 改为推送 R1 核验过的确切 SHA，带租约，推送后核对远端分支顶端；夹具改走真实的验收路径（`8f425d5`） |
+| 2 | 返工和准备阶段会退回到未核验的 `observed_sha`，未验证的提交可能被评审、被批准 | 为了"总能拿到 SHA"写的兜底绕过了 R1（LESSONS 第 6 条） | 只接受 `result_sha`，缺失就转人工；评审、推送和 `expectedHeadOid` 用的是同一个 SHA（`16fbaf6`） |
+| 3 | Reviewer 只看到最后一个提交，diff 超过 24 KB 时被悄悄截断 | 用了 `git show <head>`，截断后也没有告知 | 改为完整的 `base..head`；超长时转人工，不再截断（`4229f2c`） |
+| 4 | 先推送、开 PR，后调用 Reviewer，推送前不检查 Reviewer 是否可用；API Reviewer 的配置永远匹配不上 | 流程顺序问题；读取的配置列表里缺字段 | 推送前检查每个 Reviewer 都找得到可用的模型，找不到就不推送、转人工；改为直接读取配置表（`32ab418`） |
+| 5 | 镜像没有配置远程，PR 推送没有目标地址 | 镜像用 `git init --bare` 创建，推送目标从未设计 | 所有者决定按仓库 `origin` 推断：Run 受理时记录 `origin`（去掉凭证），推送前核对必须是 `github.com/<repo_slug>`，只推送到规范 URL；bot 令牌通过一次性 credential helper 传给 git（`764e98c..ed08752`）。Worker 推送和 R1 仍然只认本机镜像 |
+| 6 | 手机配对二维码是假的：把链接哈希后画成随机格子，扫码器读不出 | 渲染器从未真正编码 URI | 换用 `qrcode-generator@2.0.4` 生成标准 QR；用 `jsqr` 在浏览器里往返解码，逐字节核对，并接入 CI（`05ae56e`） |
+| 7 | 跨机 `worker_run` 不受工单预算约束，没有 `request_id` 时重试会重复派活 | 接收端固定 `ticket_id: None`，并随机生成 id | `request_id` 改为必填，同一 id 只受理一个 Run（`ac81ae8`）。所有者决定采用 A + C：远端 Run 扣主控工单的额度，每次派发只扣一次，不退款（`b7b5534`）；每台接收机器对同一来源默认最多 3 个并发 Run，超出返回 429，可在设置里按机器调整为 1–16（`312398d`、`fe41091`） |
+| 8 | README、PRODUCT、NEXT 仍是 v4 的内容；PRODUCT 对竞品的说法过于笼统 | 入口文档不在任何分支的工作清单里，没人负责更新（LESSONS 第 7 条） | 重写为 v5，并加了逐项能力的验证状态表；竞品对比改为只陈述 Polyclave 自己核验什么；NEXT 指向新的里程碑（`8089136..5acb369` 及后续） |
+| 9 | 删除 `legacy-node` 的提交没有验收记录，也没有批准记录 | 删除时没有要求附上验收证据 | 在上方 "Legacy-node removal: no acceptance record" 一节记录了这个缺口；代码可以从 `01c8645^` 恢复 |
+| 10 | dsh 适配器传了真实 CLI 不认的 `--model` | 适配器只用自造的假脚本验证过（LESSONS 第 9 条） | 对照真实的 `dsh headless --help`，不再传 `--model`，设置了模型会明确报错；测试改用只接受真实选项的严格假件（`2aec8e4`） |
+| 11 | 审批卡把"提交已核验 / 测试通过 / 需求满足"混在一起 | 卡片只列 SHA 和改动统计 | 卡片改为三行证据加一句摘要；没有测试记录时如实显示"no test result recorded"（`35aece8`、`b117cc4`） |
+| 12 | Dot 的分支 `dot/claude-code-probe` 一直没审 | — | 驳回：它依赖已删除的 Node 代码，假件照着测试写，从没跑过真实 CLI。由 Dot 删除这个分支 |
+
+另外两项所有者决定（都已记录在 `PLAN-ISSUES.md`）：跨机预算采用 A + C；**下一个里程碑收窄为一个端到端用户故事**（真实任务 → 中途重启后恢复 → 另一家厂商的 Reviewer 要求修改 → 返工 → 在手机上批准最后那个 SHA）。在它跑通之前，暂停 mesh、桌面控制、自我进化方向的新功能。审查经验已写入 `docs/LESSONS.md` 第 5–8 条。
+
+### 尚未完成
+
+1. **推送和 Windows CI**：32 个提交只在本地 `main`，所有者要求暂缓推送。
+2. **真实环境验收一项都没跑**：真实 Codex、Claude Worker 和 CLI Hub 探针；DeepSeek 线上调用；安装版 WebView；GitHub 上的推送、开 PR、自动合并；手机扫码配对、批准和撤销；两台机器之间的跨机派活。
+3. **系统不按 SHA 记录测试结果**，审批卡的测试那一行目前只能显示"无记录"（见 `PLAN-ISSUES.md` 中的 detail 条目）。主线用户故事需要它。
+4. **dsh 如何指定模型仍是未知**，需要一次真实运行来确认；另外 `mcp_url` 从未传给 dsh（见 `PLAN-ISSUES.md` 中的 detail 条目）。
+5. **`legacy-node` 删除的依据**：建议保持删除、不恢复，但需要逐条核对迁移表里约 20 条 Phase 1B 断言是否都有对应的 Rust 测试，然后由所有者在本文件里记录批准。
+6. **小项**：二维码每个格子只有约 2.5 CSS 像素，需要真机实测，必要时放大；`claude.rs` 可以考虑 `--bare`、`--tools ""` 加固（先对照真实 `--help`）。
