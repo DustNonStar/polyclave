@@ -305,6 +305,7 @@ impl TurnRunner {
         let command=match self.command(work,turn,token){
             Ok(c)=>c,
             Err(polyclave_adapters::Error::ClaudeIsolationUnavailable)=>return Exit::error("Claude worker not started: no verified external filesystem and network sandbox is available"),
+            Err(polyclave_adapters::Error::DshModelUnsupported)=>return Exit::error("DeepSeek Harness worker not started: `dsh headless` has no way to choose a model; leave the model unset for dsh"),
             Err(_)=>return Exit::error("worker configuration unavailable"),
         };
         let spec = SpawnSpec {

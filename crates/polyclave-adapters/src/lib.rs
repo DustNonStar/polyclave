@@ -23,6 +23,8 @@ pub enum Error {
     Invalid,
     #[error("Claude worker not started: no verified external filesystem and network sandbox is available")]
     ClaudeIsolationUnavailable,
+    #[error("DeepSeek Harness worker not started: `dsh headless` has no way to choose a model; leave the model unset for dsh")]
+    DshModelUnsupported,
     #[error("worker setup failed")]
     Io(#[from] std::io::Error),
 }

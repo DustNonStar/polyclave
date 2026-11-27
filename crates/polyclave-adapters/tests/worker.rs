@@ -289,7 +289,7 @@ fn agy_and_dsh_args_match_expected_flags() {
         .windows(2)
         .any(|w| w == ["--model", "gemini-3.8-flash"]));
 
-    let dsh = dsh_args(&paths, Some("deepseek-v4"), Some("dsh-session-9"));
+    let dsh = dsh_args(&paths, Some("dsh-session-9"));
     let dsh_strs: Vec<_> = dsh.iter().map(|s| s.to_str().unwrap()).collect();
     assert_eq!(
         &dsh_strs[..7],
@@ -308,7 +308,8 @@ fn agy_and_dsh_args_match_expected_flags() {
     assert!(dsh_strs
         .windows(2)
         .any(|w| w == ["--session-id", "dsh-session-9"]));
-    assert!(dsh_strs.windows(2).any(|w| w == ["--model", "deepseek-v4"]));
+    assert!(!dsh_strs.contains(&"--model"));
+    assert_real_dsh_headless_flags(&dsh_strs);
     assert_eq!(dsh_strs.last().copied(), Some("-"));
 }
 
@@ -538,4 +539,143 @@ fn macos_seatbelt_isolation_allows_worktree_writes_and_blocks_outside_writes() {
         .unwrap();
     assert!(!status.success(), "write outside worktree must be denied");
     assert!(!blocked_target.exists());
+}
+
+/// Options of the real `dsh --profile headless`, taken from `dsh --help` and
+/// `dsh --profile headless --help` (launcher flag `--profile <name>`; app flags
+/// `--json`, `--session-id <id>`, `--permission-mode <preset>`,
+/// `--approval-policy <ask|never>`, `--add-dir <path>`, `-h`). Anything else is
+/// rejected, as the real CLI does. `true` means the option takes a value.
+const REAL_DSH_HEADLESS_OPTIONS: &[(&str, bool)] = &[
+    ("--profile", true),
+    ("--json", false),
+    ("--session-id", true),
+    ("--permission-mode", true),
+    ("--approval-policy", true),
+    ("--add-dir", true),
+    ("-h", false),
+    ("--help", false),
+];
+
+fn assert_real_dsh_headless_flags(args: &[&str]) {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if *arg == "-" || !arg.starts_with('-') {
+            continue;
+        }
+        let takes_value = REAL_DSH_HEADLESS_OPTIONS
+            .iter()
+            .find(|(name, _)| name == arg)
+            .unwrap_or_else(|| panic!("real dsh headless rejects unknown option {arg}"))
+            .1;
+        if takes_value {
+            assert!(it.next().is_some(), "{arg} needs a value");
+        }
+    }
+}
+
+/// A fake `dsh` that accepts only the options the real `dsh --profile headless`
+/// accepts and exits non-zero on anything else, so an invented flag fails.
+#[cfg(unix)]
+const STRICT_FAKE_DSH: &str = r#"#!/bin/sh
+profile=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile|--session-id|--permission-mode|--add-dir)
+      [ $# -ge 2 ] || { echo "error: option '$1' argument missing" >&2; exit 1; }
+      [ "$1" = "--profile" ] && profile="$2"
+      shift 2 ;;
+    --approval-policy)
+      case "$2" in ask|never) ;; *) echo "error: option '--approval-policy' argument '$2' is invalid" >&2; exit 1 ;; esac
+      shift 2 ;;
+    --json) shift ;;
+    -) shift ;;
+    -*) echo "error: unknown option '$1'" >&2; exit 1 ;;
+    *) shift ;;
+  esac
+done
+[ "$profile" = "headless" ] || { echo "error: --profile headless is required" >&2; exit 1; }
+echo '{"type":"turn.completed"}'
+"#;
+
+#[cfg(unix)]
+fn run_strict_fake_dsh(dir: &Path, args: &[OsString]) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = dir.join("strict-fake-dsh");
+    if !fake.exists() {
+        std::fs::write(&fake, STRICT_FAKE_DSH).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::process::Command::new(&fake)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn dsh_worker_with_a_model_set_does_not_pass_model_and_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let work = dir.path().join("work");
+    let stage = dir.path().join("stage");
+    let primary = dir.path().join("primary");
+    let mirror = dir.path().join("mirror");
+    for d in [&state, &state.join("tmp"), &work, &stage, &primary, &mirror] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let fake_cli = dir.path().join(if cfg!(windows) {
+        "fake-cli.cmd"
+    } else {
+        "fake-cli"
+    });
+    std::fs::write(&fake_cli, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let ctx = |model| WorkerContext {
+        executable: &fake_cli,
+        state_dir: &state,
+        worktree: &work,
+        staging: &stage,
+        primary_repo: &primary,
+        final_mirror: &mirror,
+        mcp_url: "http://127.0.0.1:4310/mcp",
+        turn_id: 12,
+        token: "fixture-turn-key",
+        model,
+        thread: Some("dsh-session-9"),
+    };
+
+    let refused = dsh_worker(&ctx(Some("deepseek-v4")));
+    assert!(matches!(refused, Err(Error::DshModelUnsupported)));
+    assert!(refused
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("no way to choose a model"));
+
+    let cmd = dsh_worker(&ctx(None)).unwrap();
+    let strs: Vec<_> = cmd.args.iter().map(|s| s.to_str().unwrap()).collect();
+    assert!(!strs.contains(&"--model"));
+    assert_real_dsh_headless_flags(&strs);
+
+    #[cfg(unix)]
+    {
+        let ok = run_strict_fake_dsh(dir.path(), &cmd.args);
+        assert!(
+            ok.status.success(),
+            "strict fake dsh rejected the worker args: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        // The strict fake must have teeth: the old `--model` argument fails.
+        let mut with_model = cmd.args.clone();
+        with_model.insert(with_model.len() - 1, "--model".into());
+        with_model.insert(with_model.len() - 1, "deepseek-v4".into());
+        let rejected = run_strict_fake_dsh(dir.path(), &with_model);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("unknown option '--model'"));
+    }
 }

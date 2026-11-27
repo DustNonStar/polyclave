@@ -7,7 +7,9 @@ use polyclave_proto::{AgentEvent, Vendor};
 use serde_json::Value;
 use std::{ffi::OsString, path::PathBuf};
 
-pub fn dsh_args(roots: &[PathBuf], model: Option<&str>, thread: Option<&str>) -> Vec<OsString> {
+/// Arguments for `dsh --profile headless`. The real CLI has no model flag (see
+/// `dsh --profile headless --help`), so the model is not an argument here.
+pub fn dsh_args(roots: &[PathBuf], thread: Option<&str>) -> Vec<OsString> {
     let mut args = [
         "--profile",
         "headless",
@@ -25,14 +27,14 @@ pub fn dsh_args(roots: &[PathBuf], model: Option<&str>, thread: Option<&str>) ->
     if let Some(thread) = thread {
         push_option(&mut args, "--session-id", thread);
     }
-    if let Some(model) = model {
-        push_option(&mut args, "--model", model);
-    }
     args.push("-".into());
     args
 }
 
 pub fn dsh_worker(ctx: &WorkerContext<'_>) -> Result<WorkerCommand, Error> {
+    if ctx.model.is_some() {
+        return Err(Error::DshModelUnsupported);
+    }
     let paths = roots(ctx)?;
     let isolated_home = prepare_isolated_home(ctx.state_dir, Vendor::Dsh)?;
     let mut env = base_environment();
@@ -40,7 +42,7 @@ pub fn dsh_worker(ctx: &WorkerContext<'_>) -> Result<WorkerCommand, Error> {
     env.push(("POLYCLAVE_MCP_TOKEN".into(), ctx.token.into()));
     Ok(WorkerCommand {
         executable: resolve_cli_binary(ctx.executable)?,
-        args: dsh_args(&paths, ctx.model, ctx.thread),
+        args: dsh_args(&paths, ctx.thread),
         env,
         cwd: paths[0].clone(),
     })

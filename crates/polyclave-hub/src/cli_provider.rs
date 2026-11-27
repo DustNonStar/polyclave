@@ -157,11 +157,10 @@ fn args(
             ]
             .map(OsString::from)
             .to_vec();
+            // The real `dsh --profile headless` has no model flag; `execute`
+            // refuses a non-default model for dsh before spawning.
             if let Some(t) = thread {
                 a.extend(["--session-id".into(), t.into()]);
-            }
-            if model != "default" {
-                a.extend(["--model".into(), model.into()]);
             }
             a.push("-".into());
             a
@@ -376,6 +375,10 @@ impl CliTransport for SupervisedCli {
         use std::sync::atomic::Ordering;
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::CancelledBeforeStart);
+        }
+        if self.vendor == Vendor::Dsh && claim.model != "default" {
+            // `dsh headless` cannot choose a model; refuse rather than run another one.
+            return Err(Error::Profile);
         }
         let url = reqwest::Url::parse(&self.mcp_url).map_err(|_| Error::NotStarted)?;
         if url.scheme() != "http"
@@ -843,9 +846,8 @@ mod tests {
         assert!(dsh
             .windows(2)
             .any(|p| p[0] == "--session-id" && p[1] == "dsh-thread"));
-        assert!(dsh
-            .windows(2)
-            .any(|p| p[0] == "--model" && p[1] == "deepseek-chat"));
+        // The real `dsh --profile headless --help` lists no model flag.
+        assert!(!dsh.iter().any(|a| a == "--model" || a == "deepseek-chat"));
         assert_eq!(dsh.last().unwrap(), "-");
     }
 }

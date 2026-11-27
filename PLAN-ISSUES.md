@@ -200,3 +200,27 @@ Raised by the 2026-11-27 audit (an external review plus the merge reviewer's che
 > On a Mac, the developer dispatches a real task to a Worker. Mid-run the host restarts, and afterwards the page shows the same task's accurate state. A Reviewer from another vendor asks for changes, the Worker submits a new version, and on the phone the developer sees the new diff, its tests and what is not yet accepted, then approves exactly that last SHA.
 
 Until this story passes and its evidence (commits, platform, screenshots or logs) is recorded in `HANDOFF.md`, new feature work on mesh dispatch, desktop control/CUA, and self-evolution/community distillation is paused. Fixes to existing code and anything the story needs (for example the approval card's evidence) continue. Success measures for a later comparison with T3 Code and Orca: how many times a human has to relay messages, how long after recovery until the next decision can be made, and whether the approved SHA and the evidence for it can be named.
+
+## [detail] How a `dsh` Worker chooses a model is unknown, so a set model is refused
+
+`docs/LESSONS.md` item 9: the `dsh` adapter passed `--model <m>`, which the real `dsh headless` does not accept, and the tests passed only because nothing ran the arguments against the real flag list. Real help on this Mac (2026-11-27, read-only):
+
+```
+$ dsh --profile headless --help
+Usage: dsh --profile headless [options] [task...]
+Options:
+  --json                      write newline-delimited run events to stdout ...
+  --session-id <id>           adopt the persisted Session with this id; ...
+  --permission-mode <preset>  select a configured permission preset for this task, ...
+  --approval-policy <policy>  ... (choices: "ask", "never")
+  --add-dir <path>            allow an additional physical absolute directory ... (repeatable)
+  -h, --help                  show this help
+```
+
+`dsh --help` adds only launcher flags (`--profile`, `--from-default-profile`, `--patch <path>`, `--dump-config*`). There is no model flag and no documented model environment variable.
+
+`dsh --profile headless --dump-config-schema` (run with `DSH_HOME` pointed at an empty scratch directory) shows several plugin-level `model` keys (one defaults to `deepseek-v4-flash`; others are `agentOptions.model`, `agents[].model`, `modelPolicies[].model`, `modelSelection`, `agent-default-model`). Which of them the headless agent actually uses, and whether a `--patch` overlay or a profile file in the isolated `DSH_HOME` would set it per run, cannot be established without a real agent run, which this job may not start.
+
+**What the fix does now:** `dsh_args` no longer takes a model; `dsh_worker` refuses a set model with `Error::DshModelUnsupported` ("`dsh headless` has no way to choose a model; leave the model unset for dsh"), and the runner shows that message. The Hub CLI transport (`crates/polyclave-hub/src/cli_provider.rs`) no longer passes `--model` for `dsh` and refuses a non-`default` model with `Error::Profile`. A dsh Worker therefore runs on whatever model its isolated profile defaults to.
+
+**Proposed follow-up:** in a job that allows one real `dsh` run, find the config key the headless agent obeys, then set it through a `--patch <path>` overlay written under the isolated `DSH_HOME` (never the user's `~/.dsh`), and lift the refusal with a test that checks the overlay. Separately, item 9 also notes that `mcp_url` is not injected into `dsh`; this fix does not cover that.
