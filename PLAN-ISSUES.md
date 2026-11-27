@@ -135,3 +135,14 @@ Evidence: `git rev-parse --short origin/main` returned `5c101f8`; compare the Ph
 Stopped before Task 1. This branch adds only this checkpoint; no runtime, UI, tests, or archive files changed.
 
 **Resolved (project owner, 2026-11-27):** implement all Phase 1B tasks, transferred Hub tests, and native offline CI now. Real Codex and Claude Worker probes, the real CLI Hub probe, and local 1440px/375px review remain final local acceptance, not passed. Preserve the complete legacy archive and Claude's fail-closed behavior. Do not merge or remove the archive from this branch.
+
+## [direction, open] The built-in DeepSeek model ID does not match the official Chat Completions contract
+
+Phase 1B Task 1 (`docs/superpowers/plans/2026-11-26-polyclave-v5-phase1b.md:18`) and v5 §4.4 (`docs/superpowers/specs/2026-11-26-polyclave-v5-rust-design.md:388`) name `deepseek-v4.1` at the built-in official endpoint. The branch's registered default reflects that value at `crates/polyclave-store/src/hub.rs:534`. DeepSeek's published [Chat Completions contract](https://api-docs.deepseek.com/api/create-chat-completion/) lists only `deepseek-flash` and `deepseek-v4-pro` for its `model` parameter. The app allowlists the exact configured model and does not let the renderer override the base URL. A green fake-LLM fixture cannot certify this production default.
+
+Evidence: compare the provider's public `model` schema with `git grep -n 'deepseek-v4[.]1' -- docs/superpowers/plans/2026-11-26-polyclave-v5-phase1b.md docs/superpowers/specs/2026-11-26-polyclave-v5-rust-design.md crates/polyclave-store/src/hub.rs`. No vendor account, credential or live request was used.
+
+- **A (recommended):** register the official `deepseek-v4-pro` and `deepseek-flash` IDs on the built-in profile, with Pro first, and update the plan/spec. Migrate only the unchanged built-in inventory; preserve custom profiles, exact endpoint credential binding, stream/tool tests, and the real local acceptance gate.
+- **B:** keep `deepseek-v4.1` only for an independently verified custom compatible provider configured by the owner. Do not advertise it as an official default; leave the stock DeepSeek profile inactive pending registry configuration.
+
+Checkpoint: Tasks 1–7 are committed individually. The native Tauri build has not yet been verified. The Task 8 draft remains local and unpushed. Its Chromium fixture passed at 1440×900 and 375×812 with full-width canvas, no horizontal overflow, registered ink highlights, reduced-motion text, and no external requests. These are offline fixture checks, not final UI/CLI acceptance or proof that the transferred Hub suite fully passed. The published branch must not be merged as a complete Phase 1B. The Node archive is unchanged.
