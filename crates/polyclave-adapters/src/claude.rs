@@ -5,11 +5,9 @@ use crate::{
 use polyclave_os::{resolve_cli_binary, write_private_file};
 use polyclave_proto::{AgentEvent, Vendor};
 use serde_json::{json, Value};
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+use std::{ffi::OsString, path::Path, sync::Arc};
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
