@@ -853,3 +853,40 @@ A records check, not a review of code.
 
 The four commits on `claude/docs-v5-sync-308251` were cherry-picked onto `main` as `8089136..5acb369`, because `main` had moved on with the A + C budget decision. README, PRODUCT.md and NEXT.md now describe v5. README has a per-capability verification table, and the PRODUCT.md competitor claim is replaced by what Polyclave itself checks. A later commit updates NEXT.md, which still listed the mesh budget question as open.
 - Found while writing: `dsh_args` passes `--model`, but the real `dsh headless` has no such flag (LESSONS item 9). This is not fixed yet.
+
+## Mesh worker_run budget: A + C (branch claude/mesh-budget-ac-238293)
+
+Commits on the review branch, on top of main@ed63590 (not pushed, not merged):
+- 312398d feat(daemon): cap concurrent mesh Runs per node, default 3
+- fe41091 feat(ui): per-node mesh concurrency setting
+- this report with `handcheck/mesh-budget-ac/` and two `PLAN-ISSUES.md` items (chore: mesh-budget-ac)
+
+Held back on the local, unpushed branch `wip/mesh-budget-a` (one commit on top of fe41091):
+- b20f908 feat(hub): charge remote worker_run to the primary Ticket
+
+A is finished and its own tests pass, but it breaks one existing test that sends `worker_run` without a Ticket. The rules forbid changing that test without a work-list line, so A waits for that line. See `PLAN-ISSUES.md`, "[detail] Decision A … breaks an existing mesh test", which names the exact test edit to authorize.
+
+Tests (macOS only, no native Windows CI run yet):
+- Review branch head fe41091: `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 145 passed, 0 failed (main had 141; 4 new); the generated proto check passes and `git diff --exit-code` on `proto.ts` is clean; UI `tsc --noEmit` and `npm run build` pass; `npm run test:browser` (system Chrome) passes.
+- `wip/mesh-budget-a` at b20f908: fmt and clippy clean; workspace 148 passed, 1 failed (`mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote`, Policy at tests.rs:1985, the existing test above). 4 new A tests pass.
+- No existing test was changed. The test files only gained new tests and helpers.
+
+New tests:
+- C: `mesh_worker_run_refuses_a_fourth_concurrent_run_and_admits_after_a_slot_frees` (4th refused with 429 while 3 run; a resend at the limit returns the existing Run; a slot frees when a Run finishes; cap, not total), `mesh_worker_run_concurrent_admissions_cannot_both_take_the_last_slot`, `mesh_concurrency_setting_persists_through_the_local_api_and_is_enforced` (auth required, 1..=16, default 3, survives node re-registration, enforced), and store `mesh_concurrency_column_upgrades_an_existing_ledger_with_default_three` (old ledger upgraded, value survives reopen).
+- A (on wip): `dispatch_remote_charges_the_primary_ticket_once_per_request_id`, `dispatch_remote_resend_after_a_crash_is_not_charged_twice_and_exhaustion_blocks` (crash before send and crash after the receiver admitted; exhaustion gives `BudgetExceededError` and `blocked_on_user`), `dispatch_remote_refuses_a_foreign_wrong_repo_or_closed_ticket_before_sending` (no request reaches the node), `dispatch_remote_at_the_receiver_limit_is_retryable_and_charged_once`.
+
+Design notes:
+- C counts a Run against its node while it is `pending` or `running`. The count and the admission are atomic: the check runs under the RunManager admission gate and again in the transaction that writes the Run (`AdmissionGuard` in `polyclave-core`), which also writes the `mesh_admissions` row. Over the limit: HTTP 429, `Retry-After: 30`, JSON `{code: "mesh_concurrency_limit", message, limit, retryable: true}`, nothing admitted or queued.
+- A refund rule: a reservation is never refunded. The row records what the receiver answered (`admitted` with the remote Run id, `at_limit`, `refused`, `unreachable`); a resend with the same `request_id` is free and reaches the Run the receiver may already hold. A refund cannot tell "never arrived" from "reply lost", so it could let a retry run unpaid. A 429 reaches the Hub as a retryable HTTP 429 error.
+- Schema: idempotent steps at open (no `user_version` bump), because an existing store test pins version 10. Recorded in `PLAN-ISSUES.md`.
+
+Hand check (C-UI), daemon built from the branch under `/tmp/polyclave-hc/mesh-budget-ac/`, screenshots by Playwright with system Chrome:
+- `itemCUI-desktop-mesh.jpg` (1440 × 900): two node cards, each with a `Concurrent Runs` row and a `− n +` stepper; values 5 (set through the API) and 3 (default).
+- `itemCUI-desktop-mesh-after-plus.jpg`: after `+` on Win Box, the stepper shows 4 (read back from the daemon's reply).
+- `itemCUI-phone-mesh.jpg` / `itemCUI-phone-mesh-after-plus.jpg` (375 × 812): the same, the hint wraps, buttons 44 × 44 px.
+- `measurements.md`: no horizontal overflow at either size (`scrollWidth` 1440 / 375, no overflowing element in the cards), no request to a host other than 127.0.0.1. The nodes read `(offline)` because their endpoints do not exist.
+
+Issues: two `[detail]` items opened in `PLAN-ISSUES.md` (the A test conflict; the schema step and slot-state choice).
+Cleanup: the scratch daemon on port 4417 was stopped (`pgrep` empty, port closed); the Playwright browsers closed with their script. No fake codex left running (test fixtures only).
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
+Not done: A is not on the review branch (see above). Not verified: a real second machine. Every mesh test runs both nodes in one process over loopback, with a fake codex; no real vendor CLI ran. Native Windows CI has not run on this branch.

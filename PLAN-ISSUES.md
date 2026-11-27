@@ -162,3 +162,27 @@ What the documents say: v5 decision 5 (`docs/superpowers/specs/2026-11-26-polycl
 Nothing for this item is implemented on branch `claude/mesh-run-budget-b7a297`; the separate `request_id` idempotency fix is unaffected by the choice.
 
 **Resolved (project owner, 2026-11-27): A + C.** (A) Each remote Run is charged to the primary Ticket that dispatched it: `dispatch_remote` with `action = worker_run` requires an active, same-repository Ticket owned by the calling Hub session. In one primary transaction it reserves `runs_used` and records a remote-dispatch row keyed by (Hub session, `request_id`). A resend finds that row and is not charged again, and exhaustion behaves exactly as in `dispatch_task`. (C) Each receiver also enforces a per-node **concurrency** limit: at most N mesh-admitted Runs from one `mesh_nodes` row may be non-terminal at once. **The default is N = 3**, chosen to keep vendor quota from draining too fast. The user can change N per node in Settings. A dispatch over the limit is refused with a clear, retryable status and is not queued silently. C is a concurrency cap, not a total; the total budget stays with A.
+
+## [detail] Decision A (charge the primary Ticket) breaks an existing mesh test that sends `worker_run` without a Ticket
+
+Decision A above makes `ticket_id` required for `dispatch_remote` with `action = worker_run`. One existing test encodes the old behaviour: `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote` (`bins/polyclaved/src/hub_api/tests.rs`, the `worker_run` JSON at about line 1972 has no `ticket_id`) unwraps the result at line 1985.
+
+Evidence, with A applied (commit `b20f908` on the local, unpushed branch `wip/mesh-budget-a`):
+
+```
+cargo test --locked --workspace
+test hub_api::tests::mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote ... FAILED
+panicked at bins/polyclaved/src/hub_api/tests.rs:1985:14:
+called `Result::unwrap()` on an `Err` value: Policy
+test result: FAILED. 32 passed; 1 failed
+```
+
+Every other test passes, including the four new A tests. The rules say not to change an existing test unless the work list names the exact change, so A is kept off the review branch `claude/mesh-budget-ac-238293` (which carries C and C-UI only) and waits on `wip/mesh-budget-a`.
+
+**Proposed fix (exact test change to authorize):** in that test, before the first `call_tool`, insert an active Ticket owned by session `hub` for `repo` with a valid mandate and `max_runs` ≥ 1 (the new helper `insert_ticket(&primary.store, "t-mesh", "hub", &repo, 1, "active")` does this), and add `"ticket_id": "t-mesh"` to the `worker_run` JSON. Nothing else changes: the existing assertions stay as they are (the remote Run, its single-Run bookkeeping Ticket on the receiver, `primary.runs.list()` still empty, idempotent resend, `run_status`). Optionally add `assert_eq!` that the primary Ticket's `runs_used` is 1 after both sends. Once authorized, `wip/mesh-budget-a` gets that one test edit and is rebased onto the review branch.
+
+## [detail] The mesh schema steps check the live schema instead of bumping `user_version`
+
+The task asked for a store migration that keeps existing databases upgradable. The existing test `run_origin_snapshot_migrates_from_v9_keeps_the_first_snapshot_and_survives_reopen` (`crates/polyclave-store/tests/store.rs:872`) asserts `user_version == 10` after upgrading, so a v11 bump would break it. Instead, `mesh_limits::upgrade` and `remote_dispatch::upgrade` run inside the migration transaction on every open: they add `mesh_nodes.max_concurrent_runs` only when `pragma_table_info` lacks it and use `CREATE TABLE IF NOT EXISTS`. Existing ledgers upgrade once; new ledgers get the same schema (tested by `mesh_concurrency_column_upgrades_an_existing_ledger_with_default_three`). If the reviewer prefers a version bump, the fix is a v11 step plus changing that assertion to 11, which needs a work-list line for the test change.
+
+Also a detail choice to confirm: a mesh Run holds one of the node's slots while it is `pending` or `running`. `needs_review`, `interrupted`, `done` and `failed` free it, because no Worker process is running and on the receiver nothing would otherwise release a Run waiting for review. Counting every non-terminal state instead is a one-line change in `crates/polyclave-store/src/mesh_limits.rs` (`ACTIVE_SQL`).
