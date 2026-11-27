@@ -4,6 +4,7 @@ pub mod mirror;
 pub mod recovery;
 pub mod runner;
 pub mod runs;
+pub mod scope;
 pub mod worktree;
 
 #[derive(Debug, thiserror::Error)]

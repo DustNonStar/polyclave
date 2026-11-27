@@ -1,6 +1,9 @@
 use polyclave_core::{
     classify::{classify_run, BranchCheck},
     mirror::{AttemptGit, MirrorManager},
+    scope::{check_touched_paths, validate_touched_paths, ScopeCheckResult},
+    worktree::WorktreeManager,
+    GitError,
 };
 use polyclave_proto::{RunStatus, WriterCheck};
 use std::{
@@ -357,4 +360,147 @@ fn reconcile_preserves_mirror_on_damaged_stage() {
             problem: None
         }
     );
+}
+
+#[test]
+fn touched_paths_scope_check_validates_globs_and_prefixes_on_mirror() {
+    let (_tmp, repo, m) = fixture();
+    let run = m.admit(&repo, ID, "main").unwrap();
+    let a = AttemptGit {
+        run: run.clone(),
+        number: 1,
+    };
+    let w = m.prepare_attempt(&a).unwrap();
+
+    std::fs::create_dir_all(w.cwd.join("crates/core/src")).unwrap();
+    std::fs::create_dir_all(w.cwd.join("crates/other")).unwrap();
+    std::fs::write(w.cwd.join("crates/core/src/lib.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(w.cwd.join("crates/core/README.md"), "# docs\n").unwrap();
+    std::fs::write(w.cwd.join("crates/other/hack.rs"), "// outside\n").unwrap();
+    git(&w.cwd, &["add", "."]);
+    let tip = commit(&w.cwd, "add files across crates", Some(ID));
+    push(&w.cwd, &a.full_ref());
+    assert_eq!(
+        m.reconcile(&a),
+        BranchCheck::Present {
+            tip: tip.clone(),
+            problem: None
+        }
+    );
+
+    // Prefix + glob allowing only crates/core/**
+    let allowed =
+        check_touched_paths(&run.mirror, &run.base, &tip, &["crates/core/**".to_owned()]).unwrap();
+    assert_eq!(
+        allowed,
+        ScopeCheckResult {
+            allowed: false,
+            violations: vec!["crates/other/hack.rs".to_owned()],
+        }
+    );
+
+    // Exact + prefix + wildcard allowing both
+    let ok = check_touched_paths(
+        &run.mirror,
+        &run.base,
+        &tip,
+        &["crates/core/".to_owned(), "crates/other/*.rs".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(
+        ok,
+        ScopeCheckResult {
+            allowed: true,
+            violations: vec![],
+        }
+    );
+
+    // Pure rule edge cases: prefix must not match sibling with shared prefix
+    let sibling = validate_touched_paths(
+        &[
+            "src/foo/bar.rs".to_owned(),
+            "src/foo.rs".to_owned(),
+            "docs/a/b/c.md".to_owned(),
+        ],
+        &["src/foo".to_owned(), "docs/**/*.md".to_owned()],
+    );
+    assert_eq!(
+        sibling,
+        ScopeCheckResult {
+            allowed: false,
+            violations: vec!["src/foo.rs".to_owned()],
+        }
+    );
+}
+
+#[test]
+fn disposable_review_worktree_isolates_writes_and_cleans_up_on_error_and_panic() {
+    let (_tmp, repo, m) = fixture();
+    let run = m.admit(&repo, ID, "main").unwrap();
+    let a = AttemptGit {
+        run: run.clone(),
+        number: 1,
+    };
+    let w = m.prepare_attempt(&a).unwrap();
+    std::fs::write(w.cwd.join("clean.txt"), "hello\n").unwrap();
+    git(&w.cwd, &["add", "clean.txt"]);
+    let head_sha = commit(&w.cwd, "clean commit", Some(ID));
+    push(&w.cwd, &a.full_ref());
+    assert_eq!(
+        m.reconcile(&a),
+        BranchCheck::Present {
+            tip: head_sha.clone(),
+            problem: None
+        }
+    );
+
+    // 1. Success path: accidental writes & commits inside worktree do not pollute PR branch, and dir is removed
+    let mut observed_wt_path = std::path::PathBuf::new();
+    let res = WorktreeManager::with_disposable_review_worktree(&run.mirror, &head_sha, |wt| {
+        observed_wt_path = wt.to_path_buf();
+        assert_eq!(git(wt, &["rev-parse", "HEAD"]), head_sha);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("clean.txt")).unwrap(),
+            "hello\n"
+        );
+        std::fs::write(wt.join("accidental.txt"), "dirty").unwrap();
+        git(wt, &["add", "accidental.txt"]);
+        commit(wt, "accidental reviewer commit", None);
+        Ok("reviewed")
+    })
+    .unwrap();
+    assert_eq!(res, "reviewed");
+    assert!(!observed_wt_path.exists());
+    assert!(!observed_wt_path.parent().unwrap().exists());
+    assert_eq!(git(&run.mirror, &["rev-parse", &a.full_ref()]), head_sha);
+
+    // 2. Error path: worktree is still cleaned up
+    let mut err_wt_path = std::path::PathBuf::new();
+    let err = WorktreeManager::with_disposable_review_worktree(&run.mirror, &head_sha, |wt| {
+        err_wt_path = wt.to_path_buf();
+        assert!(err_wt_path.exists());
+        Err::<(), _>(GitError::Invalid("simulated reviewer failure"))
+    });
+    assert!(err.is_err());
+    assert!(!err_wt_path.exists());
+    assert!(!err_wt_path.parent().unwrap().exists());
+
+    // 3. Panic path: worktree is still cleaned up via Drop
+    let panic_wt_path = std::sync::Arc::new(std::sync::Mutex::new(std::path::PathBuf::new()));
+    let panic_wt_ref = panic_wt_path.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), GitError> =
+            WorktreeManager::with_disposable_review_worktree(&run.mirror, &head_sha, |wt| {
+                *panic_wt_ref.lock().unwrap() = wt.to_path_buf();
+                panic!("simulated reviewer panic");
+            });
+    }));
+    assert!(panicked.is_err());
+    let p = panic_wt_path.lock().unwrap().clone();
+    assert!(!p.exists());
+    assert!(!p.parent().unwrap().exists());
+
+    // Mirror worktree list should only contain the main bare mirror
+    let wt_list = git(&run.mirror, &["worktree", "list", "--porcelain"]);
+    assert_eq!(wt_list.matches("worktree ").count(), 1);
 }
