@@ -122,3 +122,14 @@ Recommendation: align these phase gates with the existing implementation split. 
 Checkpoint: Tasks 5–8 are individually committed and Linux format, Clippy and workspace tests passed (29 passed, 0 failed). Actual restart-state tests demonstrate that an unsigned staged push is imported and requires review; a new Attempt starts at the immutable base without the old file. The archive is unchanged. Task 9 and final native Rust CI have not run. The inherited Node workflow is not a test of this Rust branch. Retain the `dot/**` trigger and validate the complete privacy scan range when installing the Task 9 matrix.
 
 **Resolved (project owner, 2026-11-27):** Phase 1A Task 9 covers Worker and shared-layer invariants and the native Rust checks. Transfer each Hub provider, Hub conversation continuation, and persistent chat queue assertion to its specific Phase 1B task without rewriting the assertion or claiming a Worker test replaces it. Run the model-provider fake and real integration checks in Phase 1B; keep the full Node archive unchanged until the transferred assertions pass and deletion is approved. Phase 1A Task 10 remains the separate local Worker CLI probe.
+
+## [direction, open] Phase 1B startup versus the deferred real Worker probes
+
+At `main` `5c101f8`, the Phase 1B plan (`docs/superpowers/plans/2026-11-26-polyclave-v5-phase1b.md:3`) requires Phase 1A and its real CLI gate to pass before Phase 1B starts. The v5 design also lists real Worker probes in §4.6 (line 477). But the merged review (`HANDOFF.md:745–751`) reports only the offline/native CI and local Rust checks; its final bullet explicitly leaves the opt-in real Codex and Claude Worker Task 10 probes separate. `PLAN-ISSUES.md:124` moved the real Hub integration into Phase 1B, not the real Worker probes. No real Worker pass is recorded at this base. The latest work order starts Phase 1B and retains the archive until local acceptance, so applying the literal start gate and starting Task 1 now are inconsistent unless the owner clarifies the gate.
+
+Evidence: `git rev-parse --short origin/main` returned `5c101f8`; compare the Phase 1B prerequisite with the merged review and the preceding handoff at `HANDOFF.md:735–743`. Green native Rust CI is not evidence of real subscription CLI execution or verified Claude isolation.
+
+- **A (recommended):** allow Phase 1B implementation and offline CI on `dot/v5-phase1b` now, without declaring the real Worker gate met. Keep real Codex/Claude Worker probes plus the 1B real Hub probe mandatory for final local acceptance. Keep Claude fail-closed and leave `legacy-node/` untouched.
+- **B:** hold Phase 1B before Task 1 until the owner records both real Worker probe verdicts from an approved local setup; then start the branch work.
+
+Stopped before Task 1. This branch adds only this checkpoint; no runtime, UI, tests, or archive files changed.
