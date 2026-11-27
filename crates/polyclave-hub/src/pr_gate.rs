@@ -93,6 +93,11 @@ pub struct ReviewOutcome {
 }
 
 pub trait ReviewerExecutor: Send + Sync {
+    /// Cheap local check that `spec` can resolve a provider (a CLI binary found
+    /// or a configured API profile). The gate runs it for every selected
+    /// reviewer before anything is pushed or a PR is opened.
+    fn check_available(&self, spec: &ReviewerSpec) -> Result<()>;
+
     fn run_review<'a>(&'a self, req: ReviewWorktreeRequest)
         -> BoxFuture<'a, Result<ReviewOutcome>>;
 }
@@ -438,6 +443,25 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             touched_paths: req.touched_paths.clone(),
         })
         .map_err(map_store_err)?;
+
+    // Reviewer preflight: never push or open a PR that no reviewer can review.
+    let unavailable: Vec<String> = selected_reviewers
+        .iter()
+        .filter(|spec| deps.reviewer.check_available(spec).is_err())
+        .map(|spec| format!("{}/{}", vendor_slug(spec.vendor), spec.model))
+        .collect();
+    if !unavailable.is_empty() {
+        return escalate(
+            deps,
+            &gate.id,
+            req.hub_session_id.as_deref(),
+            "reviewer_unavailable",
+            &format!(
+                "no provider resolves for reviewer(s) {}; nothing was pushed",
+                unavailable.join(", ")
+            ),
+        );
+    }
 
     let preflight = match deps
         .scm
@@ -1110,6 +1134,9 @@ mod tests {
         seen_worktrees: Mutex<Vec<PathBuf>>,
     }
     impl ReviewerExecutor for MockReviewer {
+        fn check_available(&self, _spec: &ReviewerSpec) -> Result<()> {
+            Ok(())
+        }
         fn run_review<'a>(
             &'a self,
             req: ReviewWorktreeRequest,
@@ -1652,6 +1679,9 @@ mod tests {
         seen: Mutex<Vec<(ReviewWorktreeRequest, ReviewDiff)>>,
     }
     impl ReviewerExecutor for RangeReviewer {
+        fn check_available(&self, _spec: &ReviewerSpec) -> Result<()> {
+            Ok(())
+        }
         fn run_review<'a>(
             &'a self,
             req: ReviewWorktreeRequest,
@@ -1783,6 +1813,90 @@ mod tests {
         assert_eq!(gate.status, PrGateStatus::Escalated);
         assert!(!gate.auto_merge_armed);
         assert!(reviewer.seen.lock().unwrap().is_empty());
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    /// Only `available` vendors resolve a provider; every review is recorded.
+    struct PartlyAvailableReviewer {
+        available: Vec<Vendor>,
+        checked: Mutex<Vec<Vendor>>,
+        reviews: AtomicUsize,
+    }
+    impl ReviewerExecutor for PartlyAvailableReviewer {
+        fn check_available(&self, spec: &ReviewerSpec) -> Result<()> {
+            self.checked.lock().unwrap().push(spec.vendor);
+            if self.available.contains(&spec.vendor) {
+                Ok(())
+            } else {
+                Err(Error::Credential)
+            }
+        }
+        fn run_review<'a>(
+            &'a self,
+            _req: ReviewWorktreeRequest,
+        ) -> BoxFuture<'a, Result<ReviewOutcome>> {
+            Box::pin(async move {
+                self.reviews.fetch_add(1, Ordering::SeqCst);
+                Ok(ReviewOutcome {
+                    verdict: ReviewVerdict::Approve,
+                    comments: "LGTM".to_owned(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_reviewer_escalates_before_any_push_or_pr() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        // High risk needs two reviewers: Claude resolves, Agy does not.
+        let reviewer = Arc::new(PartlyAvailableReviewer {
+            available: vec![Vendor::Claude],
+            checked: Mutex::new(Vec::new()),
+            reviews: AtomicUsize::new(0),
+        });
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: reviewer.clone(),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/preflight");
+        request.hub_session_id = Some("hub".into());
+        request.is_high_risk = true;
+        request.reviewers = vec![
+            ReviewerSpec {
+                vendor: Vendor::Claude,
+                model: "claude-sonnet-4-6".into(),
+            },
+            ReviewerSpec {
+                vendor: Vendor::Agy,
+                model: "gemini-3-pro".into(),
+            },
+        ];
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert_eq!(gate.pr_number, None);
+        assert_eq!(
+            *reviewer.checked.lock().unwrap(),
+            vec![Vendor::Claude, Vendor::Agy]
+        );
+        assert_eq!(reviewer.reviews.load(Ordering::SeqCst), 0);
+        assert!(pusher.pushed.lock().unwrap().is_empty());
         assert!(gh.submitted_reviews.lock().unwrap().is_empty());
         assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
         server.abort();

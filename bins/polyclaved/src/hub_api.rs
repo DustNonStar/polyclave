@@ -137,11 +137,7 @@ struct OneShotCliModelProvider {
 
 impl OneShotCliModelProvider {
     fn from_vendor(vendor: Vendor, state: &FsPath, workdir: &FsPath) -> HubResult<Self> {
-        let bin_name = match vendor {
-            Vendor::Codex => "codex",
-            Vendor::Claude => "claude",
-            _ => return Err(Error::Profile),
-        };
+        let bin_name = reviewer_cli_name(vendor).ok_or(Error::Profile)?;
         let executable = polyclave_os::resolve_cli_binary(FsPath::new(bin_name))
             .unwrap_or_else(|_| PathBuf::from(bin_name));
         let isolated_home = polyclave_adapters::prepare_isolated_home(state, vendor)
@@ -305,25 +301,43 @@ struct HostReviewerExecutor {
 }
 
 impl HostReviewerExecutor {
+    /// The id of a configured API profile serving `vendor`, if any: an
+    /// `openai_compat` profile with an endpoint and a keyring account that
+    /// `ApiHubProvider` accepts. (`Store::hub_profiles` carries neither field,
+    /// so this reads `provider_profiles` directly.)
+    fn api_profile_for(&self, vendor: Vendor) -> HubResult<Option<String>> {
+        let rows: Vec<(String, String)> = self
+            .store
+            .read(|db| {
+                let mut q = db.prepare(
+                    "SELECT id, base_url FROM provider_profiles
+                     WHERE kind='openai_compat' AND base_url IS NOT NULL
+                       AND keyring_account IS NOT NULL
+                     ORDER BY id",
+                )?;
+                let rows = q
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(rows)
+            })
+            .map_err(|_| Error::Store)?;
+        Ok(rows
+            .into_iter()
+            .find(|(id, base_url)| {
+                infer_vendor(None, id, base_url) == vendor
+                    && ApiHubProvider::from_registered(&self.store, id).is_ok()
+            })
+            .map(|(id, _)| id))
+    }
+
     fn resolve_provider(
         &self,
         vendor: Vendor,
         worktree: &FsPath,
     ) -> HubResult<Arc<dyn HubModelProvider>> {
-        let profiles = self.store.hub_profiles().map_err(|_| Error::Store)?;
-        for p in profiles {
-            if p["kind"].as_str() == Some("openai_compat")
-                && p["configured"].as_bool() == Some(true)
-            {
-                let id = p["id"].as_str().unwrap_or("");
-                let base_url = p["base_url"].as_str().unwrap_or("");
-                let inferred = infer_vendor(None, id, base_url);
-                if inferred == vendor {
-                    if let Ok(api) = ApiHubProvider::from_registered(&self.store, id) {
-                        return Ok(Arc::new(api));
-                    }
-                }
-            }
+        if let Some(id) = self.api_profile_for(vendor)? {
+            let api = ApiHubProvider::from_registered(&self.store, &id)?;
+            return Ok(Arc::new(api));
         }
         if matches!(vendor, Vendor::Codex | Vendor::Claude) {
             let cli = OneShotCliModelProvider::from_vendor(vendor, &self.state, worktree)?;
@@ -333,7 +347,26 @@ impl HostReviewerExecutor {
     }
 }
 
+/// The reviewer CLI binary name for vendors that have a one-shot CLI reviewer.
+fn reviewer_cli_name(vendor: Vendor) -> Option<&'static str> {
+    match vendor {
+        Vendor::Codex => Some("codex"),
+        Vendor::Claude => Some("claude"),
+        _ => None,
+    }
+}
+
 impl ReviewerExecutor for HostReviewerExecutor {
+    fn check_available(&self, spec: &ReviewerSpec) -> HubResult<()> {
+        if self.api_profile_for(spec.vendor)?.is_some() {
+            return Ok(());
+        }
+        match reviewer_cli_name(spec.vendor) {
+            Some(name) if polyclave_os::resolve_cli_binary(FsPath::new(name)).is_ok() => Ok(()),
+            _ => Err(Error::Credential),
+        }
+    }
+
     fn run_review<'a>(
         &'a self,
         req: ReviewWorktreeRequest,

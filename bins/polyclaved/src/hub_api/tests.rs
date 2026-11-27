@@ -480,6 +480,9 @@ impl ScmClient for MockScmClient {
 
 struct MockReviewer;
 impl ReviewerExecutor for MockReviewer {
+    fn check_available(&self, _spec: &ReviewerSpec) -> HubResult<()> {
+        Ok(())
+    }
     fn run_review<'a>(
         &'a self,
         req: ReviewWorktreeRequest,
@@ -746,6 +749,40 @@ async fn pr_gate_refuses_a_run_with_only_an_observed_sha() {
         .unwrap();
     assert!(res.status().is_client_error(), "{}", res.status());
     assert!(pusher.pushed.lock().unwrap().is_empty());
+    hub.close().await;
+}
+
+#[tokio::test]
+async fn host_reviewer_preflight_refuses_a_vendor_without_cli_or_api_profile() {
+    let (dir, hub, _rx) = test_hub().await;
+    let host = HostReviewerExecutor {
+        store: hub.store.clone(),
+        state: dir.path().to_path_buf(),
+    };
+    let spec = |vendor| ReviewerSpec {
+        vendor,
+        model: "m1".into(),
+    };
+    // Agy and DeepSeek have no one-shot CLI reviewer, and the fixture's only API
+    // profile has no endpoint or keyring account, so neither resolves.
+    for vendor in [Vendor::Agy, Vendor::Dsh] {
+        assert!(matches!(
+            host.check_available(&spec(vendor)),
+            Err(Error::Credential)
+        ));
+    }
+    // A configured API profile for Agy makes an Agy reviewer available.
+    hub.store
+        .write(|db| {
+            db.execute_batch(
+                "INSERT INTO provider_profiles(id,display_name,kind,base_url,keyring_account,models_json,created_at)
+                 VALUES('agy-review','Agy','openai_compat','https://generativelanguage.googleapis.com/v1beta/openai','agy-account','[\"m1\"]','now');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    host.check_available(&spec(Vendor::Agy)).unwrap();
+    assert!(host.check_available(&spec(Vendor::Dsh)).is_err());
     hub.close().await;
 }
 
