@@ -5,6 +5,10 @@
     - **Blind Council:** Anonymous proposal cards (`方案甲` / `方案乙` / `方案丙`) with risk & escalation pills (`touched_paths`, `security_sensitive`, `public_interface_changes`, `new_dependencies`, `open_questions`), decision selector for `direction` / escalated councils, and post-decision vendor/model reveal.
     - **PR Gates & SCM Observer:** Repo/branch/SHA chips, `auto_merge_armed` state, `scope_violations` callout, heterogeneous reviewer verdicts, and Pause-aware `Run PR Gate` control.
   - **Adapters & Credentials:** `Antigravity (agy)` and `DeepSeek Harness (dsh)` added to Worker dispatch; Settings documents distinct OS Keychain `Polyclave.GitHub` (`bot_token` / `reviewer_token`) bindings.
+- **Stage 3 additions:**
+  - **Mobile Entrypoint (`apps/polyclave-app/src-tauri/src/lib.rs`):** Target-gated `mobile_entry_point` for iOS / Android alongside desktop `main.rs`.
+  - **Devices & 10-min QR Pairing:** Zero-dependency inline SVG QR generator (`views/qr.ts`), paired device list with instant `Revoke`, and dual-identity verification over Tailscale / AgentMesh.
+  - **AgentMesh Nodes & Private Notifications:** Deny-by-default mesh node visibility/revocation and private self-hosted `ntfy` / UnifiedPush wakeup configuration in Settings.
 
 ---
 name: Polyclave

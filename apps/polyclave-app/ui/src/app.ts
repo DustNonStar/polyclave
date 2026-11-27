@@ -89,12 +89,14 @@ async function loadSession(): Promise<void> {
 
 async function sync(): Promise<void> {
   if (!S.connection) return;
-  const [sessions, runs, profiles, tickets, usage, councils, prGates, pause] = await Promise.all([
+  const [sessions, runs, profiles, tickets, usage, councils, prGates, pause, devices, meshNodes, notificationChannels] = await Promise.all([
     api.sessions(), api.runs(), api.profiles(), api.tickets().catch(() => S.tickets), api.usage().catch(() => S.usage),
     api.councils().catch(() => S.councils), api.prGates().catch(() => S.prGates), api.pauseState().catch(() => S.pause),
+    api.devices().catch(() => S.devices), api.meshNodes().catch(() => S.meshNodes), api.notificationChannels().catch(() => S.notificationChannels),
   ]);
   S.sessions = sessions; S.runs = runs; S.profiles = profiles; S.tickets = tickets; S.usage = usage;
   S.councils = councils; S.prGates = prGates; S.pause = pause;
+  S.devices = devices; S.meshNodes = meshNodes; S.notificationChannels = notificationChannels;
   if (!S.global && (!S.selected || !sessions.some(s => s.id === S.selected))) S.selected = sessions.find(s => s.role === 'hub')?.id ?? null;
   if (S.selected) {
     const id = S.selected;
@@ -179,7 +181,7 @@ byId('pause-toggle').addEventListener('click', () => {
   }).catch(act.problem).finally(() => { b.disabled = false; });
 });
 byId('usage').addEventListener('click', () => {
-  void api.usage().then(v => { S.usage = v; renderStatus(); }).catch(() => {}).finally(() => openSettings(act, setTheme));
+  void api.usage().then(v => { S.usage = v; renderStatus(); }).catch(() => {}).finally(() => openSettings(api, act, setTheme));
 });
 for (const b of root.querySelectorAll<HTMLButtonElement>('.mobile-nav button')) b.addEventListener('click', () => act.setPane((b.dataset.pane ?? 'chat') as Pane));
 byId('model-pill').addEventListener('click', () => showModelMenu());

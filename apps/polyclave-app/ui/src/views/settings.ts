@@ -1,11 +1,13 @@
 // Settings · Usage & limits: provider quotas, local usage, context vial, motion, theme and native keychain.
 import { native } from '../api/sse.js';
-import type { Profile } from '../api/client.js';
+import type { Api, Profile } from '../api/client.js';
+import type { ClientKind, NotificationChannelKind } from '../generated/proto.js';
 import { S } from '../state/store.js';
 import type { Actions } from '../state/store.js';
 import { button, compact, h } from './elements.js';
 import { openDialog, segmented, textField } from './dialog.js';
 import { icon } from './icons.js';
+import { renderPairingMatrix } from './qr.js';
 import { VENDORS, usageFor } from './statusbar.js';
 import type { Intensity } from '../motion/spring.js';
 
@@ -93,9 +95,106 @@ function keyRows(act: Actions): HTMLElement {
   return wrap;
 }
 
-export function openSettings(act: Actions, setTheme: (light: boolean) => void): void {
+function remoteDevicesSection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { style: 'display:grid;gap:12px' });
+  const [labelL, labelInput] = textField('Device label', { placeholder: 'My iPhone', value: 'Mobile client' });
+  let kind: ClientKind = 'ios';
+  const kindSeg = segmented('Device platform', ['ios', 'android'] as const, kind, v => { kind = v; }, { ios: 'iOS', android: 'Android' });
+  const qrSlot = h('div', { class: 'qr-slot' });
+  const showQr = () => {
+    qrSlot.replaceChildren();
+    if (!S.lastPairing) return;
+    qrSlot.append(h('div', { class: 'card qr-box' },
+      renderPairingMatrix(S.lastPairing.qr_uri),
+      h('div', { style: 'display:grid;gap:6px;min-width:0' },
+        h('span', { class: 'card-title', text: '10-minute one-time pairing ticket' }),
+        h('p', { class: 'field-hint mono', style: 'overflow-wrap:anywhere', text: S.lastPairing.qr_uri }),
+        h('p', { class: 'field-hint', text: 'Expires: ' + S.lastPairing.ticket.expires_at + ' · Dual-identity enforced over Tailscale / AgentMesh.' }))));
+  };
+  showQr();
+  const genBtn = button('Create 10-min QR', () => {
+    genBtn.disabled = true;
+    void api.createPairingTicket(kind, labelInput.value.trim() || 'Mobile client', 600).then(res => {
+      S.lastPairing = res;
+      showQr();
+      act.tell('10-minute pairing ticket created', 'info');
+    }).catch(act.problem).finally(() => { genBtn.disabled = false; });
+  }, 'btn-primary', { 'data-focus-key': 'create-qr' });
+  wrap.append(h('div', { class: 'card', style: 'display:grid;gap:10px' },
+    kindSeg, labelL, h('div', { class: 'actions' }, genBtn), qrSlot));
+
+  const devList = h('div', { style: 'display:grid;gap:8px' });
+  if (!S.devices.length) {
+    devList.append(h('p', { class: 'empty', text: 'No paired mobile or remote devices yet.' }));
+  } else {
+    for (const d of S.devices) {
+      devList.append(h('div', { class: 'card row' },
+        h('div', { class: 'grow', style: 'min-width:0' },
+          h('div', { class: 'card-title', text: d.label + ' (' + d.client_kind + ')' }),
+          h('p', { class: 'field-hint', text: (d.peer_identity ?? 'loopback') + (d.revoked_at ? ' · revoked' : ' · active') })),
+        !d.revoked_at ? button('Revoke', () => {
+          void api.revokeDevice(d.id).then(() => act.refresh()).catch(act.problem);
+        }, 'btn-danger', { 'data-focus-key': 'rev-dev-' + d.id }) : null));
+    }
+  }
+  wrap.append(devList);
+  return wrap;
+}
+
+function meshSection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { style: 'display:grid;gap:10px' });
+  if (!S.meshNodes.length) {
+    wrap.append(h('p', { class: 'empty', text: 'No AgentMesh peer nodes registered. Federated execution uses deny-by-default attenuated capability tokens.' }));
+    return wrap;
+  }
+  for (const n of S.meshNodes) {
+    wrap.append(h('div', { class: 'card row' },
+      h('div', { class: 'grow', style: 'min-width:0' },
+        h('div', { class: 'card-title', text: n.name + ' · ' + n.os_family + ' (' + n.status + ')' }),
+        h('p', { class: 'field-hint mono', text: n.endpoint + ' · repos: ' + (n.allowed_repos.join(', ') || 'none') })),
+      n.status !== 'revoked' ? button('Revoke', () => {
+        void api.revokeMeshNode(n.id).then(() => act.refresh()).catch(act.problem);
+      }, 'btn-danger', { 'data-focus-key': 'rev-mesh-' + n.id }) : null));
+  }
+  return wrap;
+}
+
+function notifySection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { style: 'display:grid;gap:10px' });
+  let kind: NotificationChannelKind = 'ntfy';
+  const kindSeg = segmented('Channel type', ['ntfy', 'unified_push'] as const, kind, v => { kind = v; }, { ntfy: 'Self-hosted ntfy', unified_push: 'UnifiedPush' });
+  const [epL, ep] = textField('Private endpoint URL', { placeholder: 'http://127.0.0.1:8090', mono: true });
+  const [topL, top] = textField('Topic', { placeholder: 'polyclave', value: 'polyclave', mono: true });
+  const addBtn = button('Save channel', () => {
+    const endpoint = ep.value.trim();
+    if (!endpoint) { act.tell('Private endpoint URL is required'); return; }
+    addBtn.disabled = true;
+    void api.upsertNotificationChannel({ kind, label: kind === 'ntfy' ? 'Private ntfy' : 'UnifiedPush', endpoint, topic: top.value.trim() || 'polyclave', enabled: true })
+      .then(() => { ep.value = ''; act.tell('Private notification channel saved', 'info'); return act.refresh(); })
+      .catch(act.problem).finally(() => { addBtn.disabled = false; });
+  }, 'btn-primary', { 'data-focus-key': 'save-notify' });
+  const testBtn = button('Test wakeup', () => {
+    testBtn.disabled = true;
+    void api.testNotifications().then(r => act.tell('Delivered ' + r.delivered + ' private wakeup(s)', 'info')).catch(act.problem).finally(() => { testBtn.disabled = false; });
+  }, 'btn-ghost', { 'data-focus-key': 'test-notify' });
+  wrap.append(h('div', { class: 'card', style: 'display:grid;gap:10px' },
+    h('p', { class: 'field-hint', text: 'Only loopback, private RFC1918, or Tailscale endpoints are permitted. Wakeups carry metadata only (no code or chat text).' }),
+    kindSeg, epL, topL, h('div', { class: 'actions' }, addBtn, testBtn)));
+  for (const ch of S.notificationChannels) {
+    wrap.append(h('div', { class: 'card row' },
+      h('div', { class: 'grow', style: 'min-width:0' },
+        h('div', { class: 'card-title', text: ch.label + ' (' + ch.kind + ')' }),
+        h('p', { class: 'field-hint mono', text: ch.endpoint + ' · ' + ch.topic }))));
+  }
+  return wrap;
+}
+
+export function openSettings(api: Api, act: Actions, setTheme: (light: boolean) => void): void {
   const sections: [string, string, () => Node[]][] = [
     ['usage', 'Usage & limits', () => [vendorCards()]],
+    ['devices', 'Devices & pairing', () => [remoteDevicesSection(api, act)]],
+    ['mesh', 'AgentMesh nodes', () => [meshSection(api, act)]],
+    ['notify', 'Private notifications', () => [notifySection(api, act)]],
     ['context', 'Context', () => {
       const ctx = S.usage.reduce((n, u) => Math.max(n, u.context ?? 0), 0);
       const canvas = h('canvas', { id: 'settings-vial', 'aria-hidden': 'true' });

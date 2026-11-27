@@ -60,6 +60,12 @@ const server=createServer(async(req,res)=>{
       };
       res.end(JSON.stringify(councilState));return;
     }
+    if(path==='/api/pairing/tickets'&&req.method==='POST'){
+      res.end(JSON.stringify({ticket:{id:'p1',client_kind:'ios',device_label:'Mobile client',expires_at:'2026-11-27T00:10:00Z',used_at:null,created_at:'2026-11-27T00:00:00Z'},secret:'fixture-ticket',qr_uri:'polyclave://pair?ticket=fixture-ticket&id=p1'}));return;
+    }
+    if(path==='/api/notifications/test'&&req.method==='POST'){
+      res.end(JSON.stringify({delivered:1}));return;
+    }
     const data=path==='/api/sessions'?[session]:path==='/api/profiles'?[{id:'builtin-hub',kind:'codex_cli',display_name:'Codex CLI',models:['default']},{id:'deepseek-api',kind:'openai_compat',display_name:'DeepSeek API',models:['deepseek-flash','deepseek-v4-pro']}]:
       path.endsWith('/messages')?messages:path==='/api/usage'?[{vendor:'DeepSeek',context:240000,tokens:32000,cost:.37}]:
       path==='/api/councils'?(stage2Active?[councilState]:[]):path==='/api/pr-gates'?(stage2Active?[prGateState]:[]):path==='/api/pause'?pausedState:[];
@@ -167,6 +173,10 @@ try{
     await page.getByRole('dialog').waitFor({state:'visible'});
     assert.deepEqual(await page.getByRole('radiogroup',{name:'Motion intensity'}).getByRole('radio').allTextContents(),['Off · 0fps','Subtle','Standard','Ultra']);
     assert.ok((await page.getByRole('dialog').textContent()).includes('not reported'));
+    // Stage 3: generate inline SVG pairing QR & test private notification wakeup inside Settings.
+    await page.locator('[data-focus-key="create-qr"]').click();
+    await page.locator('.qr-svg').waitFor({state:'visible'});
+    await page.locator('[data-focus-key="test-notify"]').click();
     assert.equal(await page.getByRole('dialog').evaluate(d=>d.scrollWidth<=d.clientWidth+1),true);
     await page.getByRole('button',{name:'Close',exact:true}).click();
     await page.getByRole('button',{name:'Dark theme',exact:true}).click();

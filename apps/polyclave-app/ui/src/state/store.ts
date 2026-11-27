@@ -1,7 +1,10 @@
 // Single client-side state object. Views read it; app.ts owns every mutation.
 import type { Connection } from '../api/sse.js';
 import type { HubMessage, Profile, ProviderUsage, RunDetail, TicketIntent } from '../api/client.js';
-import type { CouncilDto, MemoryItemDto, PauseStateDto, PrGateDto, RunDto, SessionDto, Vendor } from '../generated/proto.js';
+import type {
+  CouncilDto, MemoryItemDto, MeshNodeDto, NotificationChannelDto, PairedDeviceDto,
+  PairingTicketDto, PauseStateDto, PrGateDto, RunDto, SessionDto, Vendor,
+} from '../generated/proto.js';
 
 export type Panel = 'Topology' | 'Review' | 'Files' | 'Memory';
 export type ReviewView = 'runs' | 'council' | 'pr_gates';
@@ -22,6 +25,10 @@ export const S = {
   councils: [] as CouncilDto[],
   prGates: [] as PrGateDto[],
   pause: { paused: false, reason: null, updated_at: '' } as PauseStateDto,
+  devices: [] as PairedDeviceDto[],
+  meshNodes: [] as MeshNodeDto[],
+  notificationChannels: [] as NotificationChannelDto[],
+  lastPairing: null as { ticket: PairingTicketDto; secret: string; qr_uri: string } | null,
   /** Selected Hub session; null with global=true shows the cross-project Global Hub. */
   selected: null as string | null,
   global: false,

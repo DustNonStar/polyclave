@@ -2,8 +2,9 @@
 import { request } from './sse.js';
 import type { Connection } from './sse.js';
 import type {
-  CouncilDto, CouncilLevel, JsonValue, MemoryItemDto, MemoryKind, PauseStateDto,
-  PlanningPreference, PrGateDto, RunDto, SessionDto, Vendor,
+  ClientKind, CouncilDto, CouncilLevel, JsonValue, MemoryItemDto, MemoryKind, MeshNodeDto,
+  NotificationChannelDto, NotificationChannelKind, PairedDeviceDto, PairingTicketDto,
+  PauseStateDto, PlanningPreference, PrGateDto, RunDto, SessionDto, Vendor,
 } from '../generated/proto.js';
 
 export interface Profile { id: string; display_name: string; kind: string; models: string[] }
@@ -75,6 +76,17 @@ export function api(connection: () => Connection | null) {
     pauseState: () => call<PauseStateDto>('/api/pause'),
     pause: (reason?: string | null) => call<PauseStateDto>('/api/pause', reason ? { reason } : {}),
     resume: () => call<PauseStateDto>('/api/resume', {}),
+    pairingTickets: () => call<PairingTicketDto[]>('/api/pairing/tickets'),
+    createPairingTicket: (client_kind: ClientKind, device_label: string, ttl_secs = 600) =>
+      call<{ ticket: PairingTicketDto; secret: string; qr_uri: string }>('/api/pairing/tickets', { client_kind, device_label, ttl_secs }),
+    devices: () => call<PairedDeviceDto[]>('/api/devices'),
+    revokeDevice: (id: string) => call<PairedDeviceDto>('/api/devices/' + enc(id) + '/revoke', {}),
+    meshNodes: () => call<MeshNodeDto[]>('/api/mesh/nodes'),
+    revokeMeshNode: (id: string) => call<MeshNodeDto>('/api/mesh/nodes/' + enc(id) + '/revoke', {}),
+    notificationChannels: () => call<NotificationChannelDto[]>('/api/notifications/channels'),
+    upsertNotificationChannel: (body: { kind: NotificationChannelKind; label: string; endpoint: string; topic: string; enabled?: boolean }) =>
+      call<NotificationChannelDto>('/api/notifications/channels', body),
+    testNotifications: () => call<{ delivered: number }>('/api/notifications/test', {}),
   };
 }
 export type Api = ReturnType<typeof api>;
