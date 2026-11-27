@@ -482,3 +482,29 @@ pub(crate) fn prepare_isolated_link(source: &Path, destination: &Path) -> io::Re
     f.read_to_end(&mut data)?;
     write_private_file(destination, &data)
 }
+
+pub fn desktop_idle_secs() -> Option<u32> {
+    #[repr(C)]
+    struct LastInputInfo {
+        cb_size: u32,
+        dw_time: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetLastInputInfo(plii: *mut LastInputInfo) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount() -> u32;
+    }
+    let mut info = LastInputInfo {
+        cb_size: std::mem::size_of::<LastInputInfo>() as u32,
+        dw_time: 0,
+    };
+    let ok = unsafe { GetLastInputInfo(&mut info) };
+    if ok == 0 {
+        return None;
+    }
+    let tick = unsafe { GetTickCount() };
+    Some(tick.wrapping_sub(info.dw_time) / 1000)
+}

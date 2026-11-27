@@ -862,17 +862,16 @@ async fn cua_state(State(hub): State<Hub>) -> Reply {
 struct CuaAcquireBody {
     holder_run_id: String,
     target_window: String,
-    observed_idle_secs: u32,
+    observed_idle_secs: Option<u32>,
 }
 
 async fn cua_acquire(State(hub): State<Hub>, Json(body): Json<CuaAcquireBody>) -> Reply {
     let state = run_blocking(move || {
+        let idle = body
+            .observed_idle_secs
+            .unwrap_or_else(|| polyclave_os::desktop_idle_secs().unwrap_or(0));
         hub.store
-            .cua_acquire(
-                body.holder_run_id,
-                body.target_window,
-                body.observed_idle_secs,
-            )
+            .cua_acquire(body.holder_run_id, body.target_window, idle)
             .map_err(HttpError::from)
     })
     .await?;

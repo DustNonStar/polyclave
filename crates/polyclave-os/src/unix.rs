@@ -327,3 +327,45 @@ pub(crate) fn kill_process_tree(id: &ProcessIdentity) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn parse_ioreg_hid_idle_secs(stdout: &str) -> Option<u32> {
+    for line in stdout.lines() {
+        if let Some((_, rhs)) = line.split_once("\"HIDIdleTime\" =") {
+            let ns: u64 = rhs.trim().parse().ok()?;
+            return Some((ns / 1_000_000_000).min(u64::from(u32::MAX)) as u32);
+        }
+    }
+    None
+}
+
+pub fn desktop_idle_secs() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("/usr/sbin/ioreg")
+            .args(["-c", "IOHIDSystem", "-d", "4"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        parse_ioreg_hid_idle_secs(&text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn parses_ioreg_hid_idle_time_and_reads_host_idle() {
+        let sample = "  | |   \"HIDIdleTime\" = 45000000000\n";
+        assert_eq!(parse_ioreg_hid_idle_secs(sample), Some(45));
+        assert!(desktop_idle_secs().is_some());
+    }
+}

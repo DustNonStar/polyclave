@@ -13,7 +13,9 @@ mod platform;
 mod platform;
 
 pub use path::{canonical_real_path, prepare_isolated_link, resolve_cli_binary};
-pub use platform::{boot_epoch, create_private_dir, process_identity, write_private_file};
+pub use platform::{
+    boot_epoch, create_private_dir, desktop_idle_secs, process_identity, write_private_file,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessIdentity {
