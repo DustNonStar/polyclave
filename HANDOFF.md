@@ -749,3 +749,33 @@ Branch `dot/v5-phase1a` (`d1c5c27..adb51ea`) fast-forwarded cleanly into `main`.
 - **Code & invariant audit:** Verified `classify_run` (R1 external verification, immutable baseline, `WriterCheck::Possible` isolation), 4-step launch handshake with durable release marker (`unix.rs`, `recovery.rs`), per-attempt staging repo → host-only final mirror isolation (`adapters/src/lib.rs`, `mirror.rs`), fail-closed Claude confinement when no external sandbox is available, `TurnDto` compile-time exclusion of `mcp_token` + `ts-rs` export check (`apps/polyclave-app/ui/src/generated/proto.ts`), `worker_chat` terminal 409 guard (`runs.rs`, `routes.rs`), and zero edits to `legacy-node/`.
 - **CI & local macOS verification:** GitHub Actions run `45926917504` passed on both `macos-latest` and `windows-latest`. Local macOS verification after fast-forward passed `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace` (43 passed, 0 failed, including the `TurnDto` compile-fail doctest), and `git diff --exit-code -- apps/polyclave-app/ui/src/generated/proto.ts`.
 - **Deferred items:** Local opt-in real-CLI Task 10 probes (`POLYCLAVE_REAL_CODEX=1`, `POLYCLAVE_REAL_CLAUDE=1`) remain separate; `legacy-node/` remains intact until Stage 1B closes all deferred Hub assertions listed in `docs/superpowers/plans/2026-11-27-polyclave-v5-test-migration.md`.
+
+## v5 Phase 1B Hub and optical desktop review handoff
+
+Commits:
+- `ddb05f7` feat(hub): add HubModelProvider trait and ApiHubProvider streaming
+- `87ec0f4` feat(hub): implement CliHubProvider incremental resume and canonical dual-write
+- `f2a896d` feat(hub): add read-only repo tools, memory curation, and manager sessions
+- `b84fe10` feat(hub): implement proactive event triage loop and ticket budget guardrails
+- `81190d9` feat(app): add Tauri v2 desktop shell, daemon lifecycle, and keyring integration
+- `1a86b47` feat(ui): build 3-column optical layout, dual themes, SSE client, and core views
+- `180b0f8` feat(ui): implement clean-room damped-spring motion engine, WebGL2 aurora, ink stream, vial, and pet stage
+- `c39126b` docs(ui): sync DESIGN.md and verify v5 desktop/mobile UI in headless browser
+- `7dc30ab` ci: use runner Chrome for offline desktop and mobile checks
+
+Tests: the [native check for the Task 8 code and CI follow-up](https://github.com/DustNonStar/polyclave/actions/runs/45935004696) passed on macos-latest and windows-latest, including UI tsc --noEmit, both Chrome viewports, the generated proto.ts check, and the full-history privacy scan. Linux: format, locked Clippy, and locked workspace tests passed (55 passed, 0 failed). The fixture checked Flash-first ordering, the default display label, no horizontal overflow, full-width aurora, ink ranges and cleanup, plain reduced-motion streaming, and no non-loopback page requests at 1440×900 and 375×812. The stock profile test covers both new databases and the idempotent upgrade of the unchanged legacy stock profile; it preserves a custom endpoint and an independent custom profile. No archived Node test files or generated protocol exports were edited. Offline Hub evidence includes stream and tool-call parsing, in-order durable queue / request replay, continuation and provider switching, interrupted input handling, repository scoping, memory confirmation, and Ticket budgets. Offline provider and browser fixtures do not certify vendor login, the installed WebView, or a live provider's tool behavior.
+
+Hand check (owner, pending):
+1. Build the lightweight UI with `npm ci --ignore-scripts` and `npm run build` from `apps/polyclave-app/ui`, then build both companion binaries with `cargo build --locked -p polyclaved -p polyclave-app`. Use a disposable project and a separate state directory. Verify browser fragment bootstrap, desktop tray open/hide, daemon survival when the window closes, native review/blocked notifications, and keychain status with no plaintext credential in UI output or logs.
+2. At **1440×900** and **375×812**, test both themes in the installed desktop WebView and direct browser. Check three panes versus responsive tabs, focus during SSE updates, 44 px phone controls, and no horizontal overflow. Check Review's displayed SHA, read-only Files, verified Memory, and the explicit confirmation for Remember this rule (including a Run decision). In Settings, check Flash first, Pro second, quota rings with real data where available, and honest unavailable values otherwise.
+3. In both sizes, trigger streaming and verify the full-width moving aurora, ink fade and disappearing custom highlights, composer caret, context vial, and Deepy's footless spray and the other three pets. Watch idle settle to static afterglow and enable reduced motion to verify text stays readable. Headless evidence is not a substitute for the installed WKWebView/WebView2 smoke check.
+4. In a disposable repository, opt in separately to real Codex and Claude **Worker** probes (`POLYCLAVE_REAL_CODEX=1`, `POLYCLAVE_REAL_CLAUDE=1)). Verify allowed workspace edits, staged publication and signed receipt, R1 recheck and final SHA, controlled cancellation, persistent isolated homes, and temporary MCP config cleanup. Claude without verified confinement must refuse; that refusal is not a passed real Claude Worker probe.
+5. For the real **CLI Hub** probe, verify Codex and Claude with the configured read-only tool policy. Send a turn, switch away and back, restart, and confirm same-thread delta continuation, transcript preservation, and missing-thread recovery. Verify no unauthorized repository access or tools, Claude subscription launch without the bare flag, and record observed latency and tool-call correctness without credential data. Smoke-check the separately configured DeepSeek API profile on both official model IDs.
+
+Issues: the sequencing gate and the DeepSeek model inventory decisions in PLAN-ISSUES.md are resolved. Flash is first within the official profile; Pro is optional. The change does not switch unrelated sessions to DeepSeek. Native command macro registration from the prior checkpoint was corrected. The browser fixture uses the hosted runner Chrome channel rather than downloading a second browser in CI; installed WebView checks are separate.
+
+Cleanup: workspace and UI fixtures shut down their listeners and stop their subprocesses. No real vendor CLI, vendor API, or user machine was used.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
+
+Not done: installed desktop/browser walkthrough and real provider probes remain pending local review. No merge or archive removal; keep `legacy-node/` unchanged until the owner approves removal after acceptance.
