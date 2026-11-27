@@ -404,6 +404,15 @@ impl ReviewerExecutor for HostReviewerExecutor {
     }
 }
 
+/// Returns the Run's R1-verified `result_sha`. An `observed_sha` alone is a
+/// branch tip nobody verified, so it never reaches review, push or auto-merge.
+fn verified_result_sha(run: &polyclave_proto::RunDto) -> HubResult<String> {
+    run.result_sha
+        .clone()
+        .filter(|sha| !sha.trim().is_empty())
+        .ok_or(Error::Policy)
+}
+
 struct HostWorkerReviseExecutor {
     runner: TurnRunner,
 }
@@ -429,7 +438,7 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::Policy)?;
-            run.result_sha.or(run.observed_sha).ok_or(Error::Policy)
+            verified_result_sha(&run)
         })
     }
 
@@ -452,7 +461,7 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::Policy)?;
-            run.result_sha.or(run.observed_sha).ok_or(Error::Policy)
+            verified_result_sha(&run)
         })
     }
 }
@@ -1019,15 +1028,19 @@ impl Hub {
             .or_else(|| existing_gate.as_ref().map(|g| g.base_sha.clone()))
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| run.base_sha.clone());
-        let head_sha = inputs
+        // Only the Run's R1-verified result is reviewed, pushed and armed.
+        let head_sha = verified_result_sha(&run).map_err(|_| {
+            PrGatePrepError::Invalid("run has no R1-verified result_sha to publish")
+        })?;
+        if inputs
             .head_sha
-            .or_else(|| run.result_sha.clone())
-            .or_else(|| run.observed_sha.clone())
-            .or_else(|| existing_gate.as_ref().map(|g| g.head_sha.clone()))
-            .filter(|s| !s.trim().is_empty())
-            .ok_or(PrGatePrepError::Invalid(
-                "head_sha is required when run has no recorded commit SHA",
-            ))?;
+            .as_deref()
+            .is_some_and(|h| !h.trim().is_empty() && h != head_sha)
+        {
+            return Err(PrGatePrepError::Invalid(
+                "head_sha must equal the run's R1-verified result_sha",
+            ));
+        }
         let pr_title = inputs
             .pr_title
             .filter(|s| !s.trim().is_empty())

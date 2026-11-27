@@ -666,6 +666,90 @@ fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
 }
 
 #[tokio::test]
+async fn pr_gate_refuses_a_run_with_only_an_observed_sha() {
+    let (dir, hub, _rx) = test_hub().await;
+    let (run_id, base_sha, head_sha) = setup_git_run_fixture(dir.path(), &hub);
+    // A second Run of the same ticket whose tip was observed but never verified.
+    let mirror: String = hub
+        .store
+        .read({
+            let run_id = run_id.clone();
+            move |db| {
+                Ok(db.query_row(
+                    "SELECT mirror_remote FROM runs WHERE id=?1",
+                    [&run_id],
+                    |r| r.get(0),
+                )?)
+            }
+        })
+        .unwrap();
+    let repo = hub.runs.get(&run_id).unwrap().repo_cwd;
+    let observed = head_sha.clone();
+    let base = base_sha.clone();
+    hub.store
+        .write(move |db| {
+            db.execute(
+                "INSERT INTO sessions(id,name,role,vendor,repo_cwd,profile_id,provider_model,created_at)
+                 VALUES('w-gate-2','Worker 2','worker','codex',?1,'api','gpt-5','now')",
+                [&repo],
+            )?;
+            db.execute(
+                "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,observed_sha,status,created_at,updated_at)
+                 VALUES('ra0000ad2','t-gate','hub','w-gate-2','req-gate-2',?1,'codex','gpt-5','do it',?2,'main',?3,?4,'needs_review','now','now')",
+                params![repo, mirror, base, observed],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // The revise executor's SHA source refuses an observed-only Run.
+    let unverified = hub.runs.get("ra0000ad2").unwrap();
+    assert_eq!(unverified.observed_sha.as_deref(), Some(head_sha.as_str()));
+    assert!(verified_result_sha(&unverified).is_err());
+    assert_eq!(
+        verified_result_sha(&hub.runs.get(&run_id).unwrap()).unwrap(),
+        head_sha
+    );
+
+    let pusher = Arc::new(MockPusher::new());
+    hub.set_scm(Arc::new(MockScmClient {
+        state: Arc::new(MockScmState::default()),
+        polled: None,
+    }));
+    hub.set_reviewer(Arc::new(MockReviewer));
+    hub.set_pusher(pusher.clone());
+    hub.set_default_reviewers(vec![ReviewerSpec {
+        vendor: Vendor::Claude,
+        model: "claude-sonnet-4-6".into(),
+    }]);
+    let app = daemon_router(&hub);
+    // Neither the observed tip nor a caller-supplied head_sha can stand in for
+    // a verified result.
+    for body in [
+        json!({"repo_slug": "org/repo", "branch": "feat/unverified"}),
+        json!({"repo_slug": "org/repo", "branch": "feat/unverified", "head_sha": head_sha}),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(authed_post("/api/pr-gates/ra0000ad2/run", body))
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error(), "{}", res.status());
+    }
+    let res = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{run_id}/run"),
+            json!({"repo_slug": "org/repo", "branch": "feat/other", "head_sha": base_sha}),
+        ))
+        .await
+        .unwrap();
+    assert!(res.status().is_client_error(), "{}", res.status());
+    assert!(pusher.pushed.lock().unwrap().is_empty());
+    hub.close().await;
+}
+
+#[tokio::test]
 async fn councils_routes_enforce_blind_projection_and_reveal_after_resolve() {
     let (_dir, hub, _rx) = test_hub().await;
     hub.set_council_participants(vec![

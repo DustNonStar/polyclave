@@ -335,6 +335,26 @@ fn enqueue_hub_notice(store: &Store, hub_session_id: Option<&str>, intent: &str,
     }
 }
 
+fn escalate(
+    deps: &PrGateDeps,
+    gate_id: &str,
+    hub_session_id: Option<&str>,
+    reason: &str,
+    detail: &str,
+) -> Result<PrGateDto> {
+    let escalated = deps
+        .store
+        .set_pr_gate_status(gate_id, PrGateStatus::Escalated)
+        .map_err(map_store_err)?;
+    enqueue_hub_notice(
+        &deps.store,
+        hub_session_id,
+        &format!("pr_gate:{}:{reason}", escalated.id),
+        &format!("PR gate {} escalated: {detail}", escalated.id),
+    );
+    Ok(escalated)
+}
+
 /// Runs the full PR gate lifecycle for a completed run.
 pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrGateDto> {
     if deps.store.pause_state().map_err(map_store_err)?.paused {
@@ -402,8 +422,18 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err)?;
 
         let bounced = if let Some(ref exec) = deps.worker_revise {
-            exec.bounce_scope_violation(&gate, &scope.violations)
-                .await?
+            match exec.bounce_scope_violation(&gate, &scope.violations).await {
+                Ok(sha) => sha,
+                Err(_) => {
+                    return escalate(
+                        deps,
+                        &gate.id,
+                        req.hub_session_id.as_deref(),
+                        "bounce_unverified",
+                        "the scope-bounce Worker turn produced no R1-verified result",
+                    );
+                }
+            }
         } else {
             let escalated = deps
                 .store
@@ -600,7 +630,20 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .begin_revise_round(&gate.id)
             .map_err(map_store_err)?;
         let combined = revise_comments.join("\n---\n");
-        let new_head = exec.revise_pr(&gate, &combined).await?;
+        // Only an R1-verified result may reach review, push and auto-merge; a
+        // revise turn without one escalates to a human.
+        let new_head = match exec.revise_pr(&gate, &combined).await {
+            Ok(sha) => sha,
+            Err(_) => {
+                return escalate(
+                    deps,
+                    &gate.id,
+                    req.hub_session_id.as_deref(),
+                    "revise_unverified",
+                    "the revise Worker turn produced no R1-verified result",
+                );
+            }
+        };
 
         let revise_scope = check_touched_paths(
             &req.mirror_path,
@@ -1369,6 +1412,152 @@ mod tests {
             gh.enable_auto_merge_calls.lock().unwrap()[0].1,
             fix.good_head_sha
         );
+        server.abort();
+    }
+
+    /// A revise turn that ends with only an observed (unverified) tip: the host
+    /// executor reports no R1-verified result.
+    struct UnverifiedRevise {
+        revisions: AtomicUsize,
+    }
+    impl WorkerReviseExecutor for UnverifiedRevise {
+        fn bounce_scope_violation<'a>(
+            &'a self,
+            _gate: &'a PrGateDto,
+            _violations: &'a [String],
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(Error::Policy) })
+        }
+        fn revise_pr<'a>(
+            &'a self,
+            _gate: &'a PrGateDto,
+            _review_comments: &'a str,
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                self.revisions.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Policy)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn unverified_revise_result_escalates_instead_of_reaching_review() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        // Only one verdict: a second review would panic on the empty queue.
+        let reviewer = Arc::new(MockReviewer {
+            verdicts: Mutex::new(vec![ReviewVerdict::Revise]),
+            seen_worktrees: Mutex::new(Vec::new()),
+        });
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let revise = Arc::new(UnverifiedRevise {
+            revisions: AtomicUsize::new(0),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: reviewer.clone(),
+            worker_revise: Some(revise.clone()),
+            pusher: pusher.clone(),
+        };
+        let gate = run_pr_gate(
+            &deps,
+            RunPrGateRequest {
+                run_id: "run1".into(),
+                hub_session_id: Some("hub".into()),
+                mirror_path: fix.mirror.clone(),
+                repo_slug: "org/repo".into(),
+                branch: "feat/revise".into(),
+                base_branch: "main".into(),
+                base_sha: fix.base_sha.clone(),
+                head_sha: fix.good_head_sha.clone(),
+                pr_title: "feat: revise".into(),
+                pr_body: "body".into(),
+                touched_paths: vec!["src/**".into()],
+                is_high_risk: false,
+                reviewers: vec![ReviewerSpec {
+                    vendor: Vendor::Claude,
+                    model: "claude-sonnet-4-6".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert!(!gate.auto_merge_armed);
+        assert_eq!(gate.head_sha, fix.good_head_sha);
+        assert_eq!(revise.revisions.load(Ordering::SeqCst), 1);
+        // Reviewed once (the verified head), never the revise output.
+        assert_eq!(reviewer.seen_worktrees.lock().unwrap().len(), 1);
+        assert_eq!(
+            *pusher.pushed.lock().unwrap(),
+            vec![(fix.good_head_sha.clone(), "feat/revise".to_owned())]
+        );
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unverified_scope_bounce_result_escalates_without_push() {
+        let fix = setup_git_and_store();
+        let (base_url, _gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: Some(Arc::new(UnverifiedRevise {
+                revisions: AtomicUsize::new(0),
+            })),
+            pusher: pusher.clone(),
+        };
+        let gate = run_pr_gate(
+            &deps,
+            RunPrGateRequest {
+                run_id: "run1".into(),
+                hub_session_id: None,
+                mirror_path: fix.mirror.clone(),
+                repo_slug: "org/repo".into(),
+                branch: "feat/bounce".into(),
+                base_branch: "main".into(),
+                base_sha: fix.base_sha.clone(),
+                head_sha: fix.bad_head_sha_1.clone(),
+                pr_title: "feat: bounce".into(),
+                pr_body: "body".into(),
+                touched_paths: vec!["src/**".into()],
+                is_high_risk: false,
+                reviewers: vec![ReviewerSpec {
+                    vendor: Vendor::Claude,
+                    model: "claude-sonnet-4-6".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert!(pusher.pushed.lock().unwrap().is_empty());
         server.abort();
     }
 }
