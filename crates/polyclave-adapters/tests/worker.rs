@@ -1,6 +1,7 @@
 use polyclave_adapters::{
-    claude_args, claude_worker, codex_args, codex_worker, parse_claude, parse_codex,
-    prepare_isolated_home_from, ClaudeIsolation, Error, WorkerContext,
+    agy_args, agy_worker, claude_args, claude_worker, codex_args, codex_worker, dsh_args,
+    dsh_worker, parse_agy, parse_claude, parse_codex, parse_dsh, prepare_isolated_home_from,
+    ClaudeIsolation, Error, WorkerContext,
 };
 use polyclave_proto::{AgentEvent, Vendor};
 use std::ffi::OsString;
@@ -245,4 +246,231 @@ fn claude_worker_sets_secure_storage_dir_when_isolated() {
         assert!(cmd.env.iter().any(|(k, _)| k == "USER"));
     }
     assert!(state.join("tmp/mcp-turn-7.json").is_file());
+}
+
+#[test]
+fn agy_and_dsh_args_match_expected_flags() {
+    let paths: Vec<_> = ["worktree", "staging"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+    let agy = agy_args(
+        &paths,
+        Path::new("tmp/mcp-turn-3.json"),
+        Some("gemini-3.8-flash"),
+        Some("agy-thread-1"),
+    );
+    let agy_strs: Vec<_> = agy.iter().map(|s| s.to_str().unwrap()).collect();
+    assert_eq!(
+        &agy_strs[..6],
+        [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--sandbox",
+            "--mode",
+            "auto"
+        ]
+    );
+    assert!(agy_strs.windows(2).any(|w| w == ["--add-dir", "worktree"]));
+    assert!(agy_strs.windows(2).any(|w| w == ["--add-dir", "staging"]));
+    assert!(agy_strs
+        .windows(2)
+        .any(|w| w == ["--settings", "tmp/mcp-turn-3.json"]));
+    assert!(agy_strs
+        .windows(2)
+        .any(|w| w == ["--resume", "agy-thread-1"]));
+    assert!(agy_strs
+        .windows(2)
+        .any(|w| w == ["--model", "gemini-3.8-flash"]));
+
+    let dsh = dsh_args(&paths, Some("deepseek-v4"), Some("dsh-session-9"));
+    let dsh_strs: Vec<_> = dsh.iter().map(|s| s.to_str().unwrap()).collect();
+    assert_eq!(
+        &dsh_strs[..7],
+        [
+            "--profile",
+            "headless",
+            "--json",
+            "--permission-mode",
+            "workspace-write",
+            "--approval-policy",
+            "never"
+        ]
+    );
+    assert!(dsh_strs.windows(2).any(|w| w == ["--add-dir", "worktree"]));
+    assert!(dsh_strs.windows(2).any(|w| w == ["--add-dir", "staging"]));
+    assert!(dsh_strs
+        .windows(2)
+        .any(|w| w == ["--session-id", "dsh-session-9"]));
+    assert!(dsh_strs.windows(2).any(|w| w == ["--model", "deepseek-v4"]));
+    assert_eq!(dsh_strs.last().copied(), Some("-"));
+}
+
+#[test]
+fn agy_and_dsh_worker_reject_overlapping_write_roots_and_prepare_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let work = dir.path().join("work");
+    let stage = dir.path().join("stage");
+    let primary = dir.path().join("primary");
+    let mirror = dir.path().join("mirror");
+    let overlap_mirror = stage.join("mirror");
+    let fake_cli = dir.path().join("fake-cli");
+    for d in [
+        &state,
+        &state.join("tmp"),
+        &work,
+        &stage,
+        &primary,
+        &mirror,
+        &overlap_mirror,
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(&fake_cli, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let overlap_ctx = WorkerContext {
+        executable: &fake_cli,
+        state_dir: &state,
+        worktree: &work,
+        staging: &stage,
+        primary_repo: &primary,
+        final_mirror: &overlap_mirror,
+        mcp_url: "http://127.0.0.1:4310/mcp",
+        turn_id: 10,
+        token: "fixture-turn-key",
+        model: None,
+        thread: None,
+    };
+    assert!(matches!(agy_worker(&overlap_ctx), Err(Error::Invalid)));
+    assert!(matches!(dsh_worker(&overlap_ctx), Err(Error::Invalid)));
+
+    let valid_ctx = WorkerContext {
+        executable: &fake_cli,
+        state_dir: &state,
+        worktree: &work,
+        staging: &stage,
+        primary_repo: &primary,
+        final_mirror: &mirror,
+        mcp_url: "http://127.0.0.1:4310/mcp",
+        turn_id: 11,
+        token: "fixture-turn-key",
+        model: None,
+        thread: None,
+    };
+    let agy_cmd = agy_worker(&valid_ctx).unwrap();
+    assert!(state.join("tmp/mcp-turn-11.json").is_file());
+    assert!(agy_cmd
+        .env
+        .iter()
+        .any(|(k, v)| k == "POLYCLAVE_MCP_TOKEN" && v == "fixture-turn-key"));
+    assert!(agy_cmd
+        .env
+        .iter()
+        .any(|(k, v)| k == "GEMINI_HOME" && Path::new(v).ends_with("isolated-homes/agy")));
+
+    let dsh_cmd = dsh_worker(&valid_ctx).unwrap();
+    assert!(dsh_cmd
+        .env
+        .iter()
+        .any(|(k, v)| k == "POLYCLAVE_MCP_TOKEN" && v == "fixture-turn-key"));
+    assert!(dsh_cmd
+        .env
+        .iter()
+        .any(|(k, v)| k == "DSH_HOME" && Path::new(v).ends_with("isolated-homes/dsh")));
+}
+
+#[test]
+fn agy_and_dsh_ndjson_parsers_emit_agent_events() {
+    assert_eq!(
+        parse_agy(r#"{"type":"init","session_id":"agy-1"}"#),
+        Some(AgentEvent::Session { id: "agy-1".into() })
+    );
+    assert_eq!(
+        parse_agy(r#"{"type":"message","role":"assistant","content":"hello agy"}"#),
+        Some(AgentEvent::TextDelta {
+            text: "hello agy".into()
+        })
+    );
+    assert_eq!(
+        parse_agy(r#"{"type":"message","role":"thought","content":"agy thinking"}"#),
+        Some(AgentEvent::ReasoningDelta {
+            text: "agy thinking".into()
+        })
+    );
+    assert_eq!(
+        parse_agy(r#"{"type":"result","status":"success"}"#),
+        Some(AgentEvent::Finished { success: true })
+    );
+    assert_eq!(
+        parse_agy(r#"{"type":"result","is_error":true}"#),
+        Some(AgentEvent::Finished { success: false })
+    );
+    assert_eq!(parse_agy("not-json"), None);
+
+    assert_eq!(
+        parse_dsh(r#"{"type":"session.started","session_id":"dsh-1"}"#),
+        Some(AgentEvent::Session { id: "dsh-1".into() })
+    );
+    assert_eq!(
+        parse_dsh(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello dsh"}}"#
+        ),
+        Some(AgentEvent::TextDelta {
+            text: "hello dsh".into()
+        })
+    );
+    assert_eq!(
+        parse_dsh(r#"{"type":"item.completed","item":{"type":"reasoning","text":"dsh thinking"}}"#),
+        Some(AgentEvent::ReasoningDelta {
+            text: "dsh thinking".into()
+        })
+    );
+    assert_eq!(
+        parse_dsh(r#"{"type":"turn.completed"}"#),
+        Some(AgentEvent::Finished { success: true })
+    );
+    assert_eq!(
+        parse_dsh(r#"{"type":"run.failed"}"#),
+        Some(AgentEvent::Finished { success: false })
+    );
+    assert_eq!(parse_dsh("not-json"), None);
+}
+
+#[test]
+fn prepare_isolated_home_links_only_credentials_and_skills_for_agy_and_dsh() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let src_agy = dir.path().join("user-agy");
+    let src_dsh = dir.path().join("user-dsh");
+    for d in [
+        &state,
+        &src_agy,
+        &src_agy.join("skills"),
+        &src_dsh,
+        &src_dsh.join("skills"),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(src_agy.join("oauth_creds.json"), "{}").unwrap();
+    std::fs::write(src_agy.join("settings.json"), "ignored").unwrap();
+    std::fs::write(src_dsh.join("credentials.json"), "{}").unwrap();
+    std::fs::write(src_dsh.join("config.toml"), "ignored").unwrap();
+
+    let agy_iso = prepare_isolated_home_from(&state, Vendor::Agy, Some(&src_agy)).unwrap();
+    assert!(agy_iso.join("oauth_creds.json").exists());
+    assert!(agy_iso.join("skills").is_dir());
+    assert!(!agy_iso.join("settings.json").exists());
+
+    let dsh_iso = prepare_isolated_home_from(&state, Vendor::Dsh, Some(&src_dsh)).unwrap();
+    assert!(dsh_iso.join("credentials.json").exists());
+    assert!(dsh_iso.join("skills").is_dir());
+    assert!(!dsh_iso.join("config.toml").exists());
 }

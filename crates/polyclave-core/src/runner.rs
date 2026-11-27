@@ -1,7 +1,7 @@
 use crate::runs::{change, load_attempt, load_run, Result, RunManager, RunWork};
 use polyclave_adapters::{
-    claude_worker, codex_worker, parse_claude, parse_codex, tmp_config_path, ClaudeIsolation,
-    WorkerCommand, WorkerContext,
+    agy_worker, claude_worker, codex_worker, dsh_worker, parse_agy, parse_claude, parse_codex,
+    parse_dsh, tmp_config_path, ClaudeIsolation, WorkerCommand, WorkerContext,
 };
 use polyclave_os::{
     boot_epoch, canonical_real_path, create_private_dir, hard_stop_excludes_writers,
@@ -37,6 +37,8 @@ pub struct TurnRunner {
     mcp_url: String,
     codex: PathBuf,
     claude: PathBuf,
+    agy: PathBuf,
+    dsh: PathBuf,
     confinement: Option<Arc<dyn ClaudeIsolation>>,
     active: Arc<Mutex<Active>>,
     events: Arc<EventSink>,
@@ -83,10 +85,22 @@ impl TurnRunner {
             mcp_url: config.mcp_url,
             codex: config.codex,
             claude: config.claude,
+            agy: PathBuf::from("agy"),
+            dsh: PathBuf::from("dsh"),
             confinement: config.claude_isolation,
             active: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(events),
         })
+    }
+
+    pub fn with_agy(mut self, path: PathBuf) -> Self {
+        self.agy = path;
+        self
+    }
+
+    pub fn with_dsh(mut self, path: PathBuf) -> Self {
+        self.dsh = path;
+        self
     }
 
     pub fn cancel(&self, id: &str) -> Result<()> {
@@ -362,8 +376,8 @@ impl TurnRunner {
                     let ev = match vendor {
                         Vendor::Codex => parse_codex(&text),
                         Vendor::Claude => parse_claude(&text),
-                        // Stage 2 adapters (Item 2A.3) are not wired yet.
-                        Vendor::Agy | Vendor::Dsh => None,
+                        Vendor::Agy => parse_agy(&text),
+                        Vendor::Dsh => parse_dsh(&text),
                     };
                     if let Some(ev) = ev {
                         if events.send(ev).is_err() {
@@ -451,8 +465,8 @@ impl TurnRunner {
             executable: match work.run.vendor {
                 Vendor::Codex => &self.codex,
                 Vendor::Claude => &self.claude,
-                // Stage 2 adapters (Item 2A.3) are not wired yet.
-                Vendor::Agy | Vendor::Dsh => return Err(polyclave_adapters::Error::Invalid),
+                Vendor::Agy => &self.agy,
+                Vendor::Dsh => &self.dsh,
             },
             state_dir: &self.state,
             worktree: &work.workspace.cwd,
@@ -468,7 +482,8 @@ impl TurnRunner {
         match work.run.vendor {
             Vendor::Codex => codex_worker(&ctx),
             Vendor::Claude => claude_worker(&ctx, Uuid::new_v4(), self.confinement.as_deref()),
-            Vendor::Agy | Vendor::Dsh => Err(polyclave_adapters::Error::Invalid),
+            Vendor::Agy => agy_worker(&ctx),
+            Vendor::Dsh => dsh_worker(&ctx),
         }
     }
 

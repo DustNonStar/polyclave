@@ -1,10 +1,14 @@
 //! Vendor protocol adapters. Git verification is supplied by the host, not a vendor.
+mod agy;
 mod claude;
 mod codex;
+mod dsh;
 pub mod mcp;
 
+pub use agy::{agy_args, agy_worker, parse_agy};
 pub use claude::{claude_args, claude_worker, parse_claude};
 pub use codex::{codex_args, codex_worker, parse_codex};
+pub use dsh::{dsh_args, dsh_worker, parse_dsh};
 
 use polyclave_os::{canonical_real_path, create_private_dir, prepare_isolated_link};
 use polyclave_proto::Vendor;
@@ -73,8 +77,13 @@ fn default_vendor_source(vendor: Vendor) -> Option<PathBuf> {
         Vendor::Claude => std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| user_home_dir().map(|h| h.join(".claude"))),
-        // Stage 2 adapters (Item 2A.3) are not wired yet.
-        Vendor::Agy | Vendor::Dsh => None,
+        Vendor::Agy => std::env::var_os("AGY_HOME")
+            .or_else(|| std::env::var_os("GEMINI_HOME"))
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|h| h.join(".gemini"))),
+        Vendor::Dsh => std::env::var_os("DSH_HOME")
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|h| h.join(".dsh"))),
     }
 }
 
@@ -98,13 +107,14 @@ pub fn prepare_isolated_home_from(
     let vendor_name = match vendor {
         Vendor::Codex => "codex",
         Vendor::Claude => "claude",
-        // Stage 2 adapters (Item 2A.3) are not wired yet.
-        Vendor::Agy | Vendor::Dsh => return Err(Error::Invalid),
+        Vendor::Agy => "agy",
+        Vendor::Dsh => "dsh",
     };
     let entries: &[&str] = match vendor {
         Vendor::Codex => &["auth.json", "skills"],
         Vendor::Claude => &[".credentials.json", "skills"],
-        Vendor::Agy | Vendor::Dsh => return Err(Error::Invalid),
+        Vendor::Agy => &["credentials.json", "oauth_creds.json", "skills"],
+        Vendor::Dsh => &["auth.json", "credentials.json", "skills"],
     };
     let parent = state_dir.join("isolated-homes");
     let isolated = parent.join(vendor_name);

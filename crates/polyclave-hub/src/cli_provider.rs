@@ -126,8 +126,46 @@ fn args(
             ]);
             a
         }
-        // Unreachable: `SupervisedCli::execute` refuses Stage 2 vendors before spawning.
-        Vendor::Agy | Vendor::Dsh => Vec::new(),
+        Vendor::Agy => {
+            let mut a = [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--sandbox",
+                "--settings",
+            ]
+            .map(OsString::from)
+            .to_vec();
+            a.push(config.into());
+            if model != "default" {
+                a.extend(["--model".into(), model.into()]);
+            }
+            if let Some(t) = thread {
+                a.extend(["--resume".into(), t.into()]);
+            }
+            a
+        }
+        Vendor::Dsh => {
+            let mut a = [
+                "--profile",
+                "headless",
+                "--json",
+                "--permission-mode",
+                "read-only",
+                "--approval-policy",
+                "never",
+            ]
+            .map(OsString::from)
+            .to_vec();
+            if let Some(t) = thread {
+                a.extend(["--session-id".into(), t.into()]);
+            }
+            if model != "default" {
+                a.extend(["--model".into(), model.into()]);
+            }
+            a.push("-".into());
+            a
+        }
     }
 }
 
@@ -339,10 +377,6 @@ impl CliTransport for SupervisedCli {
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::CancelledBeforeStart);
         }
-        // Stage 2 vendors (Item 2A.3) have no Hub CLI transport yet.
-        if !matches!(self.vendor, Vendor::Codex | Vendor::Claude) {
-            return Err(Error::NotStarted);
-        }
         let url = reqwest::Url::parse(&self.mcp_url).map_err(|_| Error::NotStarted)?;
         if url.scheme() != "http"
             || url.host_str() != Some("127.0.0.1")
@@ -365,7 +399,7 @@ impl CliTransport for SupervisedCli {
         let config = self.tmp.join(format!("mcp-turn-{}.json", claim.id));
         let marker = self.tmp.join(format!("turn-{}.released", claim.id));
         let cleanup = Cleanup::new(config.clone());
-        if self.vendor == Vendor::Claude {
+        if matches!(self.vendor, Vendor::Claude | Vendor::Agy) {
             let data = json!({"mcpServers":{"host":{"type":"http","url":self.mcp_url,
                 "headers":{"Authorization":format!("Bearer {}",claim.turn_credential())}}}});
             polyclave_os::write_private_file(
@@ -375,18 +409,30 @@ impl CliTransport for SupervisedCli {
             .map_err(|_| Error::NotStarted)?;
         }
         let mut env = polyclave_adapters::base_environment();
-        if self.vendor == Vendor::Codex {
-            env.push(("CODEX_HOME".into(), self.home.clone().into_os_string()));
-            env.push(("POLYCLAVE_MCP_TOKEN".into(), claim.turn_credential().into()));
-        } else {
-            env.push((
-                "CLAUDE_CONFIG_DIR".into(),
-                self.home.clone().into_os_string(),
-            ));
-            env.push((
-                "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
-                polyclave_adapters::claude_secure_storage_dir(),
-            ));
+        match self.vendor {
+            Vendor::Codex => {
+                env.push(("CODEX_HOME".into(), self.home.clone().into_os_string()));
+                env.push(("POLYCLAVE_MCP_TOKEN".into(), claim.turn_credential().into()));
+            }
+            Vendor::Claude => {
+                env.push((
+                    "CLAUDE_CONFIG_DIR".into(),
+                    self.home.clone().into_os_string(),
+                ));
+                env.push((
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                    polyclave_adapters::claude_secure_storage_dir(),
+                ));
+            }
+            Vendor::Agy => {
+                env.push(("GEMINI_HOME".into(), self.home.clone().into_os_string()));
+                env.push(("AGY_HOME".into(), self.home.clone().into_os_string()));
+                env.push(("POLYCLAVE_MCP_TOKEN".into(), claim.turn_credential().into()));
+            }
+            Vendor::Dsh => {
+                env.push(("DSH_HOME".into(), self.home.clone().into_os_string()));
+                env.push(("POLYCLAVE_MCP_TOKEN".into(), claim.turn_credential().into()));
+            }
         }
         let (system_prompt, prompt_text) = format_prompt(
             self.vendor,
@@ -520,7 +566,8 @@ impl CliTransport for SupervisedCli {
             let event = match self.vendor {
                 Vendor::Codex => polyclave_adapters::parse_codex(&line),
                 Vendor::Claude => polyclave_adapters::parse_claude(&line),
-                Vendor::Agy | Vendor::Dsh => None,
+                Vendor::Agy => polyclave_adapters::parse_agy(&line),
+                Vendor::Dsh => polyclave_adapters::parse_dsh(&line),
             };
             match event {
                 Some(AgentEvent::Session { id }) => {
@@ -756,6 +803,50 @@ mod tests {
         assert!(is_missing_thread_text(
             "Error: No conversation found with session ID"
         ));
+        let agy = args(
+            Vendor::Agy,
+            "gemini-3.8-flash",
+            Some("agy-thread"),
+            true,
+            "http://127.0.0.1:1/mcp",
+            Path::new("agy-config.json"),
+            None,
+        );
+        assert!(agy
+            .windows(2)
+            .any(|p| p[0] == "--output-format" && p[1] == "stream-json"));
+        assert!(agy
+            .windows(2)
+            .any(|p| p[0] == "--settings" && p[1] == "agy-config.json"));
+        assert!(agy
+            .windows(2)
+            .any(|p| p[0] == "--resume" && p[1] == "agy-thread"));
+        assert!(agy
+            .windows(2)
+            .any(|p| p[0] == "--model" && p[1] == "gemini-3.8-flash"));
+
+        let dsh = args(
+            Vendor::Dsh,
+            "deepseek-chat",
+            Some("dsh-thread"),
+            false,
+            "http://127.0.0.1:1/mcp",
+            Path::new("unused.json"),
+            None,
+        );
+        assert!(dsh
+            .windows(2)
+            .any(|p| p[0] == "--profile" && p[1] == "headless"));
+        assert!(dsh
+            .windows(2)
+            .any(|p| p[0] == "--permission-mode" && p[1] == "read-only"));
+        assert!(dsh
+            .windows(2)
+            .any(|p| p[0] == "--session-id" && p[1] == "dsh-thread"));
+        assert!(dsh
+            .windows(2)
+            .any(|p| p[0] == "--model" && p[1] == "deepseek-chat"));
+        assert_eq!(dsh.last().unwrap(), "-");
     }
 }
 
