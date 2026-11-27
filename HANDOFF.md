@@ -834,3 +834,17 @@ Branch `claude/mesh-run-budget-b7a297` (`f0dedff..ac81ae8`) was fast-forwarded i
 - `ac81ae8`: `worker_run` now requires a non-blank `request_id`. The receiver returns 400 without one, and the primary's `dispatch_remote` refuses before sending. The same id twice admits one Run. Local macOS: fmt and Clippy clean, 141 passed, 0 failed; privacy scan clean.
 - Remaining gap: the `request_id` comes from the Hub model's tool call, not from durable primary state. After a primary crash, the model may resend with a new id. Option A in the open PLAN-ISSUES entry (a primary remote-dispatch row keyed by Hub session and `request_id`) would close this.
 - `f0dedff`: opens a `direction` entry in `PLAN-ISSUES.md` asking where a remote Run is charged against a Ticket budget. Options A, B and C are listed there; A is recommended. Until it is decided, remote Runs still bypass the requesting Ticket's `max_runs`.
+
+## Legacy-node removal: no acceptance record (2026-11-27)
+
+A records check, not a review of code.
+
+- **What the commit says.** `01c8645` "chore: remove archived legacy-node after v5 Rust acceptance" deletes all 33 files under `legacy-node/` (14,311 lines). The message has no body. The GitHub check run for that commit on `main` failed; the next green run on `main` is at `52bc69f`.
+- **What the records show.** Before `01c8645`, every record keeps the archive until acceptance:
+  - "v5 Phase 1A Rust host and native checks": leave `legacy-node/` intact until the transferred tests pass and deletion is explicitly approved.
+  - "v5 Phase 1B Hub and optical desktop review handoff": keep `legacy-node/` unchanged until the owner approves removal after acceptance.
+  - "v5 Phase 1B review: passed, merged": real vendor CLI and API probes and the installed WebView check remain pending; keep `legacy-node/` until that pass completes.
+  - `PLAN-ISSUES.md`, the owner decision of 2026-11-27 on Phase 1B startup: the real Worker and CLI Hub probes and the local 1440/375 review remain final local acceptance, not passed; preserve the complete archive.
+- **What is missing.** No entry in this file, `PLAN-ISSUES.md`, `REVIEWER.md` or `handcheck/` records that real-environment acceptance passed, or that the owner approved removing the archive. Who decided the removal is not recorded. `docs/LESSONS.md` item 7 describes the same gap.
+- **Recovery.** The archive is unchanged in git history: `git checkout 01c8645^ -- legacy-node` restores it.
+- **Still pending.** Real `codex` and `claude` Worker probes; real CLI Hub probes; live DeepSeek `deepseek-flash` and `deepseek-v4-pro` calls; the installed WKWebView and WebView2 walkthrough; a real GitHub push, PR and auto-merge through the PR gate; a real phone scan of the pairing QR, with approval and revocation; a two-machine mesh run. `README.md` lists the same items by capability.
