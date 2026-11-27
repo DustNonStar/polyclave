@@ -213,7 +213,11 @@ fn claude_worker_sets_secure_storage_dir_when_isolated() {
     let stage = dir.path().join("stage");
     let primary = dir.path().join("primary");
     let mirror = dir.path().join("mirror");
-    let fake_cli = dir.path().join("fake-claude");
+    let fake_cli = dir.path().join(if cfg!(windows) {
+        "fake-claude.cmd"
+    } else {
+        "fake-claude"
+    });
     for d in [&state, &state.join("tmp"), &work, &stage, &primary, &mirror] {
         std::fs::create_dir_all(d).unwrap();
     }
@@ -317,7 +321,11 @@ fn agy_and_dsh_worker_reject_overlapping_write_roots_and_prepare_env() {
     let primary = dir.path().join("primary");
     let mirror = dir.path().join("mirror");
     let overlap_mirror = stage.join("mirror");
-    let fake_cli = dir.path().join("fake-cli");
+    let fake_cli = dir.path().join(if cfg!(windows) {
+        "fake-cli.cmd"
+    } else {
+        "fake-cli"
+    });
     for d in [
         &state,
         &state.join("tmp"),
