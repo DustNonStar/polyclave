@@ -27,7 +27,7 @@ Several agents build this project. The user relays messages between them by hand
 ## Dot's branch flow (the default since 2026-11-26)
 
 1. Dot writes the job (work list and `NEXT.md` if useful) and does it on a new branch `dot/<job>` from the latest `main`, one commit per item, with the commit messages from the work list. Dot never pushes to `main`, never force-pushes, and never edits another agent's branch.
-2. CI runs `pnpm check` on the branch (macOS, Node.js 26.x only). Dot fixes red CI on the same branch before calling the job done.
+2. For v5, the exact branch head must pass native macOS and Windows Rust CI: format, Clippy with warnings denied, workspace tests, generated protocol check, and privacy scan. Fix red CI on the same branch before reporting success.
 3. Dot appends its own report to `HANDOFF.md` on the branch (the report format below; "Hand check" says what the merge reviewer must look at in the browser, item by item), then tells the user the branch name.
 4. The user asks the merge reviewer to review it. The merge reviewer reads the diff, checks CI, runs the page in a browser at 1440 and 375 px for every UI item, and either merges into `main` (fast-forward or rebase, keeping Dot's commits), appends a short verdict to `HANDOFF.md` and deletes the branch, or reports what must change, which Dot fixes on the same branch.
 5. The rules below for tests, dependencies, privacy and conflicts apply to Dot exactly as to any implementer. Dot cannot run the hand checks itself, so it never claims a visual result it has not seen.
@@ -60,18 +60,18 @@ Several agents build this project. The user relays messages between them by hand
    - the end of `HANDOFF.md`, which holds the latest verdict;
    - any open item in `PLAN-ISSUES.md`.
 
-   The Global Constraints, R1–R3, and the Freeze and Writers rules in `docs/superpowers/plans/2026-11-25-polyclave-phase1.md` always apply.
+   For v5, apply the Rust spec, current work list and recorded owner decisions. Preserve R1 and R3 through the authoritative mirror. v5 replaces whole-session freeze with Attempt isolation. Keep the Node tests unchanged until the Phase 1B transfer tests are complete and deletion is approved.
 2. **Branch and commits.**
    - Work on the branch `NEXT.md` names.
    - Make one commit per item, with the message the work list gives.
    - Stage explicit paths with `git add <paths>`. Never use `git commit -a` or `git add -A`.
-3. **`pnpm check` must pass after every commit.**
+3. **For v5, run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings` and `cargo test --locked --workspace` after each task.** For archived Node-only work, use the legacy check.
 4. **Tests are the contract.**
    - Do not rename, weaken, skip or delete a test.
    - Do not change an existing test unless the work list names that exact change.
    - Timing in tests comes from barriers or process exit events, never from fixed sleeps.
 5. **Limits.**
-   - Add no dependencies beyond `package.json`.
+   - Add dependencies only when the active plan authorizes them; keep Rust dependencies in `Cargo.toml` and `Cargo.lock`.
    - The page makes no external requests.
    - Do not change `docs/`, `AGENTS.md`, `REVIEWER.md` or `NEXT.md`. The one exception is saving a reviewer message verbatim, as step 2 of the loop says.
 6. **Pushing.**
@@ -86,7 +86,7 @@ Several agents build this project. The user relays messages between them by hand
    - Mark it `detail` or `direction`, and propose a fix.
    - Commit it, push, and stop. Do not work around it.
 8. **Unfinished work.** Finished work that you cannot commit to `main` yet goes on a local branch `wip/<item>`. Commit it there and never push it. Say in `PLAN-ISSUES.md` that it exists.
-9. **Progress lines.** After each commit, append one progress line to `HANDOFF.md` under the job's heading: `- <sha> <message> — pnpm check: N passed`. If you run out of quota, the next agent continues from that line.
+9. **Progress lines.** After each commit, append one progress line to `HANDOFF.md` under the job's heading: `- <sha> <message> — workspace tests: N passed`. If you run out of quota, the next agent continues from that line.
 10. **Cleanup.** Stop every host, fake codex and browser you start, and say so in the report.
 
 ## Hand checks
@@ -112,7 +112,7 @@ Several agents build this project. The user relays messages between them by hand
 ## <job title from NEXT.md>
 
 Commits: <sha message> per line.
-Tests: final `pnpm check` summary, verbatim. Any test you changed, and the work-list line that allowed it.
+Tests: exact branch head, native CI results, and workspace summary. Any test you changed, and the work-list line that allowed it.
 Hand check: what you saw, each with its file in handcheck/<job>/.
 Issues: PLAN-ISSUES.md items opened or resolved.
 Cleanup: processes stopped, ports closed.

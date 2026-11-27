@@ -44,6 +44,22 @@ fn main() {
                 .unwrap();
             let _ = child.wait();
         }
+        "orphan" => {
+            let mut leaf = Command::new(std::env::current_exe().unwrap())
+                .arg("leaf")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            io::BufReader::new(leaf.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            print!("{line}");
+            io::stdout().flush().unwrap();
+            // The fixture deliberately leaves a descendant for the supervisor.
+            let _ = leaf.id();
+            std::process::exit(0);
+        }
         "leaf" => {
             #[cfg(unix)]
             unsafe {

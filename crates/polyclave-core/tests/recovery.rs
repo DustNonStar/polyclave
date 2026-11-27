@@ -1,65 +1,15 @@
+mod common;
+use common::{git, repository};
 use polyclave_core::{
-    mirror::MirrorManager,
     runner::{RunnerConfig, TurnRunner},
     runs::{Resolution, RunManager, RunRequest},
 };
-use polyclave_proto::{RunStatus, TurnMode, Vendor};
-use polyclave_store::{Error, Store};
+use polyclave_proto::{RunStatus, TurnMode};
+use polyclave_store::Error;
 use rusqlite::params;
-use std::{path::Path, process::Command, sync::Arc};
-
-fn git(path: &Path, args: &[&str]) -> String {
-    let result = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    String::from_utf8(result.stdout).unwrap().trim().to_owned()
-}
 fn fixture() -> (tempfile::TempDir, RunManager, TurnRunner, RunRequest) {
-    let tmp = tempfile::tempdir().unwrap();
+    let (tmp, rm, request) = repository();
     let state = tmp.path().join("state");
-    let repo = tmp.path().join("repo");
-    std::fs::create_dir(&state).unwrap();
-    std::fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-b", "main", "--template="]);
-    git(
-        &repo,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
-    );
-    let repo = polyclave_os::canonical_real_path(&repo).unwrap();
-    let store = Store::open(state.join("test.sqlite")).unwrap();
-    let repo_cwd = repo.to_string_lossy().into_owned();
-    store
-        .write(move |db| {
-            db.execute_batch(
-                "INSERT INTO provider_profiles(id,display_name,kind,models_json,created_at)
-            VALUES('p','Test','codex_cli','[]','now');",
-            )?;
-            db.execute(
-                "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
-            VALUES('hub','Hub','hub',?1,'p','fixture','now')",
-                [repo_cwd],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let rm = RunManager::new(store, Arc::new(MirrorManager::new(&state).unwrap()));
     let runner = TurnRunner::new(
         rm.clone(),
         &state,
@@ -74,16 +24,6 @@ fn fixture() -> (tempfile::TempDir, RunManager, TurnRunner, RunRequest) {
         |_, _| {},
     )
     .unwrap();
-    let request = RunRequest {
-        hub_session_id: "hub".into(),
-        request_id: "create".into(),
-        vendor: Vendor::Codex,
-        model: None,
-        repo_cwd: repo,
-        instructions: "change worktree".into(),
-        base_branch: "main".into(),
-        ticket_id: None,
-    };
     (tmp, rm, runner, request)
 }
 
@@ -93,7 +33,7 @@ fn crashed(rm: &RunManager, work: &polyclave_core::runs::RunWork, boot: String) 
     let aid = work.attempt.id;
     rm.store.write(move|db|{
         db.execute("INSERT INTO turns(session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
-            VALUES(?1,?2,?3,'start','running','authorized','old',?4,'fixture-only','now')",params![sid,id,aid,boot])?;
+            VALUES(?1,?2,?3,'start','running','authorized','old',?4,?5,'now')",params![sid,id,aid,boot,format!("fixture-turn-{aid}")])?;
         Ok(db.last_insert_rowid())
     }).unwrap()
 }
@@ -206,4 +146,162 @@ fn released_same_boot_uses_platform_writer_guarantee() {
         runner.schedule(&r.id, TurnMode::WorkerChat, "must not run".into()),
         Err(Error::ConflictError)
     ));
+}
+
+#[test]
+fn reboot_recovers_a_signed_staged_result_and_is_idempotent() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let w = rm.begin(&r.id, TurnMode::Start).unwrap();
+    let turn = crashed(&rm, &w, "previous-boot".into());
+    std::fs::write(runner.marker(turn), b"released").unwrap();
+    let cwd = &w.workspace.cwd;
+    git(
+        cwd,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "verified",
+            "--trailer",
+            &format!("Run-Id: {}", r.id),
+        ],
+    );
+    let reference = w.id.full_ref();
+    let tip = git(cwd, &["rev-parse", "HEAD"]);
+    git(
+        cwd,
+        &[
+            "push",
+            "polyclave-staging",
+            &format!("{reference}:{reference}"),
+        ],
+    );
+    let (id, attempt, tip1) = (r.id.clone(), w.attempt.id, tip.clone());
+    rm.store.write(move|db|{
+        db.execute("INSERT INTO results(run_id,attempt_id,turn_id,accepted,payload_json,created_at) VALUES(?1,?2,?3,1,?4,'now')",
+            params![id,attempt,turn,serde_json::json!({"sha":tip1}).to_string()])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(runner.recover().unwrap(), 1);
+    let done = rm.get(&r.id).unwrap();
+    assert_eq!(done.status, RunStatus::Done);
+    assert_eq!(done.result_sha, Some(tip));
+    assert_eq!(runner.recover().unwrap(), 0);
+    assert_eq!(rm.get(&r.id).unwrap(), done);
+    assert_eq!(rm.store.find_memory(Default::default()).unwrap().len(), 1);
+}
+
+#[test]
+fn an_unreadable_mirror_on_restart_does_not_automatically_retry() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let w = rm.begin(&r.id, TurnMode::Start).unwrap();
+    let turn = crashed(&rm, &w, "previous-boot".into());
+    std::fs::write(runner.marker(turn), b"released").unwrap();
+    let moved = w.id.run.mirror.with_extension("moved");
+    std::fs::rename(&w.id.run.mirror, &moved).unwrap();
+    assert_eq!(runner.recover().unwrap(), 1);
+    let view = rm.get(&r.id).unwrap();
+    assert_eq!(view.status, RunStatus::Interrupted);
+    assert!(view.detail.unwrap().contains("mirror check failed"));
+    assert!(matches!(
+        rm.begin(&r.id, TurnMode::Retry),
+        Err(Error::ConflictError)
+    ));
+    std::fs::rename(moved, &w.id.run.mirror).unwrap();
+    let retry = rm.begin(&r.id, TurnMode::Retry).unwrap();
+    assert_eq!(retry.attempt.attempt_no, 2);
+}
+
+#[test]
+fn concurrent_admission_replays_without_spending_the_budget_twice_and_rejects_mutation() {
+    let (_tmp, rm, _runner, req) = fixture();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let [a, b] = [0, 1]
+        .map(|_| {
+            let (rm, req, start) = (rm.clone(), req.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                rm.accept(req).unwrap()
+            })
+        })
+        .map(|t| t.join().unwrap());
+    assert_eq!(a.0.id, b.0.id);
+    assert_ne!(a.1, b.1);
+    let mut changed = req.clone();
+    changed.instructions.push_str(" changed");
+    assert!(matches!(rm.accept(changed), Err(Error::ConflictError)));
+    let (_, new) = rm.accept(req).unwrap();
+    assert!(!new);
+    rm.store
+        .read(|db| {
+            assert_eq!(
+                db.query_row("SELECT sum(runs_used) FROM tickets", [], |r| r
+                    .get::<_, u32>(0))?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM sessions WHERE role='worker'",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn allow_retry_survives_restart_and_attempt_limit_is_enforced() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let mut mode = TurnMode::Start;
+    for n in 1..=3 {
+        let work = rm.begin(&r.id, mode).unwrap();
+        assert_eq!(work.attempt.attempt_no, n);
+        crashed(&rm, &work, "previous-boot".into());
+        assert_eq!(runner.recover().unwrap(), 1);
+        if n < 3 {
+            rm.resolve(&r.id, Resolution::AllowRetry, "continue fresh")
+                .unwrap();
+            assert_eq!(runner.recover().unwrap(), 0);
+            assert_eq!(
+                rm.get(&r.id).unwrap().resolution.as_deref(),
+                Some("allow_retry")
+            );
+        }
+        mode = TurnMode::Retry;
+    }
+    assert!(matches!(
+        rm.begin(&r.id, mode),
+        Err(Error::BudgetExceededError)
+    ));
+}
+
+#[test]
+fn restart_does_not_replay_pending_run_or_clean_current_release_evidence() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    rm.store.write(|db|{
+        db.execute("INSERT INTO turns(id,session_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+            VALUES(99,'hub','hub','running','authorized','new','fixture','fixture-live','now')",[])?;
+        Ok(())
+    }).unwrap();
+    std::fs::write(runner.marker(99), b"fixture").unwrap();
+    assert_eq!(runner.recover().unwrap(), 0);
+    assert!(runner.marker(99).exists());
+    let interrupted = rm.get(&r.id).unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.current_attempt, 0);
+    assert_eq!(
+        rm.begin(&r.id, TurnMode::Retry).unwrap().attempt.attempt_no,
+        1
+    );
 }

@@ -20,6 +20,8 @@ You are taking over the **reviewer** role on Polyclave: you plan the work, write
 
 ## 2. Where things stand (2026-11-26)
 
+**v5 Phase 1A:** review Rust on `macos-latest` and `windows-latest`, not the archived Node workflow. Run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, generated `proto.ts` check, and `scripts/privacy-scan.sh` with full Git history. The source of truth for approved Rust behavior changes and unchanged Phase 1B test transfers is [the v5 test migration table](docs/superpowers/plans/2026-11-27-polyclave-v5-test-migration.md). The Node project notes below are historical, not the v5 runtime or acceptance gate.
+
 - **Phase 1 is built and accepted.** Gate A and Gate B passed. The real-Codex test runs only with `POLYCLAVE_REAL_CODEX=1`. CI (`.github/workflows/check.yml`) runs `pnpm check` on macOS with Node.js 26.x only; older Node.js versions are no longer supported. The host is still macOS-only. See the latest Actions run for current CI status.
 - **Page review rounds:**
   - Round 1 (`2026-11-26-page-review-fixes.md`) is done and accepted.
@@ -49,7 +51,7 @@ Keep the message self-contained: the implementer sees only the message and the r
 ## 4. How to review a job (from GitHub)
 
 1. **Commits:** compare `main` from your last verdict to the new head, then read the commit list and the full diff.
-2. **CI:** the `check` workflow run for the new head must be green on all four jobs. A red job means the job is not passed. Name the failing job and test.
+2. **CI:** the `check` workflow run for the exact new head must be green on both native Rust jobs for v5. A red job means the job is not passed. Name the failing job and test.
 3. **Tests:** any removed or changed line in an existing test must be one the work list allowed by name.
 4. **Code against the rules:**
    - Every value the page interpolates is escaped.

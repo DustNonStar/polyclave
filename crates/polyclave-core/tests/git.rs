@@ -286,3 +286,50 @@ fn unreadable_state_always_interrupts_and_a_possible_writer_never_completes() {
         RunStatus::NeedsReview
     );
 }
+
+#[test]
+fn body_only_trailers_empty_ranges_wrong_bases_and_unreadable_refs_never_certify() {
+    let (_tmp, repo, m) = fixture();
+    let run = m.admit(&repo, ID, "main").unwrap();
+    let a = AttemptGit { run, number: 1 };
+    let w = m.prepare_attempt(&a).unwrap();
+    push(&w.cwd, &a.full_ref());
+    let BranchCheck::Present { tip, problem } = m.reconcile(&a) else {
+        panic!("missing empty reference")
+    };
+    assert_eq!(tip, a.run.base);
+    assert_eq!(problem.as_deref(), Some("commit range is empty"));
+    commit(
+        &w.cwd,
+        &format!("Run-Id: {ID}\n\nText after apparent trailer"),
+        None,
+    );
+    push(&w.cwd, &a.full_ref());
+    let BranchCheck::Present { tip, problem } = m.reconcile(&a) else {
+        panic!("missing malformed reference")
+    };
+    assert!(problem.unwrap().contains(&tip));
+
+    let b = AttemptGit {
+        run: a.run,
+        number: 2,
+    };
+    let isolated = m.prepare_attempt(&b).unwrap();
+    git(&isolated.cwd, &["checkout", "--orphan", "unrelated"]);
+    let wrong = commit(&isolated.cwd, "wrong base", Some(ID));
+    git(
+        &isolated.cwd,
+        &[
+            "push",
+            "polyclave-staging",
+            &format!("HEAD:{}", b.full_ref()),
+        ],
+    );
+    assert_eq!(
+        m.reconcile(&b),
+        BranchCheck::Present {
+            tip: wrong,
+            problem: Some("immutable base is not an ancestor".into())
+        }
+    );
+}

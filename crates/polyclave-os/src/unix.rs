@@ -154,7 +154,65 @@ pub(crate) fn finish_parent_guard() -> io::Result<()> {
             std::thread::park();
         }
     }
-    Ok(())
+    // Normal Worker exit does not grant descendants permission to keep
+    // writing. Wait on actual group membership, not a fixed delay in tests.
+    let group = unsafe { libc::getpgrp() };
+    if group_members(group).is_ok_and(|p| p.is_empty()) {
+        return Ok(());
+    }
+    signal_group(group, libc::SIGTERM)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Ok(members) = group_members(group) {
+            if members.is_empty() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                for pid in members {
+                    // Recheck group membership before acting on each PID.
+                    if unsafe { libc::getpgid(pid) } == group {
+                        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                    }
+                }
+                if group_members(group).is_ok_and(|p| p.is_empty()) {
+                    return Ok(());
+                }
+                signal_group(group, libc::SIGKILL)?;
+                std::thread::park();
+            }
+        } else if std::time::Instant::now() >= deadline {
+            signal_group(group, libc::SIGKILL)?;
+            std::thread::park();
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    }
+}
+
+fn group_members(group: i32) -> io::Result<Vec<i32>> {
+    let command = if cfg!(target_os = "macos") {
+        "/bin/ps"
+    } else {
+        "/usr/bin/ps"
+    };
+    let output = Command::new(command)
+        .env("LC_ALL", "C")
+        .process_group(0)
+        .args(["-ax", "-o", "pid=", "-o", "pgid=", "-o", "stat="])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("process group query failed"));
+    }
+    let ours = std::process::id() as i32;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut values = line.split_whitespace();
+            let pid = values.next()?.parse().ok()?;
+            let pgid = values.next()?.parse::<i32>().ok()?;
+            let status = values.next()?;
+            (pid != ours && pgid == group && !status.starts_with('Z')).then_some(pid)
+        })
+        .collect())
 }
 
 pub fn boot_epoch() -> io::Result<String> {

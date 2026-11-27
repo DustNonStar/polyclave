@@ -18,3 +18,10 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[[bin]]
+name = "polyclave-fake-agent"
+path = "../../tests/fixtures/fake_agent.rs"
+test = false
+bench = false

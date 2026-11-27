@@ -105,3 +105,29 @@ fn host_kill_excludes_a_released_descendant() {
     }
     assert!(dir.path().join("turn-tree.released").exists());
 }
+
+#[test]
+fn normal_exit_does_not_leave_background_group_members() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = spec(dir.path());
+    spec.args.push("orphan".into());
+    let mut host = spawn_supervised(&spec).unwrap();
+    let mut out = host.take_stdout().unwrap();
+    host.go(b"").unwrap();
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let leaf = line.trim().strip_prefix("leaf:").unwrap().parse().unwrap();
+    let id = process_identity(leaf).unwrap();
+    let _ = host.wait().unwrap();
+    if let Some(id) = id {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_identity(leaf).unwrap().as_ref() == Some(&id) {
+            assert!(
+                Instant::now() < deadline,
+                "normal exit left a running descendant"
+            );
+            std::thread::yield_now();
+        }
+    }
+}

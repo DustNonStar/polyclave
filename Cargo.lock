@@ -528,6 +528,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

@@ -1,11 +1,11 @@
 //! Crash recovery never restarts a Worker or discards release evidence early.
 use crate::{
     runner::{remove, TurnRunner},
-    runs::Result,
+    runs::{change, load_run, Result},
 };
 use polyclave_os::{exclude_old_supervisor, hard_stop_excludes_writers, ProcessIdentity};
-use polyclave_proto::{EndReason, WriterCheck};
-use polyclave_store::Error;
+use polyclave_proto::{ChangeTopic, EndReason, WriterCheck};
+use polyclave_store::{now, Error};
 
 struct Stale {
     id: i64,
@@ -70,6 +70,24 @@ impl TurnRunner {
                 }
             }
         }
+        self.runs.store.write(|db|{
+            // A persisted admission is not permission to replay a Worker on startup.
+            let mut q=db.prepare("SELECT id FROM runs WHERE status='pending' AND current_attempt=0")?;
+            let ids=q.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in ids {
+                db.execute("UPDATE runs SET status='interrupted',detail='host stopped before dispatch; safe to retry',
+                    updated_at=?2 WHERE id=?1",rusqlite::params![id,now(db)?])?;
+                change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
+            }
+            Ok(())
+        })?;
+        let current = self.runs.store.read(|db| {
+            let mut q = db.prepare("SELECT id FROM turns WHERE status='running'")?;
+            let ids = q
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+            Ok(ids)
+        })?;
         // Do not erase any release or MCP evidence until every old turn has
         // been classified. Only files with typed, managed names are removed.
         for entry in std::fs::read_dir(self.state.join("tmp"))
@@ -86,7 +104,10 @@ impl TurnRunner {
                     name.strip_prefix("mcp-turn-")
                         .and_then(|s| s.strip_suffix(".json"))
                 });
-            if id.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+            if id
+                .and_then(|n| n.parse::<i64>().ok())
+                .is_some_and(|id| id >= 0 && !current.contains(&id))
+            {
                 remove(&entry.path())?;
             }
         }

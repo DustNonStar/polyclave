@@ -401,4 +401,46 @@ mod tests {
         assert!(!replay.contains("first"));
         assert!(event(app, "3").await.contains("event: resync_required"));
     }
+    #[tokio::test]
+    async fn both_terminal_run_states_reject_worker_chat_with_http_409() {
+        let (_dir, store, app) = fixture();
+        store.write(|db|{
+            db.execute_batch("
+                INSERT INTO provider_profiles(id,display_name,kind,models_json,created_at) VALUES('p','Test','codex_cli','[]','now');
+                INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                    VALUES('hub','Hub','hub','repo','p','fixture','now'),('wd','Worker','worker','repo','p','fixture','now'),('wf','Worker','worker','repo','p','fixture','now');
+                INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,status,created_at,updated_at)
+                    VALUES('ticket','hub','repo','Test','{}','explicit_user','active','now','now');
+                INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,instructions,
+                    mirror_remote,base_branch,base_sha,status,created_at,updated_at)
+                    VALUES('done','ticket','hub','wd','d','repo','codex','test','mirror','main','base','done','now','now'),
+                          ('failed','ticket','hub','wf','f','repo','codex','test','mirror','main','base','failed','now','now');
+            ")?;
+            Ok(())
+        }).unwrap();
+        for id in ["done", "failed"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/runs/{id}/worker-chat"))
+                        .header("host", "127.0.0.1:4310")
+                        .header("authorization", "Bearer test-only")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"text":"must not run"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        store
+            .read(|db| {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM turns", [], |r| r.get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }
