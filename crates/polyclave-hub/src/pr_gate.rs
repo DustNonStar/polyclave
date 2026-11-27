@@ -933,14 +933,21 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         )
         .map_err(map_git_err)?;
         if !revise_scope.allowed {
+            let violations = revise_scope.violations;
             let _ = deps
                 .store
-                .record_scope_violations(&gate.id, revise_scope.violations)
+                .record_scope_violations(&gate.id, violations.clone())
                 .map_err(map_store_err)?;
-            return deps
-                .store
-                .set_pr_gate_status(&gate.id, PrGateStatus::Escalated)
-                .map_err(map_store_err);
+            return escalate(
+                deps,
+                &gate.id,
+                req.hub_session_id.as_deref(),
+                "revise_scope_violation",
+                &format!(
+                    "the revise Worker submitted {new_head}, which touches paths outside the Run's mandate ({}); it was not pushed, so the PR still shows {current_head}",
+                    violations.join(", ")
+                ),
+            );
         }
 
         // The revised head must also be reviewable before it is published.
@@ -1874,6 +1881,81 @@ mod tests {
             vec![(fix.good_head_sha.clone(), "feat/revise".to_owned())]
         );
         assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_revise_escalates_with_a_hub_notice_and_pushes_nothing() {
+        let fix = setup_git_and_store();
+        // A commit off the base that touches README.md, outside `src/**`.
+        let out_of_scope = fix.bad_head_sha_1.clone();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let reviewer = Arc::new(MockReviewer {
+            verdicts: Mutex::new(vec![ReviewVerdict::Revise]),
+            seen_worktrees: Mutex::new(Vec::new()),
+        });
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer,
+            worker_revise: Some(Arc::new(MockRevise {
+                next_sha: out_of_scope.clone(),
+                bounces: AtomicUsize::new(0),
+            })),
+            pusher: pusher.clone(),
+        };
+        let gate = run_pr_gate(
+            &deps,
+            RunPrGateRequest {
+                run_id: "run1".into(),
+                hub_session_id: Some("hub".into()),
+                mirror_path: fix.mirror.clone(),
+                repo_slug: "org/repo".into(),
+                branch: "feat/scope".into(),
+                base_branch: "main".into(),
+                base_sha: fix.base_sha.clone(),
+                head_sha: fix.good_head_sha.clone(),
+                pr_title: "feat: scope".into(),
+                pr_body: "body".into(),
+                touched_paths: vec!["src/**".into()],
+                is_high_risk: false,
+                reviewers: vec![ReviewerSpec {
+                    vendor: Vendor::Claude,
+                    model: "claude-sonnet-4-6".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        // Only the verified head was ever published; the out-of-scope commit was not.
+        assert_eq!(
+            *pusher.pushed.lock().unwrap(),
+            vec![(fix.good_head_sha.clone(), "feat/scope".to_owned())]
+        );
+        assert_eq!(gate.head_sha, fix.good_head_sha);
+        assert!(!gate.scope_violations.is_empty());
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        // The human is told, like every other escalation on this path.
+        assert!(
+            fix.store
+                .hub_messages("hub")
+                .unwrap()
+                .iter()
+                .any(|m| m.text.contains("outside the Run's mandate")),
+            "a revise scope violation must reach the Hub"
+        );
         server.abort();
     }
 
