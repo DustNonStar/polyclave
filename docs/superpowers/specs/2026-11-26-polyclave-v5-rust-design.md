@@ -30,6 +30,8 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
 | **Orca (`stablyai/orca`)** | 1. **原生流式协议与会话续接**：Worker 侧优先走原生流式 JSON 输出与显式会话续接，结合阶段 2+ 长驻协议演进（`codex app-server`、`agy`/`dsh` ACP）。<br>2. **扫码一次性票据换长期凭证**的设备配对机制与宿主端撤销。<br>3. **基于启动时间戳确认进程身份**，拒绝纯 PID 复用误判。 | 阶段 1A Worker 采用**每轮有界流式 CLI 进程**（Codex `exec --json` / `exec resume`；Claude `-p --output-format stream-json --session-id` / `--resume`），确保每轮强制轮换一次性 `mcp_token` 并严格通过四步启动握手；`codex app-server` 与 ACP 留待阶段 2+ 评估。绝不采信 Worker 自报完成（必须过 R1 外部核证）；绝不镜像或修改用户的全局 `~/.codex` / `~/.claude` 配置；推送绝不经第三方网关明文转发。 |
 | **T3 Code (`t3code`)** | 1. **宏流程步骤级 Checkpoint 重放**：已成功步骤落盘输入哈希与输出，宿主重启不重放外部副作用。<br>2. **Reviewer 强制使用一次性 Worktree**（已实测证实 `plan` 模式锁不住 Codex/AGY）。<br>3. **结构化输出最多 2 次自动纠偏**，超限转人工或失败分支。 | 不引入庞大的通用脚本引擎，只保留 **`council`（多模型盲评方案）** 与 **`pr_gate`（范围检查与 SHA 绑定合并门禁）** 两个宿主内置强类型原子宏流程，其余灵活编排归总主会话中枢。 |
 | **`dsh-superagent-prototype` (`deepseek-ai`)** | 1. **主动值守管家心智（Proactive Personal Agent Bot）**：以“最小化人类注意力消耗（Attention Budget）”为目标，从被动一问一答升级为事件驱动的主动项目管家。<br>2. **准入策略矩阵（`Admission Policy`）**：宿主代码层严格区分本人客户端显式指令（`explicit`）与外部仓库/系统事件推断候选（`inferred`：`off \| observe \| auto`），并对外部机器人账号消息做防自激隔离。<br>3. **结构化 `Ticket` 与 `Mandate`（任务单与授权契约）**：将获准需求固化为带明确范围边界和派活预算（`max_runs`）的工单，统领其下多轮跨厂商子智能体 `Run`，防止对话跑偏或提示词注入失控。 | 1. **摆脱单仓库与 DSH Bundle 绑定**：升级为跨多项目仓库、可调度多厂商 Worker（Codex / Claude / AGY / DSH）的独立全栈 Rust 中枢守护进程。<br>2. **100% 私有通信边界（拒绝第三方商业 IM 云）**：不接入飞书、Telegram 等第三方 IM 平台，客户端统一使用自研 Tauri v2 + 轻量原生 Web/TS（经 Tailscale 端到端加密直连），私有通知仅允许本机或运行在 Tailscale 私有网内的开源自托管渠道（如自建 `ntfy` / Matrix），确保连每一句对话文字也绝不经过第三方云端（2026-11-26 用户决定）。 |
+| **`google/agentmesh`（Apache-2.0）** | 1. **零信任跨设备私有网格（`agentmesh-one` / `agentmesh-node` / `agentmesh-router`）**：基于 Ed25519 节点身份、NAT 穿透中继与服务发现，摆脱对第三方协调云的依赖。<br>2. **默认拒绝策略与可衰减 Biscuit Token**：离线可验证的多跳能力令牌与本地 MCP Sidecar 暴露，精确约束远端节点仅可调用授权工具。 | 1. **阶段 1A/1B 保持单机轻量回环**，不增加额外 Sidecar 复杂度；自阶段 3 起作为完全自托管的跨设备互联与多机 Worker 联邦层（`polyclave-mesh`）接入（可与 Tailscale 并行或替代其协调面）。<br>2. Agent Mesh 仅负责零信任传输、发现与跨机身份鉴权；**R1 Git 镜像核证、SQLite 唯一账本与中枢集中调度权**仍由主控 `polyclaved` 独占。 |
+| **`makecindy/cindy`（Apache-2.0）** | 1. **一键纠偏记忆心智（One-Correction Memory）**：“纠偏一次，跨任务永久生效”。<br>2. **一次示教可复用技能（Teach-Once Skill）**：将验证有效的重复工作流一键沉淀为可复用 Skill。<br>3. **桌面与移动端无缝接力体验**。 | 1. **拒绝无沙箱直连真实文件与已登录日常应用**，拒绝重型 Electron 壳，坚持纯 Rust + Tauri v2 轻量底座。<br>2. 所有代码写操作隔离在 Worktree + 每 Attempt 暂存仓，由宿主最终裸镜像执行 R1 硬核证；纠偏记忆仍须经过 `candidate` / 用户确认晋升 `verified` 与 `supersede` 版本链，防止误记污染。 |
 
 ---
 
@@ -52,6 +54,9 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
 9. **双层记忆系统与外部 Agent 原生记忆留存**（2026-11-26 用户决定）：
    - 持久保留 `<state-dir>/isolated-homes/<vendor>/` 下各家 Agent 的历史对话与原生记忆（不随任务完成清理），仅清理 `<state-dir>/tmp/` 下已失效的一次性 `0600` 临时 MCP 令牌文件；
    - 在 `polyclave.sqlite` 内置纯 Rust + SQLite FTS5 的跨项目公共记忆系统（覆盖 `global` / `project` / `run` 三层作用域），经宿主 HTTP MCP 开放给全部厂商与角色接入，实行分权写入（宿主自动固化 / Worker 提案 `candidate` / 主控与用户晋升 `verified` 与 `supersede`）以防范幻觉与间接提示词注入。
+10. **跨设备零信任互联与多机联邦（引入 `google/agentmesh`，阶段 3 落地）**（2026-11-26 用户决定）：
+   - **跨设备全自托管访问**：除 Tailscale 外，引入 `google/agentmesh`（Apache-2.0，`agentmesh-one` / `agentmesh-node`）作为 100% 自托管的零信任私有网格，支持 Mac / Windows / Linux / 移动端跨 NAT 直连或中继访问主控 `polyclaved`；
+   - **跨机 Worker 与远端 MCP 联邦**：允许主控 `hub` 经 `polyclave-mesh` 将子任务安全派发至另一台设备上的 Worker（如 Mac 主控调度 Windows/Linux 机器执行构建与测试），并通过 Agent Mesh 的 `deny-by-default` 策略与离线可验证的**可衰减 Biscuit Token** 锁死远端节点的工具与仓库权限边界，同时保持主控 `polyclaved` 对 R1 Git 核证与 `polyclave.sqlite` 账本的唯一控制权。
 
 ---
 
@@ -404,6 +409,7 @@ CREATE TABLE change_log (
   - **宿主自动固化（`verified`）**：`Run` 过 R1 进入 `done`、用户完成 `resolve` 或 `Ticket` 结单时，宿主代码自动写入带真实 `result_sha` 溯源的 `progress` / `receipt` 记忆；
   - **下层 `worker` / `manager` 仅可提案（`memory_propose`）**：只能写入 `status = 'candidate'` 候选记录（强制绑定 `created_by`、`source_run_id`、`source_turn_id`），**绝无权限修改或覆盖既有 `verified` 决策与红线**；
   - **主控 `hub` 与用户审核晋升（`memory_commit` / `memory_supersede` / `memory_archive`）**：在讨论或验收后将 `candidate` 晋升为 `verified`；更新既有结论时必须走 `supersede`（以 `supersedes_id` 串起版本链），永不物理覆写，支持随时回滚。
+  - **一键纠偏入库（One-Correction Memory UX，阶段 1B 界面支持）**：当用户在主控对话中或 `Needs you` 核查裁决卡片（`Mark failed` / `Allow retry` 备注）中纠正 Agent 错误时，界面提供一键 **“记住这条规则”** 操作，自动起草带溯源的 `preference` / `constraint` / `pitfall` 记忆草案，经用户确认后直接作为 `verified`（或 `supersede` 旧规则）落库并跨厂商、跨会话立即生效。
 - **阶段 2 隔离边界提示**：`council` 盲评期间仍可读取长期项目记忆但彼此屏蔽同期方案；`reviewer` 可读取 `project` 记忆中的红线约束，但必须启用新一次性工作区，绝不复用编写该代码的 `worker` 原生线程。
 
 #### 主控与顾问专用受控只读看仓工具
@@ -481,10 +487,13 @@ CREATE TABLE change_log (
   - 接入 **Antigravity (`agy`)** 与 **DeepSeek Harness (`dsh`)** 适配器。
   - 实现 `council` 原子宏流程：主控发起方案讨论 → 各家 `manager` 并行独立输出结构化 `Proposal` → 代码剥离厂商标识呈递“方案甲/乙/丙” → `direction` 级交用户拍板、`detail` 级结合偏好决策。
   - 实现 `pr_gate` 与后台 `SCM Observer`：三层 `touched_paths` 范围契约校验；强制异构模型 Reviewer 在一次性 Worktree 中评审确切 `head_sha`（不复用编写者 Worker 原生线程）；Bot 账号与 Reviewer 账号物理隔离、将本地镜像通过 R1 的分支推送到 GitHub、显式传 `commit_id` 批准并先落台账再开 auto-merge；PR/CI 失败或评论变更实时作为事件推回主控收件箱。
-- **阶段 3：Tauri v2 移动双端（iOS / Android）与 Tailscale 纯私有通知配对**
+- **阶段 3：Tauri v2 移动双端（iOS / Android）、`google/agentmesh` 跨设备联邦与纯私有通知配对**
   - 编译打包 iOS 与 Android Tauri v2 客户端，适配真机 375px 触控交互。
-  - 实现扫码 10 分钟一次性票据换长期设备凭证、`tailscale serve` 身份头双重验证与宿主端设备吊销。
-  - 坚持纯私有触达边界（拒绝第三方 IM 云）：移动端访问走 Tailscale 端到端加密通道（原生 App + 宿主静态托管响应式 Web 备选）；远端提醒默认走**运行在用户本机或 Tailscale 私有网内的开源自托管通知渠道**（如自建 `ntfy` / UnifiedPush 或自建 Matrix 服务），推送载荷不含敏感明文正文，App 唤醒后经 Tailscale `Last-Event-ID` 增量拉取完整内容。
-- **阶段 4：CUA 桌面互斥锁与基于记忆库的本地进化循环**
+  - 引入 **`google/agentmesh`（Apache-2.0，`polyclave-mesh`）**：支持基于 `agentmesh-one` / `agentmesh-node` 的全自托管跨设备零信任组网（与 Tailscale 并行或替代），实现跨机客户端访问与主控对远端 Windows/Linux 设备 Worker/MCP 的联邦调度，并以 `deny-by-default` 策略及可衰减 Biscuit Token 锁死跨机工具调用权限（R1 核证与主账本仍由主控 `polyclaved` 独占）。
+  - 实现扫码 10 分钟一次性票据换长期设备凭证、`tailscale serve` / Agent Mesh 节点身份双重验证与宿主端设备吊销。
+  - 坚持纯私有触达边界（拒绝第三方 IM 云）：移动端访问走 Agent Mesh / Tailscale 端到端加密通道（原生 App + 宿主静态托管响应式 Web 备选）；远端提醒默认走**运行在用户本机或私有网内的开源自托管通知渠道**（如自建 `ntfy` / UnifiedPush 或自建 Matrix 服务），推送载荷不含敏感明文正文，App 唤醒后经 `Last-Event-ID` 增量拉取完整内容。
+- **阶段 4：CUA 桌面互斥锁、基于记忆库的本地进化循环与社区经验共建**
   - 实现整机单把 CUA 互斥锁（检测键鼠空闲、用户桌面随时一秒收回）。
   - 在既有 `memory_items` 底座上叠加本地语义混合检索（填充 `embedding_blob`）与定期蒸馏总结：基于 `polyclave.sqlite` 历史工单、返工次数、评审打回率与运行耗时，通过本地模型或 API 生成版本化、带 `supersedes_id` 一键回滚的路由表、记忆规则与 Role Brief 优化建议（严格禁止触碰宿主门禁代码与用户全局 `skills`）。
+  - **Teach-Once 可复用 Skill 沉淀**：支持用户将验证有效的高频工作流一键打包为版本化、可回滚的本地 Skill（经软链/Junction 同步至各家 `isolated-homes/`），并可在脱敏后作为经验模板分享给社区。
+  - **可选的社区工作流经验蒸馏与贡献者致谢闭环（Opt-in，默认关闭）：** 主控会话定期从本地 `memory_items` 与历史工单中蒸馏通用的工作流改进建议与踩坑经验；**严格守住隐私边界**——仅在用户显式开启并逐字审阅脱敏草案（自动剔除本地路径、业务代码片段、密钥与仓库标识）后，才允许上传至 Polyclave 上游仓库 GitHub Issues，方便社区共同优化；同时在项目主页与 `README.md` 中持续列出并致谢所有参与问题反馈、工作流优化与代码贡献的开发者（Contributors）。
