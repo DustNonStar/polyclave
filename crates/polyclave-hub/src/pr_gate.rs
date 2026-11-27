@@ -532,6 +532,32 @@ fn escalate(
     Ok(escalated)
 }
 
+/// Reviewers read the whole PR range, so an oversized diff must never reach the
+/// remote: a pushed, opened PR that no reviewer may read is worse than a
+/// refusal. Returns the escalated gate, or `None` when the range is reviewable.
+fn reviewable_diff(
+    deps: &PrGateDeps,
+    gate: &PrGateDto,
+    hub_session_id: Option<&str>,
+    mirror: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<Option<PrGateDto>> {
+    let ReviewDiff::TooLarge { bytes } = review_diff(mirror, base_sha, head_sha)? else {
+        return Ok(None);
+    };
+    escalate(
+        deps,
+        &gate.id,
+        hub_session_id,
+        "diff_too_large",
+        &format!(
+            "the PR diff {base_sha}..{head_sha} is {bytes} bytes, over the {MAX_REVIEW_DIFF_BYTES}-byte review limit; a human must review it, so nothing was pushed and no PR was opened"
+        ),
+    )
+    .map(Some)
+}
+
 /// Runs the full PR gate lifecycle for a completed run.
 pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrGateDto> {
     if deps.store.pause_state().map_err(map_store_err)?.paused {
@@ -710,6 +736,19 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err)?;
     }
 
+    // Before anything leaves this machine, the range must be one a reviewer may
+    // read in full.
+    if let Some(escalated) = reviewable_diff(
+        deps,
+        &gate,
+        req.hub_session_id.as_deref(),
+        &req.mirror_path,
+        &req.base_sha,
+        &current_head,
+    )? {
+        return Ok(escalated);
+    }
+
     // Push exactly the R1-verified SHA from the authoritative mirror, then
     // open/find the PR. The pusher confirms the remote tip equals that SHA.
     // A policy refusal means the destination branch is not this gate's to
@@ -766,22 +805,6 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .store
             .set_pr_gate_status(&gate.id, PrGateStatus::Reviewing)
             .map_err(map_store_err)?;
-
-        // Reviewers see the whole PR range; never review a truncated diff.
-        if let ReviewDiff::TooLarge { bytes } =
-            review_diff(&req.mirror_path, &req.base_sha, &current_head)?
-        {
-            return escalate(
-                deps,
-                &gate.id,
-                req.hub_session_id.as_deref(),
-                "diff_too_large",
-                &format!(
-                    "the PR diff {}..{} is {bytes} bytes, over the {MAX_REVIEW_DIFF_BYTES}-byte review limit; a human must review it",
-                    req.base_sha, current_head
-                ),
-            );
-        }
 
         let mut revise_comments = Vec::new();
         for spec in &selected_reviewers {
@@ -918,6 +941,18 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
                 .store
                 .set_pr_gate_status(&gate.id, PrGateStatus::Escalated)
                 .map_err(map_store_err);
+        }
+
+        // The revised head must also be reviewable before it is published.
+        if let Some(escalated) = reviewable_diff(
+            deps,
+            &gate,
+            req.hub_session_id.as_deref(),
+            &req.mirror_path,
+            &req.base_sha,
+            &new_head,
+        )? {
+            return Ok(escalated);
         }
 
         deps.pusher
@@ -2082,6 +2117,51 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_pr_range_escalates_before_the_push_and_opens_no_pr() {
+        let fix = setup_git_and_store();
+        let big: String = (0..MAX_REVIEW_DIFF_BYTES / 16)
+            .map(|i| format!("// line {i:08}\n"))
+            .collect();
+        let head = extend_good_head(&fix, "src/big.rs", &big);
+        assert!(matches!(
+            review_diff(&fix.mirror, &fix.base_sha, &head).unwrap(),
+            ReviewDiff::TooLarge { bytes } if bytes > MAX_REVIEW_DIFF_BYTES
+        ));
+
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(RangeReviewer {
+                seen: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let gate = run_pr_gate(&deps, range_request(&fix, &head, "feat/big"))
+            .await
+            .unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        // The size is known before anything leaves the machine.
+        assert!(pusher.pushed.lock().unwrap().is_empty());
+        assert_eq!(gate.pr_number, None);
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
     }
 
     #[tokio::test]
