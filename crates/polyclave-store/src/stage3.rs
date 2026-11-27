@@ -440,6 +440,42 @@ impl Store {
         })
     }
 
+    pub fn get_mesh_node(&self, id: &str) -> Result<MeshNodeDto> {
+        let id = id.to_owned();
+        self.read(move |db| read_mesh_node(db, &id))
+    }
+
+    pub fn update_mesh_node_status(&self, id: &str, status: MeshNodeStatus) -> Result<MeshNodeDto> {
+        let id = id.to_owned();
+        let status_str = enum_value(status)?;
+        self.write(move |db| {
+            let existing = read_mesh_node(db, &id)?;
+            if existing.status == MeshNodeStatus::Revoked {
+                return Err(Error::ConflictError);
+            }
+            let ts = now(db)?;
+            if status == MeshNodeStatus::Online {
+                db.execute(
+                    "UPDATE mesh_nodes SET status=?1, last_heartbeat_at=?2 WHERE id=?3 AND status!='revoked'",
+                    params![status_str, ts, id],
+                )?;
+            } else {
+                db.execute(
+                    "UPDATE mesh_nodes SET status=?1 WHERE id=?2 AND status!='revoked'",
+                    params![status_str, id],
+                )?;
+            }
+            let dto = read_mesh_node(db, &id)?;
+            Store::append_change(
+                db,
+                ChangeTopic::MeshNode,
+                &dto.id,
+                &serde_json::to_value(&dto)?,
+            )?;
+            Ok(dto)
+        })
+    }
+
     pub fn revoke_mesh_node(&self, id: &str) -> Result<MeshNodeDto> {
         let id = id.to_owned();
         self.write(move |db| {

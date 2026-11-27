@@ -5,8 +5,58 @@ use polyclave_proto::MeshNodeDto;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
+
+pub fn current_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+}
+
+/// Ensures mesh endpoints are loopback, RFC1918, Tailscale CGNAT/MagicDNS, or `.local`.
+pub fn validate_private_mesh_endpoint(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| Error::Invalid("invalid mesh url"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::Denied("public mesh endpoint rejected"));
+    }
+    let host = url
+        .host_str()
+        .ok_or(Error::Invalid("missing mesh host"))?;
+    let normalized = host.trim_start_matches('[').trim_end_matches(']');
+    if normalized.eq_ignore_ascii_case("localhost")
+        || normalized.ends_with(".ts.net")
+        || normalized.ends_with(".local")
+    {
+        return Ok(url);
+    }
+    if let Ok(ip) = normalized.parse::<IpAddr>() {
+        let ok = match ip {
+            IpAddr::V4(v4) => is_private_ipv4(v4),
+            IpAddr::V6(v6) => is_private_ipv6(v6),
+        };
+        return if ok {
+            Ok(url)
+        } else {
+            Err(Error::Denied("public mesh endpoint rejected"))
+        };
+    }
+    Err(Error::Denied("public mesh endpoint rejected"))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -224,7 +274,10 @@ impl MeshClient {
     }
 
     pub async fn health(&self, endpoint: &str) -> Result<RemoteHealth> {
-        let url = format!("{}/mesh/health", endpoint.trim_end_matches('/'));
+        let base = validate_private_mesh_endpoint(endpoint)?;
+        let url = base
+            .join("mesh/health")
+            .map_err(|_| Error::Invalid("invalid mesh url"))?;
         let resp = self
             .http
             .get(url)
@@ -244,7 +297,10 @@ impl MeshClient {
         endpoint: &str,
         req: &RemoteDispatchRequest,
     ) -> Result<serde_json::Value> {
-        let url = format!("{}/mesh/dispatch", endpoint.trim_end_matches('/'));
+        let base = validate_private_mesh_endpoint(endpoint)?;
+        let url = base
+            .join("mesh/dispatch")
+            .map_err(|_| Error::Invalid("invalid mesh url"))?;
         let resp = self
             .http
             .post(url)
@@ -391,5 +447,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res["accepted"], true);
+    }
+
+    #[test]
+    fn rejects_public_mesh_endpoints_and_allows_private_mesh() {
+        assert!(matches!(
+            validate_private_mesh_endpoint("https://example.com"),
+            Err(Error::Denied(_))
+        ));
+        assert!(matches!(
+            validate_private_mesh_endpoint("http://8.8.8.8:4310"),
+            Err(Error::Denied(_))
+        ));
+        assert!(validate_private_mesh_endpoint("http://127.0.0.1:4310").is_ok());
+        assert!(validate_private_mesh_endpoint("http://100.64.0.5:4310").is_ok());
+        assert!(validate_private_mesh_endpoint("https://winbox.tailnet.ts.net").is_ok());
     }
 }
