@@ -3,3 +3,12 @@ name = "polyclave-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+polyclave-os = { path = "../polyclave-os" }
+polyclave-proto = { path = "../polyclave-proto" }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
