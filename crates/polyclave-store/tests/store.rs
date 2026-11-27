@@ -1,5 +1,11 @@
-use polyclave_proto::{ChangeTopic, MemoryKind, MemoryScope, MemoryStatus};
-use polyclave_store::{reserve_ticket, CandidateMemory, Changes, Error, MemoryFilter, Store};
+use polyclave_proto::{
+    ChangeTopic, CouncilLevel, CouncilStatus, MemoryKind, MemoryScope, MemoryStatus,
+    PlanningPreference, PrGateStatus, ProposalPayload, ReviewVerdict, Vendor,
+};
+use polyclave_store::{
+    reserve_ticket, CandidateMemory, Changes, Error, MemoryFilter, NewCouncil, NewPrGate,
+    NewPrReview, NewProposal, ScmCursor, Store,
+};
 use rusqlite::Connection;
 use serde_json::json;
 use std::sync::{Arc, Barrier};
@@ -310,4 +316,316 @@ fn fts_multi_word_nul_safety_tag_bounds_and_hub_receipt_edge_cases() {
         .unwrap();
     let reclaimed = store.hub_claim("s1", "h", "b").unwrap().unwrap();
     assert_eq!(reclaimed.input.id, turn.input.id);
+}
+
+// ---- Stage 2: council, pr_gate, scm cursor and global pause ----------------
+
+fn proposal(label: &str, vendor: Vendor, model: &str, hash: &str) -> NewProposal {
+    NewProposal {
+        label: label.into(),
+        vendor,
+        model: model.into(),
+        payload: ProposalPayload {
+            summary: format!("summary {label}"),
+            touched_paths: vec!["src/lib.rs".into()],
+            ..Default::default()
+        },
+        input_hash: hash.into(),
+    }
+}
+
+fn new_council(store: &Store) -> polyclave_proto::CouncilDto {
+    store
+        .create_council(NewCouncil {
+            ticket_id: Some("ticket".into()),
+            repo_cwd: "repo".into(),
+            level: CouncilLevel::Direction,
+            preference: PlanningPreference::Balanced,
+            prompt: "plan the change".into(),
+        })
+        .unwrap()
+}
+
+fn council_events(store: &Store) -> Vec<polyclave_proto::SseEnvelope> {
+    let Changes::Events(events) = store.changes(Some(0)).unwrap() else {
+        panic!("events")
+    };
+    events
+        .into_iter()
+        .filter(|e| e.topic == ChangeTopic::Council)
+        .collect()
+}
+
+#[test]
+fn council_checkpoint_replay_is_idempotent_and_survives_reopen() {
+    let (dir, store) = fixture();
+    let council = new_council(&store);
+    assert_eq!(council.status, CouncilStatus::Running);
+    let first = store
+        .record_council_checkpoint(&council.id, "fanout:0", "hash-a", json!({"step":1}))
+        .unwrap();
+    assert_eq!(first, json!({"step":1}));
+    // Same input hash: replay returns the stored output, never overwrites it.
+    let replay = store
+        .record_council_checkpoint(&council.id, "fanout:0", "hash-a", json!({"step":2}))
+        .unwrap();
+    assert_eq!(replay, json!({"step":1}));
+    // Different input for the same step is a conflict.
+    assert!(matches!(
+        store.record_council_checkpoint(&council.id, "fanout:0", "hash-b", json!({})),
+        Err(Error::ConflictError)
+    ));
+    assert!(matches!(
+        store.record_council_checkpoint("missing", "fanout:0", "hash-a", json!({})),
+        Err(Error::NotFound)
+    ));
+    // Proposal insertion replays idempotently on the same input hash.
+    store
+        .add_council_proposal(&council.id, proposal("方案甲", Vendor::Codex, "m1", "h1"))
+        .unwrap();
+    let before = council_events(&store).len();
+    store
+        .add_council_proposal(&council.id, proposal("方案甲", Vendor::Codex, "m1", "h1"))
+        .unwrap();
+    assert_eq!(council_events(&store).len(), before);
+    assert!(matches!(
+        store.add_council_proposal(&council.id, proposal("方案甲", Vendor::Claude, "m2", "h2")),
+        Err(Error::ConflictError)
+    ));
+    drop(store);
+    let reopened = Store::open(dir.path().join("state.sqlite")).unwrap();
+    let stored = reopened
+        .council_checkpoint(&council.id, "fanout:0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.input_hash, "hash-a");
+    assert_eq!(stored.output, json!({"step":1}));
+    assert!(reopened
+        .council_checkpoint(&council.id, "other")
+        .unwrap()
+        .is_none());
+    assert_eq!(reopened.council(&council.id).unwrap().proposals.len(), 1);
+}
+
+#[test]
+fn council_proposals_stay_blind_until_decided_including_change_log() {
+    let (_dir, store) = fixture();
+    let council = new_council(&store);
+    store
+        .add_council_proposal(
+            &council.id,
+            proposal("方案甲", Vendor::Codex, "gpt-x", "h1"),
+        )
+        .unwrap();
+    store
+        .add_council_proposal(
+            &council.id,
+            proposal("方案乙", Vendor::Claude, "opus-y", "h2"),
+        )
+        .unwrap();
+    let awaiting = store
+        .update_council_status(
+            &council.id,
+            CouncilStatus::AwaitingUser,
+            Some(vec!["level_direction".into()]),
+        )
+        .unwrap();
+    assert_eq!(awaiting.escalation_reasons, vec!["level_direction"]);
+    // Insertion order is preserved (not Unicode order of the labels).
+    let labels: Vec<_> = awaiting
+        .proposals
+        .iter()
+        .map(|p| p.label.as_str())
+        .collect();
+    assert_eq!(labels, ["方案甲", "方案乙"]);
+    for blind in [&awaiting, &store.council(&council.id).unwrap()] {
+        assert!(blind
+            .proposals
+            .iter()
+            .all(|p| p.vendor.is_none() && p.model.is_none()));
+    }
+    for event in council_events(&store) {
+        let text = event.payload.to_string();
+        assert!(!text.contains("gpt-x") && !text.contains("opus-y"));
+        assert!(!text.contains("\"codex\"") && !text.contains("\"claude\""));
+    }
+    // Decided is only reachable through resolve; unknown labels are refused.
+    assert!(matches!(
+        store.update_council_status(&council.id, CouncilStatus::Decided, None),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.resolve_council(&council.id, "方案丙", None),
+        Err(Error::Invalid(_))
+    ));
+    let decided = store
+        .resolve_council(&council.id, "方案乙", Some("smaller diff".into()))
+        .unwrap();
+    assert_eq!(decided.status, CouncilStatus::Decided);
+    assert_eq!(decided.chosen_label.as_deref(), Some("方案乙"));
+    assert!(decided.decided_at.is_some());
+    assert_eq!(decided.proposals[0].vendor, Some(Vendor::Codex));
+    assert_eq!(decided.proposals[1].model.as_deref(), Some("opus-y"));
+    let last = council_events(&store).pop().unwrap();
+    assert_eq!(last.payload["proposals"][1]["vendor"], "claude");
+    // A decided council is closed.
+    assert!(matches!(
+        store.resolve_council(&council.id, "方案甲", None),
+        Err(Error::ConflictError)
+    ));
+    assert!(matches!(
+        store.add_council_proposal(&council.id, proposal("方案丙", Vendor::Agy, "m", "h3")),
+        Err(Error::ConflictError)
+    ));
+    assert_eq!(store.list_councils().unwrap().len(), 1);
+}
+
+fn review(sha: &str, verdict: ReviewVerdict) -> NewPrReview {
+    NewPrReview {
+        reviewer_vendor: Vendor::Claude,
+        reviewer_model: "reviewer".into(),
+        reviewed_sha: sha.into(),
+        verdict,
+        comments: "looks fine".into(),
+        github_review_id: Some(7),
+    }
+}
+
+#[test]
+fn pr_gate_auto_merge_ledger_and_pause_flag_persist_across_reopen() {
+    let (dir, store) = fixture();
+    assert!(!store.pause_state().unwrap().paused);
+    let gate = store
+        .create_pr_gate(NewPrGate {
+            run_id: "run".into(),
+            repo_slug: "owner/repo".into(),
+            branch: "agent/run".into(),
+            base_sha: "base".into(),
+            head_sha: "head1".into(),
+            touched_paths: vec!["src/**".into()],
+        })
+        .unwrap();
+    assert_eq!(gate.ticket_id, "ticket");
+    assert_eq!(gate.status, PrGateStatus::Pending);
+    assert!(!gate.auto_merge_armed);
+    let violated = store
+        .record_scope_violations(&gate.id, vec![".github/workflows/ci.yml".into()])
+        .unwrap();
+    assert_eq!(violated.status, PrGateStatus::ScopeViolation);
+    store.record_scope_violations(&gate.id, vec![]).unwrap();
+    store
+        .record_pr_opened(&gate.id, 42, "https://example.invalid/pr/42")
+        .unwrap();
+    // Reviews are pinned to the recorded head.
+    assert!(matches!(
+        store.record_pr_review(&gate.id, review("stale", ReviewVerdict::Approve)),
+        Err(Error::ConflictError)
+    ));
+    store
+        .record_pr_review(&gate.id, review("head1", ReviewVerdict::Revise))
+        .unwrap();
+    assert_eq!(store.begin_revise_round(&gate.id).unwrap().revise_rounds, 1);
+    store.set_pr_head(&gate.id, "head2").unwrap();
+    store
+        .record_pr_review(&gate.id, review("head2", ReviewVerdict::Approve))
+        .unwrap();
+    assert!(matches!(
+        store.set_pr_gate_status(&gate.id, PrGateStatus::AutoMergeArmed),
+        Err(Error::Invalid(_))
+    ));
+    // Not approved yet, then stale head: arming is refused.
+    assert!(matches!(
+        store.arm_auto_merge(&gate.id, "head2"),
+        Err(Error::ConflictError)
+    ));
+    store
+        .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+        .unwrap();
+    assert!(matches!(
+        store.arm_auto_merge(&gate.id, "head1"),
+        Err(Error::ConflictError)
+    ));
+    let armed = store.arm_auto_merge(&gate.id, "head2").unwrap();
+    assert!(armed.auto_merge_armed);
+    assert_eq!(armed.status, PrGateStatus::AutoMergeArmed);
+    assert_eq!(armed.reviews.len(), 2);
+    // Armed gates refuse head moves and generic transitions.
+    assert!(matches!(
+        store.set_pr_head(&gate.id, "head3"),
+        Err(Error::ConflictError)
+    ));
+    assert!(matches!(
+        store.set_pr_gate_status(&gate.id, PrGateStatus::Reviewing),
+        Err(Error::ConflictError)
+    ));
+    let paused = store.set_pause(true, Some("user pause".into())).unwrap();
+    assert!(paused.paused);
+
+    // Simulated crash: the ledger and the pause flag survive.
+    drop(store);
+    let store = Store::open(dir.path().join("state.sqlite")).unwrap();
+    let pause = store.pause_state().unwrap();
+    assert!(pause.paused);
+    assert_eq!(pause.reason.as_deref(), Some("user pause"));
+    let in_flight = store.armed_pr_gates().unwrap();
+    assert_eq!(in_flight.len(), 1);
+    assert_eq!(in_flight[0].id, gate.id);
+    assert_eq!(in_flight[0].head_sha, "head2");
+    let revoked = store
+        .disarm_auto_merge(&gate.id, PrGateStatus::Paused)
+        .unwrap();
+    assert!(!revoked.auto_merge_armed);
+    assert!(store.armed_pr_gates().unwrap().is_empty());
+    // New arming is refused while paused.
+    store
+        .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+        .unwrap();
+    assert!(matches!(
+        store.arm_auto_merge(&gate.id, "head2"),
+        Err(Error::ConflictError)
+    ));
+    assert!(!store.set_pause(false, None).unwrap().paused);
+    store.arm_auto_merge(&gate.id, "head2").unwrap();
+    let merged = store
+        .set_pr_gate_status(&gate.id, PrGateStatus::Merged)
+        .unwrap();
+    assert!(!merged.auto_merge_armed);
+    assert_eq!(store.list_pr_gates().unwrap().len(), 1);
+
+    // Every mutation is on the change log, in order, with monotonic seq.
+    let Changes::Events(events) = store.changes(Some(0)).unwrap() else {
+        panic!("events")
+    };
+    let topics: Vec<_> = events.iter().map(|e| e.topic).collect();
+    assert!(topics.contains(&ChangeTopic::PrGate));
+    assert_eq!(
+        topics.iter().filter(|t| **t == ChangeTopic::Pause).count(),
+        2
+    );
+    assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
+    assert_eq!(events.last().unwrap().payload["status"], "merged");
+}
+
+#[test]
+fn scm_cursor_upserts_and_change_log_rejects_github_tokens() {
+    let (_dir, store) = fixture();
+    assert!(store.scm_cursor("owner/repo", 42).unwrap().is_none());
+    let mut cursor = ScmCursor {
+        repo_slug: "owner/repo".into(),
+        pr_number: 42,
+        last_event_etag: Some("W/\"1\"".into()),
+        last_check_sha: Some("head1".into()),
+        last_comment_id: Some(10),
+    };
+    store.save_scm_cursor(cursor.clone()).unwrap();
+    cursor.last_comment_id = Some(11);
+    cursor.last_event_etag = None;
+    store.save_scm_cursor(cursor.clone()).unwrap();
+    assert_eq!(store.scm_cursor("owner/repo", 42).unwrap(), Some(cursor));
+    for key in ["bot_token", "reviewer_token"] {
+        let rejected = store.write(move |db| {
+            Store::append_change(db, ChangeTopic::PrGate, "g", &json!({ key: "test-only" }))
+        });
+        assert!(matches!(rejected, Err(Error::Invalid(_))));
+    }
 }

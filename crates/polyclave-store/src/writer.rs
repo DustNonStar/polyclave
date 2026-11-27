@@ -93,7 +93,12 @@ impl Store {
                 transcript_json TEXT NOT NULL);",
             )?;
             migration.pragma_update(None, "user_version", 5)?;
-        } else if version != 5 {
+        }
+        if version <= 5 {
+            // Stage 2: additive and idempotent.
+            migration.execute_batch(crate::stage2::SCHEMA)?;
+            migration.pragma_update(None, "user_version", 6)?;
+        } else if version != 6 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;
@@ -206,8 +211,14 @@ impl Store {
         fn sensitive(v: &Value) -> bool {
             match v {
                 Value::Object(o) => {
-                    o.contains_key("mcp_token")
-                        || o.contains_key("local_auth_token")
+                    [
+                        "mcp_token",
+                        "local_auth_token",
+                        "bot_token",
+                        "reviewer_token",
+                    ]
+                    .iter()
+                    .any(|k| o.contains_key(*k))
                         || o.values().any(sensitive)
                 }
                 Value::Array(xs) => xs.iter().any(sensitive),

@@ -2,11 +2,13 @@
 mod hub;
 mod memory;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
+mod stage2;
 mod writer;
 
 pub use memory::{CandidateMemory, Curator, MemoryAction, MemoryFilter};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
+pub use stage2::{CouncilCheckpoint, NewCouncil, NewPrGate, NewPrReview, NewProposal, ScmCursor};
 pub use writer::{Changes, Store};
 
 #[derive(Debug, thiserror::Error)]
