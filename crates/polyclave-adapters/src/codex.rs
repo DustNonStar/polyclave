@@ -14,7 +14,7 @@ pub fn codex_args(
     if thread.is_some() {
         args.push("resume".into());
     }
-    args.extend(["--json", "--skip-git-repo-check", "--ignore-user-config"].map(OsString::from));
+    args.extend(["--json", "--skip-git-repo-check"].map(OsString::from));
     for conf in [
         "approval_policy=\"never\"",
         "sandbox_mode=\"workspace-write\"",

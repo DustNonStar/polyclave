@@ -14,6 +14,7 @@ use std::{
     io::{BufRead, Read},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::sync::broadcast;
 
@@ -41,6 +42,7 @@ fn args(
     manager: bool,
     mcp_url: &str,
     config: &Path,
+    system_prompt: Option<(&str, bool)>,
 ) -> Vec<OsString> {
     match vendor {
         Vendor::Codex => {
@@ -48,9 +50,7 @@ fn args(
             if thread.is_some() {
                 a.push("resume".into());
             }
-            a.extend(
-                ["--json", "--ignore-user-config", "--skip-git-repo-check"].map(OsString::from),
-            );
+            a.extend(["--json", "--skip-git-repo-check"].map(OsString::from));
             for opt in [
                 "sandbox_mode=\"read-only\"",
                 "approval_policy=\"never\"",
@@ -101,6 +101,17 @@ fn args(
             }
             if let Some(t) = thread {
                 a.extend(["--resume".into(), t.into()]);
+            }
+            if let Some((sys, append)) = system_prompt {
+                a.extend([
+                    if append {
+                        "--append-system-prompt"
+                    } else {
+                        "--system-prompt"
+                    }
+                    .into(),
+                    sys.into(),
+                ]);
             }
             let offered = HUB_TOOLS
                 .iter()
@@ -217,22 +228,11 @@ impl CliHubProvider {
         let reply = match result {
             Ok(reply) => reply,
             Err(e) => {
-                let reason = match e {
-                    Error::NotStarted | Error::CancelledBeforeStart => "never_started",
-                    Error::Cancelled => "cancel",
-                    _ => "exit",
-                };
-                self.store
-                    .hub_end_without_reply(claim.id, reason)
-                    .map_err(|_| Error::Store)?;
                 self.transport.terminal(claim.id);
                 return Err(e);
             }
         };
         if reply.native_thread.is_none() {
-            self.store
-                .hub_end_without_reply(claim.id, "exit")
-                .map_err(|_| Error::Store)?;
             self.transport.terminal(claim.id);
             return Err(Error::Protocol);
         }
@@ -243,7 +243,16 @@ impl CliHubProvider {
                 HubCompletion {
                     text: reply.text.clone(),
                     reasoning: Some(reply.reasoning.clone()),
-                    metadata: (!reply.calls.is_empty()).then(|| json!({"tool_calls":reply.calls})),
+                    metadata: (!reply.calls.is_empty() || reply.usage.is_some()).then(|| {
+                        let mut meta = serde_json::Map::new();
+                        if !reply.calls.is_empty() {
+                            meta.insert("tool_calls".into(), json!(reply.calls));
+                        }
+                        if let Some(usage) = reply.usage.clone() {
+                            meta.insert("usage".into(), usage);
+                        }
+                        Value::Object(meta)
+                    }),
                     native_thread: reply.native_thread.clone(),
                     delivered: session.included,
                     rebuilt,
@@ -387,7 +396,15 @@ impl CliTransport for SupervisedCli {
                 self.home.clone().into_os_string(),
             ));
         }
-        let mut child = polyclave_os::spawn_supervised(&polyclave_os::SpawnSpec {
+        let (system_prompt, prompt_text) = format_prompt(
+            self.vendor,
+            &conversation.history,
+            conversation.native_thread.is_some(),
+        );
+        let sys_arg = system_prompt
+            .as_ref()
+            .map(|(text, append)| (text.as_str(), *append));
+        let child = polyclave_os::spawn_supervised(&polyclave_os::SpawnSpec {
             supervisor: self.supervisor.clone(),
             worker: polyclave_os::resolve_cli_binary(&self.executable)
                 .map_err(|_| Error::NotStarted)?,
@@ -398,29 +415,33 @@ impl CliTransport for SupervisedCli {
                 self.manager,
                 &self.mcp_url,
                 &config,
+                sys_arg,
             ),
             cwd: scratch,
             env,
             released: marker,
         })
         .map_err(|_| Error::NotStarted)?;
-        let identity = child.identity().clone();
+        let mut child = ChildGuard(Some(child));
+        let identity = child.get_mut()?.identity().clone();
         self.store
             .hub_authorize(claim.id, Some((identity.pid, identity.started_at)))
             .map_err(|_| Error::NotStarted)?;
-        let prompt = serde_json::to_vec(&conversation.history).map_err(|_| Error::NotStarted)?;
         if self.stop.load(Ordering::Acquire) {
-            let _ = child.cancel();
-            let _ = child.wait();
             return Err(Error::CancelledBeforeStart);
         }
-        child.go(&prompt).map_err(|_| Error::Transport)?;
-        if let Some(mut stderr) = child.take_stderr() {
+        child
+            .get_mut()?
+            .go(prompt_text.as_bytes())
+            .map_err(|_| Error::Transport)?;
+        let stderr_handle = child.get_mut()?.take_stderr().map(|mut stderr| {
             std::thread::spawn(move || {
-                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-            });
-        }
-        let mut output = child.take_stdout().ok_or(Error::Transport)?;
+                let mut buf = Vec::new();
+                let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut buf);
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        });
+        let mut output = child.get_mut()?.take_stdout().ok_or(Error::Transport)?;
         let (send, receive) = std::sync::mpsc::sync_channel(64);
         std::thread::spawn(move || loop {
             let mut line = String::new();
@@ -441,12 +462,15 @@ impl CliTransport for SupervisedCli {
         let mut done = false;
         let mut refused_thread = false;
         let mut saw_activity = false;
+        let mut saw_stream_delta = false;
         let mut size = 0usize;
+        let started = Instant::now();
         loop {
             if self.stop.load(Ordering::Acquire) {
-                let _ = child.cancel();
-                let _ = child.wait();
                 return Err(Error::Cancelled);
+            }
+            if started.elapsed() >= CLI_TIMEOUT {
+                return Err(Error::Transport);
             }
             let line = match receive.recv_timeout(std::time::Duration::from_millis(25)) {
                 Ok(line) => line?,
@@ -460,6 +484,7 @@ impl CliTransport for SupervisedCli {
             if line.contains(claim.turn_credential()) {
                 continue;
             }
+            let mut is_assistant_line = false;
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if v["type"] == "error"
                     && matches!(
@@ -469,11 +494,35 @@ impl CliTransport for SupervisedCli {
                 {
                     refused_thread = true;
                 }
+                if v["type"] == "result" && v["is_error"] == true {
+                    let detail = format!("{} {} {}", v["result"], v["error"], v["errors"]);
+                    if is_missing_thread_text(&detail) {
+                        refused_thread = true;
+                    }
+                }
+                if v["type"] == "stream_event" {
+                    saw_stream_delta = true;
+                }
+                is_assistant_line = v["type"] == "assistant";
                 if matches!(
                     v["type"].as_str(),
                     Some("item.started" | "item.completed" | "assistant" | "stream_event")
                 ) {
                     saw_activity = true;
+                }
+                if v["type"] == "result"
+                    && !v["is_error"].as_bool().unwrap_or(false)
+                    && result.text.is_empty()
+                {
+                    if let Some(text) = v["result"].as_str().filter(|s| !s.is_empty()) {
+                        result.text.push_str(text);
+                        let _ = events.send(ProviderEvent::Text(text.to_owned()));
+                    }
+                }
+                if matches!(v["type"].as_str(), Some("result" | "turn.completed")) {
+                    if let Some(usage) = extract_cli_usage(&v) {
+                        result.usage = Some(usage);
+                    }
                 }
             }
             let event = match self.vendor {
@@ -491,8 +540,10 @@ impl CliTransport for SupervisedCli {
                     result.native_thread = Some(id);
                 }
                 Some(AgentEvent::TextDelta { text }) => {
-                    result.text.push_str(&text);
-                    let _ = events.send(ProviderEvent::Text(text));
+                    if !(is_assistant_line && saw_stream_delta) {
+                        result.text.push_str(&text);
+                        let _ = events.send(ProviderEvent::Text(text));
+                    }
                 }
                 Some(AgentEvent::ReasoningDelta { text }) => {
                     result.reasoning.push_str(&text);
@@ -503,9 +554,25 @@ impl CliTransport for SupervisedCli {
             }
         }
         drop(cleanup);
-        if child.wait().map_err(|_| Error::Transport)? != 0 || !done {
+        let status = child.wait().map_err(|_| Error::Transport)?;
+        let stderr_text = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        if is_missing_thread_text(&stderr_text) {
+            refused_thread = true;
+        }
+        if status != 0 || !done {
             if refused_thread && !saw_activity && result.native_thread.is_none() {
                 return Err(Error::MissingThread);
+            }
+            if !stderr_text.trim().is_empty() {
+                let sanitized = stderr_text.replace(claim.turn_credential(), "[redacted]");
+                let end = sanitized.floor_char_boundary(sanitized.len().min(512));
+                eprintln!(
+                    "CLI Hub turn {} failed (status {status}): {}",
+                    claim.id,
+                    &sanitized[..end]
+                );
             }
             return Err(Error::Transport);
         }
@@ -519,6 +586,119 @@ impl CliTransport for SupervisedCli {
         let _ = std::fs::remove_file(self.tmp.join(format!("turn-{turn}.released")));
     }
 }
+const CLI_TIMEOUT: Duration = Duration::from_secs(600);
+
+struct ChildGuard(Option<polyclave_os::Supervised>);
+impl ChildGuard {
+    fn get_mut(&mut self) -> Result<&mut polyclave_os::Supervised> {
+        self.0.as_mut().ok_or(Error::Transport)
+    }
+    fn wait(mut self) -> std::io::Result<i32> {
+        let mut child = self
+            .0
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing child"))?;
+        child.wait()
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.cancel();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn format_prompt(
+    vendor: Vendor,
+    history: &[ChatMessage],
+    resume: bool,
+) -> (Option<(String, bool)>, String) {
+    let mut sys = Vec::new();
+    let mut rest = Vec::new();
+    for msg in history {
+        if vendor == Vendor::Claude && msg.role == Role::System {
+            if !msg.content.trim().is_empty() {
+                sys.push(msg.content.as_str());
+            }
+        } else {
+            rest.push(msg);
+        }
+    }
+    let system_prompt = if sys.is_empty() {
+        None
+    } else {
+        Some((sys.join("\n\n"), resume))
+    };
+    let body = if rest.len() == 1 && rest[0].role == Role::User {
+        rest[0].content.clone()
+    } else {
+        rest.iter()
+            .map(|m| {
+                let label = match m.role {
+                    Role::System => "System",
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                    Role::Tool => "Tool",
+                };
+                format!("{label}:\n{}", m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    (system_prompt, body)
+}
+
+fn is_missing_thread_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "thread_not_found",
+        "session_not_found",
+        "thread not found",
+        "session not found",
+        "no conversation found",
+        "could not find session",
+        "unknown thread",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn extract_cli_usage(v: &Value) -> Option<Value> {
+    let usage = v.get("usage").filter(|u| u.is_object());
+    let cost = v
+        .get("total_cost_usd")
+        .or_else(|| v.get("cost"))
+        .and_then(Value::as_f64)
+        .filter(|c| *c >= 0.0);
+    if usage.is_none() && cost.is_none() {
+        return None;
+    }
+    let prompt_tokens = usage.and_then(|u| {
+        u.get("input_tokens")
+            .or_else(|| u.get("prompt_tokens"))
+            .and_then(Value::as_u64)
+    });
+    let completion_tokens = usage.and_then(|u| {
+        u.get("output_tokens")
+            .or_else(|| u.get("completion_tokens"))
+            .and_then(Value::as_u64)
+    });
+    let total_tokens = usage
+        .and_then(|u| u.get("total_tokens").and_then(Value::as_u64))
+        .or_else(|| match (prompt_tokens, completion_tokens) {
+            (Some(p), Some(c)) => Some(p + c),
+            _ => None,
+        });
+    Some(json!({
+        "total_tokens": total_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost": cost,
+    }))
+}
+
 struct Cleanup(PathBuf);
 impl Cleanup {
     fn new(p: PathBuf) -> Self {
@@ -543,6 +723,7 @@ mod tests {
             true,
             "http://127.0.0.1:1/mcp",
             Path::new("config.json"),
+            Some(("system instructions", false)),
         );
         assert!(arguments
             .windows(2)
@@ -551,11 +732,37 @@ mod tests {
             .windows(2)
             .any(|p| p[0] == "--resume" && p[1] == "thread"));
         assert!(arguments
+            .windows(2)
+            .any(|p| p[0] == "--system-prompt" && p[1] == "system instructions"));
+        assert!(arguments
             .iter()
             .any(|a| a.to_string_lossy().contains("mcp__host__read_repo_file")));
         assert!(!arguments
             .iter()
             .any(|a| a.to_string_lossy().contains("dispatch_task") || a == "--bare"));
+        let codex = args(
+            Vendor::Codex,
+            "default",
+            None,
+            false,
+            "http://127.0.0.1:1/mcp",
+            Path::new("config.json"),
+            None,
+        );
+        assert!(!codex.iter().any(|a| a == "--ignore-user-config"));
+        let (sys, body) = format_prompt(
+            Vendor::Claude,
+            &[
+                ChatMessage::text(Role::System, "sys"),
+                ChatMessage::text(Role::User, "hello"),
+            ],
+            false,
+        );
+        assert_eq!(sys, Some(("sys".into(), false)));
+        assert_eq!(body, "hello");
+        assert!(is_missing_thread_text(
+            "Error: No conversation found with session ID"
+        ));
     }
 }
 

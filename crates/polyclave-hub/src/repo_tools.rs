@@ -121,10 +121,7 @@ impl RepoScope {
                 let relative = absolute.strip_prefix(&self.0).map_err(|_| Error::Policy)?;
                 if kind.is_dir() && relative.components().count() <= 16 {
                     pending.push(absolute);
-                } else if kind.is_file()
-                    && glob.as_ref().is_none_or(|g| g.is_match(relative))
-                    && self.read_text(relative).is_ok()
-                {
+                } else if kind.is_file() && glob.as_ref().is_none_or(|g| g.is_match(relative)) {
                     matches.push(relative.to_str().ok_or(Error::Policy)?.replace('\\', "/"));
                 }
             }
@@ -162,7 +159,9 @@ impl RepoScope {
         }
         let mut result = vec![];
         for rel in self.list_repo_files(None, glob)? {
-            let text = self.read_text(Path::new(&rel))?;
+            let Ok(text) = self.read_text(Path::new(&rel)) else {
+                continue;
+            };
             for (n, line) in text.lines().enumerate() {
                 if line.contains(pattern) {
                     result.push(RepoMatch {
@@ -215,6 +214,11 @@ fn allow_component(text: &str) -> bool {
                 | "local-auth.token"
                 | "node_modules"
                 | "target"
+                | ".venv"
+                | "dist"
+                | "build"
+                | "vendor"
+                | ".next"
                 | "con"
                 | "nul"
                 | "prn"
@@ -264,9 +268,11 @@ mod tests {
                 "{path}"
             );
         }
-        assert_eq!(r.list_repo_files(None, None).unwrap(), ["ok.txt"]);
+        let listed = r.list_repo_files(None, None).unwrap();
+        assert_eq!(listed, ["data.bin", "ok.txt", "seemingly-text.txt"]);
         let result = r.search_repo("needle", Some("*.txt")).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].line, 2);
+        assert!(r.search_repo("PRIVATE KEY", None).unwrap().is_empty());
     }
 }

@@ -14,7 +14,7 @@ use polyclave_core::{
     runner::TurnRunner,
     runs::{Resolution, RunManager, RunRequest},
 };
-use polyclave_proto::{AgentEvent, ApiError, RunStatus, TurnMode};
+use polyclave_proto::{ApiError, ChangeTopic, RunStatus, TurnMode};
 use polyclave_store::{new_id, now, Changes, Error, Store};
 use rusqlite::params;
 use serde::Deserialize;
@@ -27,7 +27,7 @@ pub struct App {
     pub store: Store,
     pub runs: RunManager,
     pub runner: TurnRunner,
-    pub stream: broadcast::Sender<(String, AgentEvent)>,
+    pub stream: broadcast::Sender<(String, crate::hub_api::StreamEvent)>,
     pub hub: Option<crate::hub_api::Hub>,
 }
 
@@ -50,17 +50,44 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
         api
     };
     let api = api.layer(middleware::from_fn_with_state(auth, auth::require));
-    let directory = std::env::var_os("POLYCLAVE_UI_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("apps/polyclave-app/ui/dist"));
+    let directory = resolve_ui_dir();
     Router::new().nest("/api",api).fallback_service(tower_http::set_header::SetResponseHeader::overriding(
         tower_http::services::ServeDir::new(directory),axum::http::header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
     ))
 }
 
-type Reply = std::result::Result<Json<Value>, HttpError>;
-struct HttpError(StatusCode, &'static str, &'static str);
+fn resolve_ui_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("POLYCLAVE_UI_DIR") {
+        return PathBuf::from(dir);
+    }
+    let cwd_dist = PathBuf::from("apps/polyclave-app/ui/dist");
+    if cwd_dist.is_dir() {
+        return cwd_dist;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [
+                dir.join("ui/dist"),
+                dir.join("../Resources/ui/dist"),
+                dir.join("../../apps/polyclave-app/ui/dist"),
+                dir.join("../../../apps/polyclave-app/ui/dist"),
+            ] {
+                if candidate.is_dir() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    cwd_dist
+}
+
+pub(crate) type Reply = std::result::Result<Json<Value>, HttpError>;
+pub(crate) struct HttpError(
+    pub(crate) StatusCode,
+    pub(crate) &'static str,
+    pub(crate) &'static str,
+);
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         (
@@ -155,7 +182,10 @@ async fn chat(State(app): State<App>, Path(id): Path<String>, Json(c): Json<Chat
         if matches!(run.status, RunStatus::Done | RunStatus::Failed) {
             return Err(Error::ConflictError);
         }
-        app.runner.schedule(&id, TurnMode::WorkerChat, c.text)?;
+        let attempt = app.runner.schedule(&id, TurnMode::WorkerChat, c.text)?;
+        if let Some(hub) = &app.hub {
+            hub.track(id, attempt);
+        }
         Ok(())
     })
     .await?;
@@ -168,8 +198,12 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Reply {
 async fn retry(State(app): State<App>, Path(id): Path<String>) -> Reply {
     blocking(move || {
         let run = app.runs.get(&id)?;
-        app.runner
+        let attempt = app
+            .runner
             .schedule(&id, TurnMode::Retry, run.instructions)?;
+        if let Some(hub) = &app.hub {
+            hub.track(id, attempt);
+        }
         Ok(())
     })
     .await?;
@@ -210,8 +244,10 @@ async fn register(State(app): State<App>, Json(input): Json<Register>) -> Reply 
             let id=new_id('s');
             db.execute("INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
                 VALUES(?1,?2,'hub',?3,'builtin-hub','default',?4)",params![id,input.name,repo,stamp])?;
-            Ok(json!({"id":id,"name":input.name,"role":"hub","repo_cwd":repo,"profile_id":"builtin-hub","provider_model":"default",
-                "vendor":null,"rolling_summary":"","agent_thread_id":null,"created_at":stamp}))
+            let session = json!({"id":id,"name":input.name,"role":"hub","repo_cwd":repo,"profile_id":"builtin-hub","provider_model":"default",
+                "vendor":null,"rolling_summary":"","agent_thread_id":null,"created_at":stamp});
+            Store::append_change(db,ChangeTopic::Inbox,&id,&session)?;
+            Ok(session)
         })
     }).await?))
 }
@@ -262,12 +298,21 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response, 
                     }
                 },
                 event=streaming.recv(), if transient_open=>match event{
-                    Ok((run,message))=>{
+                    Ok((run, crate::hub_api::StreamEvent::Resync)) => {
+                        let _ = run;
+                        yield Ok(Event::default().event("resync_required").data("{}"));
+                        break;
+                    }
+                    Ok((_, crate::hub_api::StreamEvent::Shutdown)) => break,
+                    Ok((run, message)) => {
                         if let Ok(ev)=Event::default().event("agent").json_data(json!({"run_id":run,"message":message})) {
                             yield Ok(ev);
                         }
                     },
-                    Err(broadcast::error::RecvError::Lagged(_))=>(),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        yield Ok(Event::default().event("resync_required").data("{}"));
+                        break;
+                    }
                     Err(broadcast::error::RecvError::Closed)=>transient_open=false,
                 }
             }
@@ -458,5 +503,30 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_session_appends_change_log() {
+        let (dir, store, app) = fixture();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let res = app
+            .oneshot(
+                Request::post("/api/sessions")
+                    .header("host", "127.0.0.1:4310")
+                    .header("authorization", "Bearer test-only")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"name": "Main", "repo_cwd": repo}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let Changes::Events(events) = store.changes(None).unwrap() else {
+            panic!("expected change events");
+        };
+        assert!(events.iter().any(|e| e.topic == ChangeTopic::Inbox));
     }
 }

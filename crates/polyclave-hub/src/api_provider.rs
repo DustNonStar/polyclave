@@ -86,14 +86,11 @@ impl ApiHubProvider {
         account: &str,
         models: Vec<String>,
         credentials: Arc<dyn Credentials>,
-        fixture: bool,
+        _fixture: bool,
     ) -> Result<Self> {
         let mut base = Url::parse(base).map_err(|_| Error::Profile)?;
         let allowed_scheme = base.scheme() == "https"
-            || (cfg!(test)
-                && fixture
-                && base.scheme() == "http"
-                && base.host_str() == Some("127.0.0.1"));
+            || (base.scheme() == "http" && base.host_str() == Some("127.0.0.1"));
         if !allowed_scheme
             || base.host().is_none()
             || !base.username().is_empty()
@@ -123,9 +120,9 @@ impl ApiHubProvider {
             .push("completions");
         let client = Client::builder()
             .redirect(Policy::none())
-            .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(300))
             .build()
             .map_err(|_| Error::Transport)?;
         Ok(Self {
@@ -153,7 +150,12 @@ impl ApiHubProvider {
         if secret.is_empty() {
             return Err(Error::Credential);
         }
-        let mut body = json!({"model":req.model,"messages":req.messages,"stream":true});
+        let mut body = json!({
+            "model": req.model,
+            "messages": req.messages,
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
         if !req.tools.is_empty() {
             body["tools"] = json!(req.tools);
         }
@@ -166,13 +168,25 @@ impl ApiHubProvider {
             .send()
             .await
             .map_err(|_| Error::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = read_error_summary(response, &secret).await;
+            return Err(Error::Http {
+                status: status.as_u16(),
+                detail,
+            });
+        }
         let event_stream = response
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.split(';').next() == Some("text/event-stream"));
-        if !response.status().is_success() || !event_stream {
-            return Err(Error::Transport);
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
+        if !event_stream {
+            return Err(Error::Protocol);
         }
         let mut bytes = response.bytes_stream();
         let mut parser = Decoder::default();
@@ -206,6 +220,49 @@ impl HubModelProvider for ApiHubProvider {
 
 const FRAME_LIMIT: usize = 256 * 1024;
 const RESULT_LIMIT: usize = 2 * 1024 * 1024;
+
+fn sanitize_summary(raw: &str, secret: Option<&str>) -> String {
+    let mut text = raw.trim().replace(['\r', '\n'], " ");
+    if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+        text = text.replace(secret, "[redacted]");
+    }
+    let end = text.floor_char_boundary(text.len().min(256));
+    text.truncate(end);
+    text
+}
+
+fn summarize_error_value(err: &Value) -> String {
+    let raw = err["message"]
+        .as_str()
+        .or_else(|| err.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| err.to_string());
+    sanitize_summary(&raw, None)
+}
+
+async fn read_error_summary(response: reqwest::Response, secret: &str) -> String {
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(Ok(chunk)) = stream.next().await {
+        let take = (4096 - buf.len()).min(chunk.len());
+        buf.extend_from_slice(&chunk[..take]);
+        if buf.len() >= 4096 {
+            break;
+        }
+    }
+    if buf.is_empty() {
+        return String::new();
+    }
+    if let Ok(v) = serde_json::from_slice::<Value>(&buf) {
+        if let Some(msg) = v["error"]["message"]
+            .as_str()
+            .or_else(|| v["message"].as_str())
+        {
+            return sanitize_summary(msg, Some(secret));
+        }
+    }
+    sanitize_summary(&String::from_utf8_lossy(&buf), Some(secret))
+}
 
 #[derive(Default)]
 struct Decoder {
@@ -267,8 +324,13 @@ impl Accumulated {
             .filter(|n| *n <= RESULT_LIMIT)
             .ok_or(Error::Limit)?;
         let v: Value = serde_json::from_str(frame).map_err(|_| Error::Protocol)?;
-        if v.get("error").is_some() {
-            return Err(Error::Transport);
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            let status = err["code"]
+                .as_u64()
+                .and_then(|c| u16::try_from(c).ok())
+                .unwrap_or(502);
+            let detail = summarize_error_value(err);
+            return Err(Error::Http { status, detail });
         }
         if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
             self.reply.usage = Some(json!({
@@ -278,7 +340,10 @@ impl Accumulated {
                 "cost":usage["cost"].as_f64().filter(|v|*v>=0.)
             }));
         }
-        let choices = v["choices"].as_array().ok_or(Error::Protocol)?;
+        let Some(choices_val) = v.get("choices").filter(|c| !c.is_null()) else {
+            return Ok(());
+        };
+        let choices = choices_val.as_array().ok_or(Error::Protocol)?;
         if choices.is_empty() {
             return Ok(());
         }
@@ -305,11 +370,27 @@ impl Accumulated {
                     return Err(Error::Protocol);
                 }
                 let call = self.calls.entry(index).or_default();
-                if let Some(id) = p["id"].as_str() {
-                    call.id.push_str(id);
+                if let Some(id) = p["id"].as_str().filter(|s| !s.is_empty()) {
+                    if call.id.is_empty() {
+                        call.id.push_str(id);
+                    } else if call.id != id {
+                        if id.starts_with(&call.id) {
+                            call.id = id.to_owned();
+                        } else {
+                            call.id.push_str(id);
+                        }
+                    }
                 }
-                if let Some(name) = p["function"]["name"].as_str() {
-                    call.name.push_str(name);
+                if let Some(name) = p["function"]["name"].as_str().filter(|s| !s.is_empty()) {
+                    if call.name.is_empty() {
+                        call.name.push_str(name);
+                    } else if call.name != name {
+                        if name.starts_with(&call.name) {
+                            call.name = name.to_owned();
+                        } else {
+                            call.name.push_str(name);
+                        }
+                    }
                 }
                 if let Some(arguments) = p["function"]["arguments"].as_str() {
                     call.arguments.push_str(arguments);
@@ -321,16 +402,24 @@ impl Accumulated {
             }
         }
         if let Some(reason) = c["finish_reason"].as_str() {
-            if !matches!(reason, "stop" | "tool_calls") {
-                return Err(Error::Protocol);
+            if !reason.is_empty() {
+                if !matches!(
+                    reason,
+                    "stop" | "tool_calls" | "length" | "content_filter" | "function_call"
+                ) {
+                    return Err(Error::Protocol);
+                }
+                self.finished = true;
             }
-            self.finished = true;
         }
         Ok(())
     }
     fn finish(mut self) -> Result<HubReply> {
         let mut ids = HashSet::new();
-        for parts in self.calls.into_values() {
+        for mut parts in self.calls.into_values() {
+            if parts.arguments.trim().is_empty() {
+                parts.arguments = "{}".into();
+            }
             if parts.id.is_empty()
                 || parts.name.is_empty()
                 || !ids.insert(parts.id.clone())
@@ -483,7 +572,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         assert!(matches!(
             p.complete(request("model"), tx.clone()).await,
-            Err(Error::Transport)
+            Err(Error::Http { status: 307, .. })
         ));
         assert!(rx.try_recv().is_err());
         task.abort();
@@ -662,5 +751,73 @@ mod tests {
             .iter()
             .all(|m| m.metadata.is_none()));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_handles_repeated_tool_metadata_empty_args_usage_only_frames_and_http_errors() {
+        async fn compat_llm(Json(body): Json<Value>) -> impl IntoResponse {
+            assert_eq!(body["stream_options"]["include_usage"], true);
+            let frames = [
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"memory_brief","arguments":""}}]},"finish_reason":""}]}),
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"memory_brief","arguments":""}}]},"finish_reason":"length"}]}),
+                json!({"usage":{"total_tokens":10,"prompt_tokens":6,"completion_tokens":4}}),
+            ];
+            let mut packet = String::new();
+            for f in frames {
+                packet.push_str(&format!("data: {f}\n\n"));
+            }
+            packet.push_str("data: [DONE]\n\n");
+            (
+                [(header::CONTENT_TYPE, " Text/Event-Stream ; charset=utf-8")],
+                packet,
+            )
+        }
+        let (url, task) =
+            fake_server(Router::new().route("/v1/chat/completions", post(compat_llm))).await;
+        let p = ApiHubProvider::new(
+            "compat",
+            &url,
+            "test",
+            vec!["model".into()],
+            Arc::new(FakeCredential),
+            false,
+        )
+        .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        let reply = p.complete(request("model"), tx.clone()).await.unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].id, "call_1");
+        assert_eq!(reply.calls[0].function.name, "memory_brief");
+        assert_eq!(reply.calls[0].function.arguments, "{}");
+        assert_eq!(reply.usage.as_ref().unwrap()["total_tokens"], 10);
+        task.abort();
+
+        let (err_url, err_task) = fake_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error":{"message":"rate limit hit"}})),
+                )
+            }),
+        ))
+        .await;
+        let p = ApiHubProvider::new(
+            "compat",
+            &err_url,
+            "test",
+            vec!["model".into()],
+            Arc::new(FakeCredential),
+            false,
+        )
+        .unwrap();
+        match p.complete(request("model"), tx).await {
+            Err(Error::Http { status, detail }) => {
+                assert_eq!(status, 429);
+                assert!(detail.contains("rate limit hit"));
+            }
+            other => panic!("expected Http 429, got {other:?}"),
+        }
+        err_task.abort();
     }
 }

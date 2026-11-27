@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashSet,
-    io,
+    io::{self, Read},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -11,97 +11,181 @@ use std::{
 };
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Manager, WindowEvent,
+    tray::{TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, RunEvent, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use zeroize::Zeroizing;
 
 const ORIGIN: &str = "http://127.0.0.1:4310";
+
 #[derive(Clone)]
-pub struct Daemon(Arc<Mutex<()>>);
+pub struct Daemon {
+    client: Client,
+    state: Arc<Mutex<Option<Connection>>>,
+}
+
 impl Daemon {
-    fn connection(&self) -> Result<Connection, &'static str> {
-        let _guard = self.0.lock().map_err(|_| "Daemon lock unavailable")?;
-        if let Some(connection) = probe() {
-            return Ok(connection);
+    fn new() -> Self {
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("the loopback client could not start");
+        Self {
+            client,
+            state: Arc::new(Mutex::new(None)),
         }
-        if std::net::TcpStream::connect_timeout(
+    }
+
+    fn connect(&self, allow_spawn: bool) -> Result<Connection, String> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| "Daemon lock unavailable".to_owned())?;
+        if let Some(conn) = guard.as_ref() {
+            if check_connection(&self.client, conn) {
+                return Ok(conn.clone());
+            }
+            *guard = None;
+        }
+        if let Some(conn) = probe(&self.client) {
+            *guard = Some(conn.clone());
+            return Ok(conn);
+        }
+        if !allow_spawn {
+            return Err("The local daemon is not running".to_owned());
+        }
+        let mut child = if std::net::TcpStream::connect_timeout(
             &([127, 0, 0, 1], 4310).into(),
             Duration::from_millis(150),
         )
         .is_err()
         {
             let companion = std::env::current_exe()
-                .map_err(|_| "Desktop executable path unavailable")?
+                .map_err(|e| format!("Desktop executable path unavailable: {e}"))?
                 .with_file_name(if cfg!(windows) {
                     "polyclaved.exe"
                 } else {
                     "polyclaved"
                 });
             if !companion.is_file() {
-                return Err("The packaged polyclaved companion is missing");
+                return Err(format!(
+                    "The packaged polyclaved companion is missing at {}",
+                    companion.display()
+                ));
             }
-            let mut command = Command::new(companion);
+            let mut command = Command::new(&companion);
             command
                 .env("POLYCLAVE_PORT", "4310")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stderr(Stdio::piped());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 command.creation_flags(0x08000000 | 0x00000200);
             }
-            let mut child = command
-                .spawn()
-                .map_err(|_| "Could not start the local daemon")?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+            Some(command.spawn().map_err(|e| {
+                format!(
+                    "Could not start the local daemon ({}): {e}",
+                    companion.display()
+                )
+            })?)
+        } else {
+            None
+        };
         let due = Instant::now() + Duration::from_secs(6);
         loop {
-            if let Some(connection) = probe() {
-                return Ok(connection);
+            if let Some(conn) = probe(&self.client) {
+                if let Some(mut c) = child.take() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                *guard = Some(conn.clone());
+                return Ok(conn);
+            }
+            if let Some(c) = child.as_mut() {
+                if let Ok(Some(status)) = c.try_wait() {
+                    let mut err = String::new();
+                    if let Some(mut stderr) = c.stderr.take() {
+                        let mut buf = Vec::new();
+                        let _ = (&mut stderr).take(1024).read_to_end(&mut buf);
+                        err = String::from_utf8_lossy(&buf).trim().to_owned();
+                    }
+                    return Err(if err.is_empty() {
+                        format!("The local daemon exited early ({status})")
+                    } else {
+                        format!("The local daemon exited early ({status}): {err}")
+                    });
+                }
             }
             if Instant::now() >= due {
-                return Err("The local daemon did not become ready");
+                if let Some(mut c) = child.take() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                return Err(format!(
+                    "The local daemon did not become ready at {ORIGIN} within 6s"
+                ));
             }
             std::thread::park_timeout(Duration::from_millis(100));
         }
     }
-    pub fn get(&self, path: &str) -> Result<Value, &'static str> {
-        let connection = self.connection()?;
-        connection
-            .client()?
+
+    pub fn get(&self, path: &str) -> Result<Value, String> {
+        self.get_with(path, true)
+    }
+
+    pub fn get_if_running(&self, path: &str) -> Result<Value, String> {
+        self.get_with(path, false)
+    }
+
+    fn get_with(&self, path: &str, allow_spawn: bool) -> Result<Value, String> {
+        let conn = self.connect(allow_spawn)?;
+        let resp = self
+            .client
             .get(format!("{ORIGIN}{path}"))
-            .bearer_auth(&*connection.token)
-            .send()
+            .bearer_auth(&*conn.token)
+            .send();
+        match resp
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.json())
-            .map_err(|_| "The local daemon did not return the requested data")
+        {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let Ok(mut guard) = self.state.lock() {
+                    *guard = None;
+                }
+                Err(format!("The local daemon did not return {path}: {e}"))
+            }
+        }
     }
 }
+
+#[derive(Clone)]
 pub struct Connection {
     token: Zeroizing<String>,
 }
-impl Connection {
-    fn client(&self) -> Result<Client, &'static str> {
-        Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(2))
-            .build()
-            .map_err(|_| "The loopback client could not start")
-    }
-}
+
 fn state_dir() -> Option<PathBuf> {
     std::env::var_os("POLYCLAVE_STATE_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::data_local_dir().map(|p| p.join("polyclave")))
 }
-fn probe() -> Option<Connection> {
+
+fn check_connection(client: &Client, conn: &Connection) -> bool {
+    client
+        .get(format!("{ORIGIN}/api/sessions"))
+        .bearer_auth(&*conn.token)
+        .send()
+        .is_ok_and(|r| r.status().is_success())
+}
+
+fn probe(client: &Client) -> Option<Connection> {
     let path = state_dir()?.join("local-auth.token");
     let metadata = path.symlink_metadata().ok()?;
     if !metadata.file_type().is_file() || metadata.len() > 128 {
@@ -114,27 +198,20 @@ fn probe() -> Option<Connection> {
     let connection = Connection {
         token: Zeroizing::new(token),
     };
-    let ok = connection
-        .client()
-        .ok()?
-        .get(format!("{ORIGIN}/api/sessions"))
-        .bearer_auth(&*connection.token)
-        .send()
-        .ok()?
-        .status()
-        .is_success();
-    ok.then_some(connection)
+    check_connection(client, &connection).then_some(connection)
 }
+
 #[derive(Serialize)]
 struct LocalConnection {
     origin: &'static str,
     bearer: String,
 }
+
 #[tauri::command]
 async fn local_connection(daemon: tauri::State<'_, Daemon>) -> Result<LocalConnection, String> {
     let daemon = daemon.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = daemon.connection().map_err(str::to_owned)?;
+        let connection = daemon.connect(true)?;
         Ok(LocalConnection {
             origin: ORIGIN,
             bearer: connection.token.to_string(),
@@ -143,15 +220,25 @@ async fn local_connection(daemon: tauri::State<'_, Daemon>) -> Result<LocalConne
     .await
     .map_err(|_| "The loopback bootstrap was interrupted".to_owned())?
 }
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn run() {
-    let daemon = Daemon(Arc::new(Mutex::new(())));
-    tauri::Builder::default()
+    let daemon = Daemon::new();
+    let app = tauri::Builder::default()
         .manage(daemon.clone())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             local_connection,
             crate::keyring::key_status,
-            crate::keyring::save_key
+            crate::keyring::save_key,
+            crate::keyring::delete_key
         ])
         .setup(move |app| {
             let open = MenuItem::with_id(app, "open", "Open Polyclave", true, None::<&str>)?;
@@ -165,14 +252,14 @@ pub fn run() {
                 .icon(icon)
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "open" => show_main_window(app),
                     "quit" => app.exit(0),
                     _ => (),
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        show_main_window(tray.app_handle());
+                    }
                 })
                 .build(app)?;
             let handle = app.handle().clone();
@@ -188,7 +275,7 @@ pub fn run() {
                             "A Ticket needs your attention",
                         ),
                     ] {
-                        if let Ok(Value::Array(items)) = daemon.get(path) {
+                        if let Ok(Value::Array(items)) = daemon.get_if_running(path) {
                             for item in items {
                                 if let Some(id) = item["id"].as_str() {
                                     if item["status"] == status {
@@ -218,6 +305,19 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("could not start the Polyclave desktop shell");
+        .build(tauri::generate_context!())
+        .expect("could not build the Polyclave desktop shell");
+
+    app.run(|_app, _event| {
+        #[cfg(target_os = "macos")]
+        if let RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } = _event
+        {
+            if !has_visible_windows {
+                show_main_window(_app);
+            }
+        }
+    });
 }

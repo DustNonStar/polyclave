@@ -29,8 +29,10 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build();
-    if runtime.and_then(|rt| rt.block_on(serve())).is_err() {
-        eprintln!("Polyclave could not start or serve the local daemon. Check the state directory, daemon lock, and loopback port.");
+    if let Err(err) = runtime.and_then(|rt| rt.block_on(serve())) {
+        eprintln!(
+            "Polyclave could not start or serve the local daemon ({err}). Check the state directory, daemon lock, and loopback port."
+        );
         std::process::exit(1);
     }
 }
@@ -70,7 +72,7 @@ async fn serve() -> io::Result<()> {
             claude_isolation: None,
         },
         move |run, ev| {
-            let _ = stream_writer.send((run.to_owned(), ev));
+            let _ = stream_writer.send((run.to_owned(), ev.into()));
         },
     )
     .map_err(io::Error::other)?;
@@ -107,13 +109,36 @@ async fn serve() -> io::Result<()> {
     println!("http://127.0.0.1:{port}/#token={token}");
     let result = axum::serve(api, app)
         .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            stop_hub.close();
+            shutdown_signal().await;
+            stop_hub.close().await;
         })
         .await;
     mcp.abort();
     let _ = remove_if_present(&token_file);
     result
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = async {
+                if let Some(ref mut term) = sigterm {
+                    term.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn state_dir() -> io::Result<PathBuf> {

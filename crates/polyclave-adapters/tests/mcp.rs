@@ -211,3 +211,27 @@ async fn candidate_proposal_cannot_escalate_or_be_read_as_verified() {
         .unwrap();
     assert_eq!(status, "candidate");
 }
+
+#[tokio::test]
+async fn memory_brief_respects_serialized_json_byte_budget_and_search_requires_query() {
+    let (_dir, store, app) = fixture(None);
+    let (_, bad_search) = call(app.clone(), WORKER, "memory_search", json!({})).await;
+    assert_eq!(bad_search["error"]["code"], -32602);
+    store
+        .write(|db| {
+            for i in 0..8 {
+                db.execute(
+                    "INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,tags_json,status,created_by,created_at,updated_at)
+                     VALUES(?1,'project','repo','decision',?2,?3,'[]','verified','user','now','now')",
+                    rusqlite::params![format!("m{i}"), format!("Title {i}"), "x".repeat(1200)],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (status, brief) = call(app, WORKER, "memory_brief", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let text = brief["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.len() <= 6000, "serialized json {} > 6000", text.len());
+    assert!(!text.is_empty());
+}

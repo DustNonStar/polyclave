@@ -22,6 +22,8 @@ pub enum Error {
     NotStarted,
     #[error("provider could not complete the request")]
     Transport,
+    #[error("provider returned HTTP {status}{}", if detail.is_empty() { String::new() } else { format!(": {detail}") })]
+    Http { status: u16, detail: String },
     #[error("provider returned an invalid or incomplete stream")]
     Protocol,
     #[error("provider response exceeded the configured bound")]

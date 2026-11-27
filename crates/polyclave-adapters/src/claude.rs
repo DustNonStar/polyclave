@@ -15,6 +15,8 @@ pub fn claude_args(config: &Path, id: Uuid, resume: bool, model: Option<&str>) -
         "--output-format",
         "stream-json",
         "--include-partial-messages",
+        "--permission-mode",
+        "bypassPermissions",
         "--strict-mcp-config",
         "--setting-sources",
         "",
@@ -87,9 +89,26 @@ pub fn parse_claude(line: &str) -> Option<AgentEvent> {
                 _ => None,
             }
         }
-        "result" => Some(AgentEvent::Finished {
-            success: !v["is_error"].as_bool()?,
-        }),
+        "assistant" => {
+            let content = v["message"]["content"].as_array()?;
+            let mut text = String::new();
+            for block in content {
+                if block["type"] == "text" {
+                    if let Some(part) = block["text"].as_str() {
+                        text.push_str(part);
+                    }
+                }
+            }
+            (!text.is_empty()).then_some(AgentEvent::TextDelta { text })
+        }
+        "result" => {
+            let is_error = v["is_error"].as_bool().unwrap_or_else(|| {
+                v["subtype"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("error"))
+            });
+            Some(AgentEvent::Finished { success: !is_error })
+        }
         _ => None,
     }
 }

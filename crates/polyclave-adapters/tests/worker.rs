@@ -22,7 +22,7 @@ fn vendor_args_do_not_enable_user_configuration_or_disable_claude_tools() {
     let args: Vec<_> = args.iter().map(|s| s.to_str().unwrap()).collect();
     assert_eq!(&args[..2], ["exec", "resume"]);
     assert_eq!(&args[args.len() - 3..], ["--", "native-thread", "-"]);
-    assert!(args.contains(&"--ignore-user-config"));
+    assert!(!args.contains(&"--ignore-user-config"));
     assert!(args.contains(&"sandbox_workspace_write.network_access=false"));
     assert!(args.contains(&"sandbox_workspace_write.writable_roots=[\"worktree\",\"staging\"]"));
     let id = Uuid::nil();
@@ -38,6 +38,9 @@ fn vendor_args_do_not_enable_user_configuration_or_disable_claude_tools() {
         assert!(!args
             .iter()
             .any(|s| s == "--bare" || s == "--tools" || s == "--dangerously-skip-permissions"));
+        assert!(args
+            .windows(2)
+            .any(|p| p[0] == "--permission-mode" && p[1] == "bypassPermissions"));
     }
 }
 
@@ -106,6 +109,18 @@ fn stream_events_use_the_same_contract() {
     assert_eq!(
         parse_claude(r#"{"type":"result","is_error":false}"#),
         Some(AgentEvent::Finished { success: true })
+    );
+    assert_eq!(
+        parse_claude(r#"{"type":"result","subtype":"success","result":"done"}"#),
+        Some(AgentEvent::Finished { success: true })
+    );
+    assert_eq!(
+        parse_claude(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"non-stream"}]}}"#
+        ),
+        Some(AgentEvent::TextDelta {
+            text: "non-stream".into(),
+        })
     );
     assert_eq!(parse_claude("bad json"), None);
 }

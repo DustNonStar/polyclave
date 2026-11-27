@@ -229,7 +229,7 @@ mod tests {
         req.repo_cwd = t.path().join("other");
         assert!(triage.dispatch(req).is_err());
         let saved = s.hub_ticket_mandate(&ticket.id).unwrap().0;
-        assert_eq!((saved.used, saved.status.as_str()), (0, "blocked_on_user"));
+        assert_eq!((saved.used, saved.status.as_str()), (0, "active"));
         let repo = saved.repo.clone();
         s.write(move|db|{db.execute("INSERT INTO admission_policies(repo_cwd,inferred_mode,bot_actors_json,human_actors_json,updated_at)
              VALUES(?1,'auto','[\"bot\"]','[\"human\"]','now')",[repo])?;Ok(())}).unwrap();

@@ -236,32 +236,13 @@ impl Mcp {
                 Ok(tool_text(&safe_text(response, token, 16_384)?, false))
             }
             "memory_brief" | "memory_search" => {
-                let Search { query } = decode(args)?;
-                if name == "memory_brief" && query.is_some() {
-                    return Err(CallError::Invalid);
-                }
-                let mut memory = self.store.find_memory(MemoryFilter {
-                    repo: Some(&attempt.repo),
-                    query: query.as_deref(),
-                    limit: Some(if name == "memory_brief" { 12 } else { 20 }),
-                    ..Default::default()
-                })?;
-                let mut remaining = if name == "memory_brief" { 6000 } else { 12000 };
-                memory.retain_mut(|m| {
-                    if remaining == 0 {
-                        return false;
-                    }
-                    let max = m.content.floor_char_boundary(remaining);
-                    m.content.truncate(max);
-                    remaining -= m.content.len();
-                    true
-                });
+                let items = query_memory(&self.store, name, &attempt.repo, args)?;
                 if self.auth(token)? != Some(turn) {
                     return Err(CallError::Expired);
                 }
                 Ok(tool_text(
                     &safe_text(
-                        serde_json::to_string(&memory).map_err(Error::from)?,
+                        serde_json::to_string(&items).map_err(Error::from)?,
                         token,
                         96_000,
                     )?,
@@ -303,6 +284,79 @@ impl Mcp {
             _ => Err(CallError::Invalid),
         }
     }
+}
+
+fn query_memory(
+    store: &Store,
+    name: &str,
+    repo: &str,
+    args: Value,
+) -> std::result::Result<Vec<polyclave_proto::MemoryItemDto>, CallError> {
+    let Search { query } = decode(args)?;
+    if name == "memory_brief" && query.is_some() {
+        return Err(CallError::Invalid);
+    }
+    if name == "memory_search" && query.as_deref().is_none_or(|q| q.trim().is_empty()) {
+        return Err(CallError::Invalid);
+    }
+    let memory = store.find_memory(MemoryFilter {
+        repo: Some(repo),
+        query: query.as_deref(),
+        limit: Some(if name == "memory_brief" { 12 } else { 20 }),
+        ..Default::default()
+    })?;
+    let budget = if name == "memory_brief" { 6000 } else { 12_000 };
+    let mut kept = Vec::new();
+    let mut used = 2usize; // "[]"
+    for mut item in memory {
+        let sep = usize::from(!kept.is_empty());
+        let item_json = serde_json::to_string(&item).map_err(Error::from)?;
+        if used + sep + item_json.len() <= budget {
+            used += sep + item_json.len();
+            kept.push(item);
+            continue;
+        }
+        let mut lo = 0usize;
+        let mut hi = item.content.len();
+        let mut best = None;
+        while lo <= hi {
+            let mid = item.content.floor_char_boundary(lo + (hi - lo) / 2);
+            let mut candidate = item.clone();
+            candidate.content.truncate(mid);
+            let candidate_json = serde_json::to_string(&candidate).map_err(Error::from)?;
+            if used + sep + candidate_json.len() <= budget {
+                best = Some((mid, candidate_json.len()));
+                if mid == hi {
+                    break;
+                }
+                lo = item.content.ceil_char_boundary(mid + 1);
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if let Some((len, _)) = best.filter(|(len, _)| *len > 0) {
+            item.content.truncate(len);
+            kept.push(item);
+        }
+        break;
+    }
+    Ok(kept)
+}
+
+pub fn memory_tool_result(
+    store: &Store,
+    name: &str,
+    repo: &str,
+    args: Value,
+) -> std::result::Result<Value, Error> {
+    let items = query_memory(store, name, repo, args).map_err(|e| match e {
+        CallError::Invalid => Error::Invalid("invalid memory tool arguments"),
+        CallError::Expired | CallError::Conflict => Error::ConflictError,
+        CallError::Storage => Error::Closed,
+    })?;
+    serde_json::to_value(items).map_err(Error::from)
 }
 
 fn active(db: &Connection, token: &str, host: &str) -> Result<Option<ActiveTurn>> {
