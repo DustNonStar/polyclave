@@ -923,3 +923,11 @@ Commits `4dc6d59` and `2e6d3a9` were reviewed read-only and not merged.
 - It is superseded by the Rust adapter `crates/polyclave-adapters/src/claude.rs` and the real Task 10 probe (`POLYCLAVE_REAL_CLAUDE=1`). `HANDOFF.md` conflicts on merge.
 - Flag check against the real `claude --help` (2.1.332): every flag the probe uses exists except `--max-turns`, which is not listed. A possible `--bare` / `--tools ""` hardening of `claude.rs` may be considered later, checked against real help output.
 - Action for Dot: delete the branch.
+
+## Approval card evidence review: passed, merged
+
+Branch `claude/approval-card-evidence-a09726` (`35aece8`, `b117cc4`) was fast-forwarded into `main`.
+- The Run approval card now shows a one-line summary and three rows: "Delivery verified (R1)", "Tests for this exact SHA" and "Request satisfied (your decision)". `RunEvidenceDto` reads only the current Attempt's accepted receipt and the latest progress text, which is labelled as the Worker's claim. A test shows that it never reads an older Attempt's receipt.
+- No source records tests per SHA, so the tests row always says "No test result recorded for <sha>". A `detail` entry in `PLAN-ISSUES.md` describes what recording them would need.
+- The merge reviewer checked the 375 px screenshot `handcheck/approval-card-evidence/r1-phone-light-card.jpg`. The summary reads "Commit not verified · no test result for bbbbbbb · waiting for your decision", and the three rows are distinct.
+- Local macOS: fmt and Clippy clean, 152 passed, 0 failed, the `proto.ts` check clean, privacy scan clean. UI `tsc` and the browser tests were run by the branch session; this checkout has no UI dependencies installed. Not verified: Windows CI and a real phone.
