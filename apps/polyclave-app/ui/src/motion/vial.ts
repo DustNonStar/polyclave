@@ -25,9 +25,9 @@ export function mountVial(canvas:HTMLCanvasElement,clock:FrameClock):void{
     if(clock.disabled)render();else clock.interact();
   }
   document.addEventListener('pc-context',replenish);
-  canvas.width=canvas.id==='settings-vial'?320:104;canvas.height=canvas.id==='settings-vial'?54:28;
+  canvas.width=canvas.id==='settings-vial'?440:92;canvas.height=canvas.id==='settings-vial'?88:28;
   render();
-  clock.subscribe((t,dt)=>{
+  const stop=clock.subscribe((t,dt)=>{
     if(t>until)return;
     const step=Math.min(dt*30,1);
     for(let i=1;i<n-1;i++){
@@ -36,5 +36,5 @@ export function mountVial(canvas:HTMLCanvasElement,clock:FrameClock):void{
       next[i]=h+(velocity[i]??0)*step;
     }
     heights.set(next);render();
-  },()=>{heights.fill(0);velocity.fill(0);render();},()=>canvas.isConnected&&performance.now()<until);
+  },()=>{if(!canvas.isConnected){stop();document.removeEventListener('pc-context',replenish);return;}heights.fill(0);velocity.fill(0);render();},()=>canvas.isConnected&&performance.now()<until);
 }

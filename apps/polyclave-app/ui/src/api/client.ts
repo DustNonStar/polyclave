@@ -1,0 +1,64 @@
+// Typed wrappers for the local daemon API. Every call goes through the authenticated loopback connection.
+import { request } from './sse.js';
+import type { Connection } from './sse.js';
+import type { JsonValue, MemoryItemDto, MemoryKind, RunDto, SessionDto, Vendor } from '../generated/proto.js';
+
+export interface Profile { id: string; display_name: string; kind: string; models: string[] }
+/** Hub message as the daemon serializes it (`metadata`); older fixtures may use `metadata_json`. */
+export interface HubMessage {
+  id: number; turn_id?: number | null; source: 'user' | 'agent' | 'host'; text: string;
+  reasoning?: string | null; metadata?: JsonValue | null; metadata_json?: JsonValue | null; queued: boolean;
+  provider_label?: string | null; created_at?: string;
+}
+export interface TicketIntent { id: string; hub: string; repo: string; used: number; limit: number; status: string }
+export interface CommitSummary { files: string; commits: string }
+export interface RunDetail { run: RunDto; commit: CommitSummary | null }
+export interface ProviderUsage {
+  vendor: string; tokens?: number | null; cost?: number | null; context?: number | null; turns?: number | null;
+  five_hour?: number | null; weekly?: number | null; balance?: number | null; series?: number[] | null;
+}
+export interface Mandate { goal: string; allowed_paths: string[]; forbidden_actions: string[]; acceptance_criteria: string[] }
+export interface RunRequest {
+  hub_session_id: string; request_id: string; vendor: Vendor; model: string | null; repo_cwd: string;
+  instructions: string; base_branch: string; ticket_id: string | null;
+}
+export type Decision = 'accept' | 'fail' | 'allow_retry';
+
+const enc = encodeURIComponent;
+
+export function api(connection: () => Connection | null) {
+  const call = <T>(path: string, body?: unknown): Promise<T> => {
+    const c = connection();
+    return c ? request<T>(c, path, body) : Promise.reject(Error('Connect to the local daemon first'));
+  };
+  const s = (id: string) => '/api/sessions/' + enc(id);
+  const r = (id: string) => '/api/runs/' + enc(id);
+  return {
+    sessions: () => call<SessionDto[]>('/api/sessions'),
+    register: (name: string, repo_cwd: string) => call<SessionDto>('/api/sessions', { name, repo_cwd }),
+    profiles: () => call<Profile[]>('/api/profiles'),
+    switchProfile: (id: string, profile_id: string, model: string) => call<{ updated: boolean }>(s(id) + '/profile', { profile_id, model }),
+    messages: (id: string) => call<HubMessage[]>(s(id) + '/messages'),
+    send: (id: string, text: string) => call<HubMessage>(s(id) + '/messages', { request_id: crypto.randomUUID(), text }),
+    cancelTurn: (id: string) => call<{ accepted: boolean }>(s(id) + '/cancel', {}),
+    tickets: () => call<TicketIntent[]>('/api/tickets'),
+    createTicket: (id: string, message_id: number, title: string, mandate: Mandate, max_runs: number) =>
+      call<TicketIntent>(s(id) + '/tickets', { message_id, title, mandate, max_runs }),
+    runs: () => call<RunDto[]>('/api/runs'),
+    dispatch: (req: RunRequest) => call<RunDto>('/api/runs', req),
+    run: (id: string) => call<RunDetail>(r(id)),
+    resolve: (id: string, decision: Decision, note: string, seen_sha?: string | null) =>
+      call<RunDto>(r(id) + '/resolve', { decision, note, seen_sha: seen_sha ?? null }),
+    retry: (id: string) => call<{ accepted: boolean }>(r(id) + '/retry', {}),
+    cancelRun: (id: string) => call<{ accepted: boolean }>(r(id) + '/cancel', {}),
+    workerChat: (id: string, text: string) => call<{ accepted: boolean }>(r(id) + '/worker-chat', { text }),
+    repoFile: (id: string, path: string) => call<{ text: string }>(s(id) + '/repo-file', { path }),
+    memory: (id: string) => call<MemoryItemDto[]>(s(id) + '/memory'),
+    draftMemory: (id: string, kind: MemoryKind, title: string, content: string, source: { message_id: number } | { run_id: string }) =>
+      call<MemoryItemDto>(s(id) + '/memory', { action: 'message_id' in source ? 'draft' : 'draft_run', ...source, kind, title, content }),
+    commitMemory: (id: string, memoryId: string) => call<MemoryItemDto>(s(id) + '/memory', { action: 'commit', id: memoryId }),
+    archiveMemory: (id: string, memoryId: string) => call<MemoryItemDto>(s(id) + '/memory', { action: 'archive', id: memoryId }),
+    usage: () => call<ProviderUsage[]>('/api/usage'),
+  };
+}
+export type Api = ReturnType<typeof api>;

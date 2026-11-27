@@ -1,0 +1,26 @@
+/* Ink highlight tiers, optical caret, entry motion and reduced-motion rules. */
+#stream::highlight(pc-ink-1) { color: color-mix(in srgb, var(--ink) 16%, transparent); }
+#stream::highlight(pc-ink-2) { color: color-mix(in srgb, var(--ink) 38%, transparent); }
+#stream::highlight(pc-ink-3) { color: color-mix(in srgb, var(--ink) 62%, transparent); }
+#stream::highlight(pc-ink-4) { color: color-mix(in srgb, var(--ink) 84%, transparent); }
+#stream::highlight(pc-ink-5) { color: var(--ink); }
+
+.caret-measure { position: absolute; visibility: hidden; top: 0; left: 0; pointer-events: none; white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden; height: 0; }
+.optical-caret { position: absolute; top: 0; left: 0; width: 1.5px; height: 1.25em; border-radius: 1px; pointer-events: none; display: none; background: linear-gradient(var(--p-cyan), var(--p-blue)); box-shadow: 0 0 6px color-mix(in srgb, var(--p-cyan) 60%, transparent); }
+.optical-caret.on { display: block; }
+.custom-caret { caret-color: transparent; }
+
+@keyframes pc-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes pc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.msg.enter { animation: pc-rise .32s var(--ease-gentle) both; }
+.pulse { animation: pc-pulse 1.4s ease-in-out infinite; }
+.model-menu:not([hidden]) { animation: pc-rise .16s var(--ease-snappy) both; }
+dialog[open] { animation: pc-rise .2s var(--ease-snappy) both; }
+
+:root[data-motion-pref="off"] .pulse, :root[data-motion-pref="off"] .msg.enter { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+  .optical-caret.on { display: none; }
+  .custom-caret { caret-color: auto; }
+}

@@ -62,8 +62,17 @@ try{
     try{await page.waitForFunction(()=>document.getElementById('connection')?.textContent==='Local daemon connected',null,{timeout:5000});}
     catch(e){throw Error(JSON.stringify({status:await page.locator('#connection').textContent(),errors,outside,responses}),{cause:e});}
     assert.equal(new URL(page.url()).hash,'');
-    const deepseek=await page.locator('#provider option').evaluateAll(options=>options.filter(opt=>opt.value.startsWith('deepseek-api|')).map(opt=>[opt.value,opt.textContent]));
-    assert.deepEqual(deepseek,[['deepseek-api|deepseek-flash','DeepSeek API · deepseek-flash (default)'],['deepseek-api|deepseek-v4-pro','DeepSeek API · deepseek-v4-pro']]);
+    // Custom provider listbox: DeepSeek API first, deepseek-flash (default) before deepseek-v4-pro.
+    const options=await page.locator('#provider [role=option]').evaluateAll(list=>list.map(opt=>[opt.dataset.value,opt.textContent]));
+    assert.deepEqual(options.filter(([value])=>value.startsWith('deepseek-api|')),[['deepseek-api|deepseek-flash','DeepSeek API · deepseek-flash (default)'],['deepseek-api|deepseek-v4-pro','DeepSeek API · deepseek-v4-pro']]);
+    assert.deepEqual(options[0],['deepseek-api|deepseek-flash','DeepSeek API · deepseek-flash (default)']);
+    assert.equal(await page.locator('#provider select, #compose textarea[style*="resize: both"]').count(),0);
+    // The register control carries exactly one plus icon and no duplicated glyph.
+    assert.deepEqual(await page.locator('#register').evaluate(b=>[b.querySelectorAll('svg').length,b.textContent.trim()]),[1,'']);
+    assert.equal(await page.locator('#prompt').evaluate(t=>getComputedStyle(t).resize),'none');
+    assert.deepEqual(await page.locator('#inspect-tabs [role=tab]').allTextContents(),['Topology','Review','Files','Memory']);
+    assert.deepEqual(await page.locator('#quota .q').evaluateAll(q=>q.map(e=>e.dataset.vendor)),['claude','codex','gemini','deepseek']);
+    assert.ok((await page.locator('#quota [data-vendor=claude]').getAttribute('title')).includes('not reported'));
 
     await page.waitForFunction(()=>document.documentElement.dataset.motion==='0fps');
     assert.equal(await page.locator('#aurora').evaluate(c=>c.width),0);
@@ -79,6 +88,14 @@ try{
     assert.deepEqual(measured.violations,[]);
     assert.equal(measured.width,width);assert.equal(measured.left,0);assert.equal(measured.body,width);
     assert.ok(await page.locator('#pet-stage').evaluate(c=>c.getContext('2d').getImageData(0,0,c.width,c.height).data.some(v=>v!==0)));
+    // The aurora never takes pointer events and sits beneath the workspace.
+    assert.deepEqual(await page.evaluate(()=>{const a=getComputedStyle(document.querySelector('#aurora'));return [a.pointerEvents,a.position,Number(a.zIndex)<Number(getComputedStyle(document.querySelector('#app')).zIndex)];}),['none','fixed',true]);
+    if(width===375){
+      const small=await page.evaluate(()=>[...document.querySelectorAll('button,[role=option],[role=tab]')].filter(b=>{
+        const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(b).visibility!=='hidden'&&r.bottom>0&&r.top<innerHeight&&r.height<44;
+      }).map(b=>b.id||b.textContent.trim().slice(0,24)));
+      assert.deepEqual(small,[]);
+    }
     if(clients.size===0)await new Promise((resolve,reject)=>{
       const stop=setTimeout(()=>{clearInterval(check);reject(Error('No local SSE client'));},3000);
       const check=setInterval(()=>{if(clients.size){clearTimeout(stop);clearInterval(check);resolve();}},15);
@@ -105,9 +122,15 @@ try{
     if(width===375)await page.getByRole('button',{name:'Workspace',exact:true}).click();
     await page.getByRole('button',{name:'Light theme',exact:true}).click();
     assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+    assert.equal(await page.locator('html').evaluate(()=>document.documentElement.scrollWidth),width);
     await page.getByRole('button',{name:'Settings · Usage & limits',exact:true}).click();
     await page.getByRole('dialog').waitFor({state:'visible'});
+    assert.deepEqual(await page.getByRole('radiogroup',{name:'Motion intensity'}).getByRole('radio').allTextContents(),['Off · 0fps','Subtle','Standard','Ultra']);
+    assert.ok((await page.getByRole('dialog').textContent()).includes('not reported'));
+    assert.equal(await page.getByRole('dialog').evaluate(d=>d.scrollWidth<=d.clientWidth+1),true);
     await page.getByRole('button',{name:'Close',exact:true}).click();
+    await page.getByRole('button',{name:'Dark theme',exact:true}).click();
+    assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
     await page.emulateMedia({reducedMotion:'reduce'});
     if(width===375)await page.getByRole('button',{name:'Hub',exact:true}).click();
     send('text_delta','Reduced-motion text');

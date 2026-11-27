@@ -552,15 +552,56 @@ All glyphs are inline SVG, `viewBox="0 0 14 14"`, rendered at 14px (10px inside 
 - The waiting ring's dash is 2.88 + 2.88 so it repeats evenly round the circle with no seam.
 - Faint edges (composer, pills, running-arc track) are decorative; every control that relies on its edge alone also changes fill on hover and shows the focus ring.
 
-## v5 optical workspace (Phase 1B)
+## v5 optical workspace (Phase 1B, Batch C redesign)
 
-This section governs the Rust/Tauri client. Earlier dark industrial and phone review notes above describe the archived Node UI. The pinned OpenPencil document is the source for the visual direction; all shipping styles, shaders, sprites and icons are original implementation.
+This section governs the Rust/Tauri client in `apps/polyclave-app/ui`. Everything above it describes the archived Node UI. The pinned OpenPencil document `docs/superpowers/design/polyclave-v5-desktop-ui.fig` (artboards Deep Obsidian, Daylight Crystal, Settings and Motion) is the visual source; every shipping style, shader, sprite and icon is an original implementation.
 
-- **Layout:** 276 px navigation, a shrinkable chat pane, 432 px inspector and a 34 px shared status bar. Below 860 px, use three large Workspace, Hub and Inspect tabs and retain all inspector functions, with no horizontal scroll. Status is spoken through a live region; text is renderer-escaped by DOM construction.
-- **Palette:** Deep Obsidian uses `#0D0D10`, `#08080B`, `#141418` and `#23252F`. Daylight Crystal uses `#F4F7FB`, `#E8EEF6`, `#FFFFFF` and `#0F172A`. Keep active/review cues in narrow colored rails and low-alpha spill rather than bright borders. The prism composer uses a fine multicolor rim, software-driven caret and independent send control.
-- **Inspection and memory:** Topology starts with the Hub and its Worker runs; Review shows host evidence and accepts only the displayed SHA; Files uses the registered repository access boundary. Remember this rule opens a draft from a real user message or eligible Run decision and only the explicit confirmation promotes it. Versioning preserves superseded records.
-- **Usage:** 5-hour outer and weekly inner rings are independent fields. Provider quota and monetary fields are unavailable when not reported; do not replace missing observations with made-up percentages. Local token observations are not external subscriptions. Keep context occupancy distinct from quota.
-- **Motion:** One animation clock controls interactive bursts, approximately 30 fps steady state, and idle sleep. The WebGL2 aurora spans the full viewport; Canvas 2D and CSS provide fallbacks. Custom highlight rules set foreground colors with alpha at 16%, 38%, 62%, 84% and 100% (not the unsupported standalone opacity property on highlights). Reduced motion preserves plain streaming text and a static view. The 24-node vial and four original pixel pets subscribe to the same clock; Deepy has no feet.
-- **Boundaries:** The browser has only the authenticated loopback connection. No external fonts, scripts, SDKs, posters, analytics or provider fetches run in the renderer. Native credential status exposes only configuration state and a masked tail.
+### Tokens (`ui/src/styles/tokens.css`)
 
-The official DeepSeek API profile lists `deepseek-flash` first (its default) and `deepseek-v4-pro` second. This is not a global provider switch; existing selections and custom profiles stay independent.
+| Role | Deep Obsidian (default) | Daylight Crystal (`data-theme="light"`) |
+|---|---|---|
+| Ground `--bg` | `#0D0D10` | `#F4F7FB` |
+| Well `--well` (topology canvas, diff, code, inputs) | `#08080B` | `#E8EEF6` |
+| Card `--card` (+1 px top highlight `--edge-hi`) | `#141418` | `#FFFFFF` |
+| Line `--line` | `#23252F` | `#D6DEEA` |
+| Ink / mute / faint | `#F0F1F4` / `#8F93A3` / `#5D6070` | `#0F172A` / `#5B6880` / `#93A0B4` |
+| Inline code chip | `#24262E` bg, `#9EB4FA` text | `#E1E7F0` bg, `#B4610F` text |
+| Running (rail / wash / pill edge) | `#58CF98` / `#10221A` / `#23523D` | `#15803D` / `#E7F6EE` / `#A7DCBD` |
+| Needs review | `#F09B78` / `#241612` / `#593224` | `#C2410C` / `#FFF2EA` / `#F6C3A6` |
+| Verified / archived | `#8AB4F8` / `#9B72CB` | `#2E64A9` / `#704497` |
+| Primary capsule (`Accept <sha>`) | `#F2F3F7` on `#0E0F14`, emerald check | `#0F172A` on white |
+| Vendors | Claude `#D97757`, Codex `#F2F2F5` (light `#0F172A`), Gemini `#8E84F5`, DeepSeek `#4F8BFF` | same |
+| Prism spectrum | red `#E5534B`, orange `#F0A74E`, yellow `#F2C94C`, green `#3FC085`, cyan `#5CC6FC`, blue `#4F8BFF`, violet `#9B72CB` | same |
+
+Type: system UI (`SF Pro Text`, `PingFang SC` fallbacks) at 13.5 px body, 15 px titles, 10.5–12 px meta; monospace only for ids, SHAs, paths, model names and counters. Radii: 5 / 7 / 10 / 14 px and pills. Status is shown by a 2.5 px left rail plus a low-alpha directional wash and a translucent pill, never by a full coloured border or a solid colour block.
+
+### Layout
+
+- Desktop: `276px | minmax(0,1fr) | 432px` columns over a shared `34px` status bar. Side columns are 70 % ground so the aurora shows faintly through them; the centre is transparent.
+- Below 860 px: three 44 px tabs (Workspace, Hub, Inspect) replace the columns; every inspector function stays reachable. Every visible control is at least 44 px tall (`--touch`), and no element may scroll horizontally. Settings becomes a full-screen sheet with a horizontally scrolling section bar.
+- `[hidden]` always wins (`display:none !important`), so component `display` rules never resurrect hidden controls.
+
+### Components
+
+- **Left navigation:** prism logo, theme toggle (sun/moon) and a single-icon register button; `Global Hub` (cross-project overview) and `Needs you` (count of runs waiting for review); a collapsible project tree grouped by repository, each project listing its Hub/Advisor sessions and its latest Worker runs with status dot and label; Settings at the foot. Collapsed projects persist per browser.
+- **Conversation:** breadcrumb (project / session), active ticket chip (`Ticket <id> · used/limit runs`), and a custom listbox model selector. The DeepSeek API profile is listed first with `deepseek-flash (default)` before `deepseek-v4-pro`; this is display order only, not a provider switch. Messages: user bubbles with `Remember this rule` and `Create ticket`; Hub cards with a collapsible thought-process card, tool-call rows from `metadata.tool_calls` and inline code chips; host lines centred and muted; Worker run cards interleaved by time with vendor/model tags, attempt progress and a review entry. A live turn shows streaming reasoning and text; the stream itself stays one text node so `CSS.highlights` can fade it.
+- **Composer:** glass card with 1.5 px prism rims top and bottom (brighter on focus), no resize handle (auto-grows to 200 px), model pill, `Auto` cut-crystal toggle, memory chip (verified count), 512K context vial with label, stop and send buttons with a conic prism ring, and the pixel prism with two sparks at the top-right corner. Enter sends; Shift+Enter adds a line; sending while a turn runs is allowed (queued).
+- **Inspector:** four tabs with arrow-key navigation and a review badge.
+  - *Topology:* the Hub node above its Worker nodes on a dotted well; SVG Bézier wires (first row direct, lower rows down a centre trunk), tinted by status (running dashed green, review orange, verified blue, failed red); node shows vendor tag, model, status and attempt progress. Tickets list with `Dispatch` per open ticket, a free `Dispatch Worker`, and a quick card for the run waiting on the user.
+  - *Review:* run picker, status pill, `base` / `observed` / `result` SHA chips, host detail and resolution, `What changed` (commit list and per-file `+/−` from numstat or diffstat), decision note (required for `Mark failed` and `Allow retry`), a two-step `Accept <sha>` → `Confirm accept <sha>` that sends only the displayed SHA, `Retry` for failed or interrupted runs, `Cancel` for pending or running runs, and a `worker-chat` box while the run is open. A note on fail/allow-retry opens the `Remember this rule` draft for the run.
+  - *Files:* read-only viewer with line numbers, path input limited to the registered repository by the daemon.
+  - *Memory:* verified/candidate records with kind, scope, status and tag pills, kind filters and Archive. New rules come only from a real user message or a run decision and are saved only on `Confirm and save` (draft, then commit).
+- **Status bar:** connection dot and text, counts for running, thinking (streaming Hub sessions), to review and done; four quota marks. Claude, Codex and Gemini use a double ring (outer 5-hour, inner weekly); a field that is not reported is drawn as a dashed ring with `—`, never as a made-up value. DeepSeek has no 5-hour window and uses a solid dot with its balance when reported.
+- **Settings · Usage & limits:** section nav; vendor cards (5-hour and weekly meters or `not reported`, DeepSeek balance, local 24 h tokens, cost and turns, high-water bars turn `#E8835C` at 80 %); the 512K vial with the largest recent prompt; a 24 h bar chart (hourly when the host reports a series, otherwise tokens per provider from the local ledger, labelled as such); motion intensity `off` / `subtle` / `standard` / `ultra`; theme; native keychain rows (`key_status`, `save_key` with the value trimmed and the field cleared, and `delete_key` when the desktop build provides it). Key values are never displayed, only `configured` and the masked tail.
+
+### Motion
+
+- One `FrameClock` drives everything: interactive bursts, about 30 fps while agents work (60 fps on `ultra`, slower on `subtle`) and sleep to `0fps` 1.2 s after idle or review. While asleep, `data-motion="0fps"` is set, the aurora canvas backing store is zeroed and a static CSS afterglow keeps the horizon visible.
+- **Global horizon aurora:** full-width fixed canvas at the bottom of the viewport, beneath the workspace (`z-index` 0, `pointer-events: none`). WebGL2 shader with premultiplied alpha (WebKit composites it as light, not as a pale wash): a floor glow and three slow cobalt, cyan and iris curtains, faded at the side edges and the top, alpha at most ~0.64 in dark and ~0.4 in light. Rendered at half resolution. Canvas 2D radial gradients are the fallback.
+- **Pixel partners:** four original 16 × 10 sprites, no black outlines, 1 × 2 vertical eyes, drawn at 3× (2× on phones) above the composer: **Deepy** (legless cobalt whale with a raised tail fluke and a cyan spout), the silver dragon, **Clawd** (terracotta, antenna and side arms) and the violet cat (ears and tail). States: idle (eyes closed, pixel “z”), thinking (staggered bob, thought dots, the cat hops onto Clawd every other beat), running (hops, alternating legs, spout), review (Clawd raises “!”, the others look at it). In light theme a hairline drop shadow keeps the silver dragon legible.
+- Ink: five `CSS.highlights` tiers set foreground alpha 16 / 38 / 62 / 84 / 100 % on newly streamed ranges; all ranges are cleared when the stream ends. Optical caret follows the selection with a spring. SSE-driven re-renders go through `withFocusPreserved`.
+- `prefers-reduced-motion: reduce` or intensity `off`: no animation, no canvas frames, plain streaming text, static pets and afterglow; all text stays readable.
+
+### Boundaries
+
+The renderer talks only to the authenticated loopback daemon (`Authorization: Bearer`, `#token=` cleared from the address bar, or Tauri `local_connection`). No external fonts, scripts, images, analytics or provider calls; the favicon is an inline data URL. All text is inserted with `textContent`. Contract types come from the generated `src/generated/proto.ts`, which is never edited by hand.

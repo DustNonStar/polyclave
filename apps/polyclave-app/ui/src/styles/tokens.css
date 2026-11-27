@@ -1,2 +1,154 @@
-:root{color-scheme:dark;--bg:#0d0d10;--well:#08080b;--card:#141418;--line:#23252f;--ink:#f0f1f4;--mute:#a7aab9;--blue:#9eb4fa;--glass:rgba(20,20,24,.82);--green:#58cf98;--green-bg:#10221a;--orange:#f09b78;--orange-bg:#241612;--done:#8ab4f8;--purple:#9b72cb;--chip:#24262e;--halo:#161f46;--hero:#f2f3f7;--hero-ink:#0e0f14;--font:Inter,ui-sans-serif,system-ui,sans-serif;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;--spectrum:#f97584,#ffaa73,#f6d585,#83d4ab,#6aaff6,#9094f5,#ca92f1}
-:root[data-theme=light]{color-scheme:light;--bg:#f4f7fb;--well:#e8eef6;--card:#fff;--line:#cfd8e5;--ink:#0f172a;--mute:#47566c;--blue:#345eaa;--glass:rgba(255,255,255,.86);--green:#106443;--green-bg:#e0f4ea;--orange:#983b1e;--orange-bg:#fff0e8;--done:#2e64a9;--purple:#704497;--chip:#e1e7f0;--halo:#dfeaff;--hero:#19202f;--hero-ink:#fff}
+/* Polyclave v5 design tokens.
+   Deep Obsidian is the default theme; Daylight Crystal is applied with data-theme="light". */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg: #0d0d10;
+  --well: #08080b;
+  --card: #141418;
+  --card-hi: #1a1a1f;
+  --line: #23252f;
+  --line-soft: #1b1c23;
+  --edge-hi: rgba(255, 255, 255, 0.045);
+  --glass: rgba(20, 20, 24, 0.78);
+  --glass-strong: rgba(18, 18, 22, 0.92);
+  --scrim: rgba(4, 5, 10, 0.66);
+
+  /* Text */
+  --ink: #f0f1f4;
+  --ink-2: #c4c7d2;
+  --mute: #8f93a3;
+  --faint: #5d6070;
+
+  /* Inline code and chips */
+  --chip: #24262e;
+  --chip-ink: #9eb4fa;
+
+  /* Signal colours: rail / wash / pill edge / text */
+  --green: #58cf98;
+  --green-wash: #10221a;
+  --green-edge: #23523d;
+  --orange: #f09b78;
+  --orange-wash: #241612;
+  --orange-edge: #593224;
+  --blue: #9eb4fa;
+  --done: #8ab4f8;
+  --done-wash: #121a2b;
+  --done-edge: #2a3c63;
+  --archive: #9b72cb;
+  --red: #f2777a;
+  --red-wash: #261316;
+  --red-edge: #5c2a2f;
+  --think: #6aaff6;
+
+  /* Primary action: frosted silver capsule */
+  --hero: #f2f3f7;
+  --hero-ink: #0e0f14;
+  --hero-hover: #ffffff;
+
+  /* Vendors */
+  --v-claude: #d97757;
+  --v-codex: #f2f2f5;
+  --v-gemini: #8e84f5;
+  --v-deepseek: #4f8bff;
+
+  /* Prism spectrum: red, orange, yellow, green, blue, indigo, violet */
+  --p-red: #e5534b;
+  --p-orange: #f0a74e;
+  --p-yellow: #f2c94c;
+  --p-green: #3fc085;
+  --p-cyan: #5cc6fc;
+  --p-blue: #4f8bff;
+  --p-violet: #9b72cb;
+  --spectrum: var(--p-red), var(--p-orange), var(--p-yellow), var(--p-green), var(--p-cyan), var(--p-blue), var(--p-violet);
+
+  /* Aurora afterglow (static layer while the canvas sleeps) */
+  --halo-a: rgba(59, 107, 255, 0.2);
+  --halo-b: rgba(36, 80, 138, 0.16);
+  --halo-c: rgba(92, 198, 252, 0.07);
+
+  /* Type */
+  --font: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --fs-xs: 10.5px;
+  --fs-sm: 12px;
+  --fs-md: 13.5px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+
+  /* Shape and spacing */
+  --r-xs: 5px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --rail: 2.5px;
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-composer: 0 10px 40px rgba(25, 45, 110, 0.22);
+
+  /* Layout */
+  --col-nav: 276px;
+  --col-inspect: 432px;
+  --statusbar: 34px;
+  --touch: 32px;
+
+  /* Motion */
+  --ease-snappy: cubic-bezier(0.2, 0.9, 0.25, 1);
+  --ease-gentle: cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --well: #e8eef6;
+  --card: #ffffff;
+  --card-hi: #f8fafd;
+  --line: #d6deea;
+  --line-soft: #e3e9f2;
+  --edge-hi: rgba(255, 255, 255, 0.9);
+  --glass: rgba(255, 255, 255, 0.8);
+  --glass-strong: rgba(255, 255, 255, 0.94);
+  --scrim: rgba(30, 41, 59, 0.32);
+
+  --ink: #0f172a;
+  --ink-2: #334155;
+  --mute: #5b6880;
+  --faint: #93a0b4;
+
+  --chip: #e1e7f0;
+  --chip-ink: #b4610f;
+
+  --green: #15803d;
+  --green-wash: #e7f6ee;
+  --green-edge: #a7dcbd;
+  --orange: #c2410c;
+  --orange-wash: #fff2ea;
+  --orange-edge: #f6c3a6;
+  --blue: #2f5bb7;
+  --done: #2e64a9;
+  --done-wash: #eaf1fb;
+  --done-edge: #b9cdea;
+  --archive: #704497;
+  --red: #c53030;
+  --red-wash: #fdecec;
+  --red-edge: #f2b8b8;
+  --think: #2b7bd0;
+
+  --hero: #0f172a;
+  --hero-ink: #ffffff;
+  --hero-hover: #1e293b;
+
+  --v-codex: #0f172a;
+
+  --halo-a: rgba(96, 140, 255, 0.16);
+  --halo-b: rgba(120, 190, 240, 0.14);
+  --halo-c: rgba(190, 160, 255, 0.08);
+
+  --shadow-pop: 0 18px 48px rgba(15, 23, 42, 0.16), 0 2px 8px rgba(15, 23, 42, 0.08);
+  --shadow-composer: 0 12px 36px rgba(47, 91, 183, 0.12);
+}
+
+@media (max-width: 859px) {
+  :root { --touch: 44px; }
+}

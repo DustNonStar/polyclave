@@ -1,43 +1,119 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light"><title>Polyclave</title>
-  <link rel="stylesheet" href="/styles/tokens.css"><link rel="stylesheet" href="/styles/layout.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Polyclave</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles/tokens.css">
+  <link rel="stylesheet" href="/styles/base.css">
+  <link rel="stylesheet" href="/styles/layout.css">
+  <link rel="stylesheet" href="/styles/sidebar.css">
+  <link rel="stylesheet" href="/styles/chat.css">
+  <link rel="stylesheet" href="/styles/composer.css">
+  <link rel="stylesheet" href="/styles/inspector.css">
+  <link rel="stylesheet" href="/styles/overlays.css">
+  <link rel="stylesheet" href="/styles/motion.css">
 </head>
 <body>
-  <canvas id="aurora" aria-hidden="true"></canvas><div id="afterglow" aria-hidden="true"></div>
+  <div id="afterglow" aria-hidden="true"></div>
+  <canvas id="aurora" aria-hidden="true"></canvas>
+
   <div id="app" class="workspace" data-pane="chat">
-    <header class="mobile-nav" aria-label="Workspace areas">
-      <button data-pane="work" type="button">Workspace</button><button data-pane="chat" type="button" aria-pressed="true">Hub</button><button data-pane="inspect" type="button">Inspect</button>
-    </header>
-    <aside class="navigation" aria-label="Workspace and agents">
-      <div class="brand"><span class="diamond" aria-hidden="true">◈</span><span>Polyclave<small>LOCAL WORKSPACE</small></span></div>
-      <div class="section-label"><span>PROJECTS &amp; SESSIONS</span><button id="register" type="button" title="Register a project" aria-label="Register a project">＋</button></div>
-      <nav id="sessions" aria-label="Sessions"></nav>
-      <div class="section-label">WORKER RUNS</div><div id="worker-runs"></div>
-      <footer class="workspace-actions"><button id="usage" type="button">Settings · Usage &amp; limits</button><button id="theme" type="button">Light theme</button></footer>
+    <nav class="mobile-nav" aria-label="Workspace areas">
+      <button type="button" data-pane="work">Workspace</button>
+      <button type="button" data-pane="chat" aria-pressed="true">Hub</button>
+      <button type="button" data-pane="inspect">Inspect</button>
+    </nav>
+
+    <aside class="navigation" aria-label="Projects and agents">
+      <header class="brand">
+        <span class="brand-mark" id="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Polyclave<small>Local workspace</small></span>
+        <span class="brand-actions">
+          <button type="button" id="theme" class="icon-btn" aria-label="Light theme" title="Switch to light theme"></button>
+          <button type="button" id="register" class="icon-btn" aria-label="Register a project" title="Register a project"></button>
+        </span>
+      </header>
+      <div class="nav-primary">
+        <button type="button" id="global-hub" class="nav-row nav-row--global">
+          <span class="dot dot--think" aria-hidden="true"></span><span class="nav-row-label">Global Hub</span><span class="nav-row-meta" id="global-meta"></span>
+        </button>
+        <button type="button" id="needs-you" class="nav-row nav-row--needs">
+          <span class="dot dot--review" aria-hidden="true"></span><span class="nav-row-label">Needs you</span><span class="badge" id="needs-count" hidden>0</span>
+        </button>
+      </div>
+      <div class="nav-section-head"><span>Projects</span><span id="project-count" class="mono"></span></div>
+      <div id="projects" class="project-tree"></div>
+      <footer class="nav-footer">
+        <button type="button" id="usage" class="nav-row nav-row--settings">Settings · Usage &amp; limits</button>
+      </footer>
     </aside>
+
     <main class="conversation" aria-label="Conversation">
-      <header class="conversation-head"><div><p class="eyebrow">CANONICAL HUB</p><h1 id="title">Workspace Hub</h1></div><label>Provider <select id="provider" aria-label="Model provider"></select></label></header>
-      <div class="history-scroll" id="history-scroll"><div id="history" role="log" aria-label="Conversation messages"></div><div id="stream" aria-live="off"></div></div>
+      <header class="conversation-head">
+        <div class="crumbs">
+          <span class="crumb-project" id="crumb-project">Polyclave</span>
+          <span class="crumb-sep" aria-hidden="true">/</span>
+          <h1 id="title">Workspace Hub</h1>
+          <button type="button" id="ticket-chip" class="ticket-chip" hidden></button>
+        </div>
+        <div id="provider" class="model-select"></div>
+      </header>
+
+      <div class="history-scroll" id="history-scroll">
+        <div class="history" id="history" role="log" aria-label="Conversation messages"></div>
+        <article class="msg msg--agent msg--live" id="live" hidden>
+          <header class="msg-head"><span class="msg-who" id="live-who">Hub</span><span class="msg-state" id="live-state">Thinking</span></header>
+          <details class="think-card" id="live-think" hidden open><summary><span class="dot dot--think pulse" aria-hidden="true"></span>Thinking</summary><div class="think-body" id="live-reasoning"></div></details>
+          <div id="stream" class="msg-body" aria-live="off"></div>
+        </article>
+      </div>
+
       <footer class="compose-area">
-        <div class="pet-dock"><canvas id="pet-stage" aria-hidden="true"></canvas><span class="small-prism" aria-hidden="true">✦ ◈ ✦</span></div>
+        <div id="notice" class="notice" role="alert" hidden></div>
+        <div class="pet-dock">
+          <canvas id="pet-stage" aria-hidden="true"></canvas>
+          <span class="pet-caption" id="pet-caption">Partners resting</span>
+        </div>
         <form id="compose" class="composer">
-          <label class="sr" for="prompt">Message</label><textarea id="prompt" maxlength="16384" rows="2" placeholder="Ask the Hub, or describe the work you want…"></textarea>
-          <div class="toolbar"><div><button id="auto" type="button" aria-pressed="true">◆ Auto</button><button id="cancel" type="button" hidden>Stop turn</button></div>
-          <span class="vial-wrap" title="Context window"><canvas id="composer-vial" aria-hidden="true"></canvas><small>512K</small></span>
-          <button type="submit" class="send" aria-label="Send message">↑</button></div>
+          <span class="composer-prism" id="composer-prism" aria-hidden="true"></span>
+          <label class="sr" for="prompt">Message</label>
+          <textarea id="prompt" maxlength="16384" rows="2" placeholder="Message the Hub — Enter to send, Shift+Enter for a new line"></textarea>
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <button type="button" id="model-pill" class="pill pill--model" aria-haspopup="listbox"></button>
+              <button type="button" id="auto" class="pill pill--auto" aria-pressed="true">Auto</button>
+              <button type="button" id="memory-chip" class="pill pill--memory">Memory</button>
+            </div>
+            <div class="toolbar-right">
+              <span class="vial-wrap" id="vial-wrap" title="Context window"><canvas id="composer-vial" aria-hidden="true"></canvas><small id="vial-label">— / 512K</small></span>
+              <button type="button" id="cancel" class="stop" aria-label="Stop turn" hidden></button>
+              <button type="submit" class="send" id="send" aria-label="Send message"></button>
+            </div>
+          </div>
         </form>
       </footer>
     </main>
+
     <aside class="inspector" aria-label="Inspector">
-      <header><p class="eyebrow">PROJECT SIGNALS</p><h2>Inspector</h2></header>
-      <nav id="inspect-tabs" role="tablist" aria-label="Inspector tabs"></nav><div id="inspect" role="tabpanel" tabindex="0"></div>
+      <div id="inspect-tabs" class="tabs" role="tablist" aria-label="Inspector tabs"></div>
+      <div id="inspect" class="inspect-panel" role="tabpanel" tabindex="0"></div>
     </aside>
-    <footer class="statusbar"><span><i></i> <span id="connection" role="status">Connecting to local daemon</span></span><div id="quota" aria-label="Provider quotas"></div></footer>
+
+    <footer class="statusbar">
+      <div class="status-left">
+        <span class="conn" id="conn-dot" data-state="connecting" aria-hidden="true"></span>
+        <span id="connection" role="status">Connecting to local daemon</span>
+        <span class="counts" id="counts"></span>
+      </div>
+      <div id="quota" class="quota" aria-label="Provider quotas"></div>
+    </footer>
   </div>
-  <dialog id="modal"><div id="dialog-content"></div></dialog><div id="announcement" class="sr" role="status" aria-live="polite"></div>
+
+  <dialog id="modal"><div id="dialog-content"></div></dialog>
+  <div id="announcement" class="sr" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

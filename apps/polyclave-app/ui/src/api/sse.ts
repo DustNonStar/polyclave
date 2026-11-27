@@ -19,7 +19,11 @@ export async function request<T>(c:Connection,path:string,body?:unknown):Promise
     headers:{Authorization:'Bearer '+c.bearer,...(body===undefined?{}:{'Content-Type':'application/json'})},
     method:body===undefined?'GET':'POST',body:body===undefined?undefined:JSON.stringify(body),
   });
-  if(!res.ok)throw Error('Local daemon returned '+res.status);
+  if(!res.ok){
+    let detail='';
+    try{const body=await res.json() as {message?:unknown};if(typeof body.message==='string')detail=': '+body.message.slice(0,200);}catch{/* no JSON body */}
+    throw Error('Local daemon returned '+res.status+detail);
+  }
   return await res.json() as T;
 }
 export interface Frame{event:string;id:string|null;data:unknown}

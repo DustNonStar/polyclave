@@ -1,0 +1,88 @@
+/* Dialogs, settings sheet and quota rings. */
+dialog {
+  width: min(560px, calc(100% - 24px)); max-height: calc(100% - 32px);
+  padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--card); color: var(--ink); box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+dialog[data-size="wide"] { width: min(1120px, calc(100% - 24px)); height: min(820px, calc(100% - 32px)); }
+dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+#dialog-content { display: flex; flex-direction: column; max-height: inherit; height: 100%; min-height: 0; }
+.dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line-soft); }
+.dlg-head h2 { font-size: var(--fs-lg); font-weight: 600; flex: 1; min-width: 0; }
+.dlg-body { padding: 16px 18px; overflow: auto; display: grid; gap: 14px; align-content: start; min-height: 0; flex: 1; }
+.dlg-body > p { color: var(--mute); font-size: var(--fs-sm); }
+.dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--r-pill); background: var(--well); border: 1px solid var(--line-soft); flex-wrap: wrap; }
+.seg button { min-height: 28px; height: 28px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--mute); padding: 0 12px; font-size: var(--fs-sm); }
+.seg button[aria-checked="true"] { background: var(--card); color: var(--ink); box-shadow: inset 0 1px 0 var(--edge-hi), 0 1px 3px rgba(0, 0, 0, .25); }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+
+/* Settings */
+.settings { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; flex: 1; }
+.settings-nav { border-right: 1px solid var(--line-soft); padding: 12px 10px; display: grid; align-content: start; gap: 2px; background: color-mix(in srgb, var(--well) 50%, transparent); }
+.settings-nav button { justify-content: flex-start; border-color: transparent; background: transparent; color: var(--mute); min-height: 34px; border-radius: var(--r-sm); }
+.settings-nav button[aria-current="true"] { color: var(--ink); background: var(--card); border-color: var(--line); }
+.settings-main { overflow: auto; padding: 18px 20px 24px; display: grid; gap: 16px; align-content: start; min-height: 0; }
+.settings-section { display: grid; gap: 12px; scroll-margin-top: 12px; }
+.settings-section > h3 { font-size: var(--fs-md); font-weight: 600; display: flex; align-items: baseline; gap: 10px; }
+.settings-section > h3 small { font-weight: 400; font-size: var(--fs-xs); font-family: var(--mono); }
+.vendor-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.vendor-card { display: grid; gap: 10px; }
+.vendor-card .v-head { display: flex; align-items: center; gap: 8px; }
+.vendor-card .v-head .v-name { font-weight: 600; }
+.vendor-card .v-head small { margin-left: auto; font-family: var(--mono); font-size: var(--fs-xs); }
+.meter { display: grid; gap: 5px; font-size: var(--fs-xs); color: var(--mute); }
+.meter .m-top { display: flex; justify-content: space-between; gap: 8px; }
+.meter .m-top b { font: 600 var(--fs-xs) var(--mono); color: var(--ink-2); }
+.meter .bar { height: 5px; border-radius: 5px; background: var(--line); overflow: hidden; }
+.meter .bar i { display: block; height: 100%; width: var(--value, 0%); border-radius: inherit; background: var(--vendor, var(--blue)); }
+.meter .bar i[data-high="true"] { background: #e8835c; }
+.meter[data-unavailable="true"] .bar { background: repeating-linear-gradient(90deg, var(--line) 0 4px, transparent 4px 7px); }
+.v-stats { display: flex; gap: 14px; font: 500 var(--fs-xs) var(--mono); color: var(--mute); flex-wrap: wrap; }
+.v-stats b { color: var(--ink); font-weight: 600; }
+
+.context-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: center; }
+#settings-vial { width: 220px; height: 44px; display: block; }
+.context-card .big { font: 600 22px var(--mono); letter-spacing: -.02em; }
+
+.bars-24 { display: grid; gap: 8px; }
+.bars { height: 132px; display: flex; align-items: flex-end; gap: 6px; padding: 10px 10px 0; border-bottom: 1px solid var(--line); border-radius: var(--r-sm); background: var(--well); }
+.bars .bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; height: 100%; min-width: 0; }
+.bars .bar-col i { width: 100%; max-width: 46px; height: var(--amount, 1%); min-height: 2px; border-radius: 4px 4px 0 0; background: linear-gradient(180deg, color-mix(in srgb, var(--vendor, var(--blue)) 92%, white), var(--vendor, var(--blue))); }
+.bars .bar-col span { font: 500 9.5px var(--mono); color: var(--faint); padding-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.key-row { display: grid; gap: 8px; }
+.key-row .row { flex-wrap: wrap; }
+.key-row input { flex: 1; min-width: 160px; }
+.key-status { font: 500 var(--fs-xs) var(--mono); color: var(--mute); }
+.key-status[data-ok="true"] { color: var(--green); }
+
+/* Quota rings in the status bar */
+.quota { display: flex; align-items: center; gap: 12px; flex: none; }
+.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute); white-space: nowrap; }
+.q svg { width: 18px; height: 18px; display: block; }
+.q .q-track { fill: none; stroke: var(--line); stroke-width: 2; }
+.q .q-arc { fill: none; stroke: var(--vendor); stroke-width: 2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.q .q-off { fill: none; stroke: color-mix(in srgb, var(--vendor) 45%, transparent); stroke-width: 1.5; stroke-dasharray: 2 2.3; }
+.q .q-solid { fill: var(--vendor); }
+.q[data-vendor="claude"] { --vendor: var(--v-claude); }
+.q[data-vendor="codex"] { --vendor: var(--v-codex); }
+.q[data-vendor="gemini"] { --vendor: var(--v-gemini); }
+.q[data-vendor="deepseek"] { --vendor: var(--v-deepseek); }
+.q .q-val { font-size: 10.5px; }
+
+@media (max-width: 859px) {
+  dialog[data-size="wide"] { width: 100%; height: 100%; max-height: 100%; max-width: 100%; border-radius: 0; border: 0; }
+  .settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 6px 8px; gap: 4px; }
+  .settings-nav button { min-height: 44px; flex: none; }
+  .settings-main { padding: 14px 12px 24px; }
+  .vendor-cards, .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .context-card { grid-template-columns: minmax(0, 1fr); }
+  #settings-vial { width: 100%; max-width: 280px; }
+  .seg button { min-height: 44px; height: 44px; }
+  .dlg-foot button, .dlg-head button { min-height: 44px; }
+  .quota { gap: 6px; }
+  .q .q-label, .q .q-val { display: none; }
+  .q svg { width: 16px; height: 16px; }
+}

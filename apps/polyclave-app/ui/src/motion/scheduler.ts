@@ -10,9 +10,10 @@ export class FrameClock {
     this.reduced.addEventListener('change',()=>this.wake());
     document.addEventListener('visibilitychange',()=>this.wake());
     this.root.dataset.motion='0fps';
+    this.root.dataset.motionPref=this.mode;
   }
   get disabled():boolean{return this.reduced.matches||this.mode==='off';}
-  setIntensity(value:Intensity):void{this.mode=value;this.wake();}
+  setIntensity(value:Intensity):void{this.mode=value;this.root.dataset.motionPref=value;this.wake();}
   subscribe(paint:FrameCallback,sleep?:(state:string)=>void,active:()=>boolean=()=>true):()=>void{
     const m={paint,sleep,active};this.members.add(m);
     return()=>{this.members.delete(m);};
@@ -34,7 +35,7 @@ export class FrameClock {
     if(this.disabled||document.hidden){this.stop();return;}
     if((this.state==='idle'||this.state==='review')&&t-this.since>=1200){this.stop();return;}
     const burst=t<this.interacted;
-    const limit=burst?(this.mode==='subtle'?16:7):(this.mode==='subtle'?48:1000/30);
+    const limit=burst?(this.mode==='subtle'?16:7):(this.mode==='subtle'?48:this.mode==='ultra'?1000/60:1000/30);
     this.root.dataset.motion=burst?'interactive':'30fps';
     this.root.dataset.motionState=this.state;
     if(this.paintTime===0||t-this.paintTime>=limit-.4){
