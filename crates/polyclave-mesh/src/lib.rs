@@ -243,12 +243,83 @@ impl MeshPolicy {
     }
 }
 
+/// Default Worker vendor when a `worker_run` request omits `vendor`.
+pub const DEFAULT_WORKER_VENDOR: &str = "codex";
+/// Default base branch when a `worker_run` request omits `base_branch`.
+pub const DEFAULT_BASE_BRANCH: &str = "main";
+
+/// Cross-device dispatch envelope. The optional fields were added for
+/// `worker_run` / `run_status`; older peers that omit them still deserialize.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RemoteDispatchRequest {
     pub repo_cwd: String,
     pub action: String,
+    #[serde(default)]
     pub instructions: String,
     pub token: AttenuatedToken,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// Idempotency key for `worker_run`: repeating it returns the original Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Run to look up for `run_status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+impl RemoteDispatchRequest {
+    /// Builds a request with every optional `worker_run` field unset.
+    pub fn new(
+        repo_cwd: impl Into<String>,
+        action: impl Into<String>,
+        instructions: impl Into<String>,
+        token: AttenuatedToken,
+    ) -> Self {
+        Self {
+            repo_cwd: repo_cwd.into(),
+            action: action.into(),
+            instructions: instructions.into(),
+            token,
+            vendor: None,
+            model: None,
+            base_branch: None,
+            request_id: None,
+            run_id: None,
+        }
+    }
+
+    pub fn vendor_or_default(&self) -> &str {
+        non_blank(self.vendor.as_deref()).unwrap_or(DEFAULT_WORKER_VENDOR)
+    }
+
+    pub fn base_branch_or_default(&self) -> &str {
+        non_blank(self.base_branch.as_deref()).unwrap_or(DEFAULT_BASE_BRANCH)
+    }
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// Structured reply for `worker_run` and `run_status`. The remote node only
+/// reports what its own ledger observed; R1 verification of `result_sha`
+/// stays with the primary host.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoteWorkerResult {
+    pub ok: bool,
+    pub node_id: String,
+    pub run_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub result_sha: Option<String>,
+    #[serde(default)]
+    pub observed_sha: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -435,12 +506,7 @@ mod tests {
         let res = client
             .dispatch(
                 &endpoint,
-                &RemoteDispatchRequest {
-                    repo_cwd: "/repo/a".into(),
-                    action: "worker_run".into(),
-                    instructions: "cargo test".into(),
-                    token,
-                },
+                &RemoteDispatchRequest::new("/repo/a", "worker_run", "cargo test", token),
             )
             .await
             .unwrap();
@@ -460,5 +526,107 @@ mod tests {
         assert!(validate_private_mesh_endpoint("http://127.0.0.1:4310").is_ok());
         assert!(validate_private_mesh_endpoint("http://100.64.0.5:4310").is_ok());
         assert!(validate_private_mesh_endpoint("https://winbox.tailnet.ts.net").is_ok());
+    }
+
+    #[test]
+    fn dispatch_request_stays_backward_compatible_and_applies_defaults() {
+        let policy = MeshPolicy::new(b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+        let token = policy
+            .issue(MeshScope {
+                node_id: "node-win".into(),
+                allowed_repos: vec!["/repo/a".into()],
+                allowed_actions: vec!["ping".into()],
+                expires_at_epoch: 2000,
+            })
+            .unwrap();
+        // A legacy peer sends only the original four fields.
+        let legacy = serde_json::json!({
+            "repo_cwd": "/repo/a",
+            "action": "ping",
+            "instructions": "",
+            "token": token,
+        });
+        let parsed: RemoteDispatchRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.vendor, None);
+        assert_eq!(parsed.run_id, None);
+        assert_eq!(parsed.vendor_or_default(), "codex");
+        assert_eq!(parsed.base_branch_or_default(), "main");
+        // Unset optional fields are not put on the wire, so legacy peers see the old shape.
+        let wire = serde_json::to_value(&parsed).unwrap();
+        let keys: Vec<&String> = wire.as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 4, "unexpected keys: {keys:?}");
+
+        let mut full = RemoteDispatchRequest::new("/repo/a", "worker_run", "do it", token);
+        full.vendor = Some("claude".into());
+        full.model = Some("m1".into());
+        full.base_branch = Some("  ".into());
+        full.request_id = Some("req-1".into());
+        let round: RemoteDispatchRequest =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(round.vendor_or_default(), "claude");
+        assert_eq!(round.model.as_deref(), Some("m1"));
+        assert_eq!(round.base_branch_or_default(), "main");
+        assert_eq!(round.request_id.as_deref(), Some("req-1"));
+
+        let result = RemoteWorkerResult {
+            ok: true,
+            node_id: "node-win".into(),
+            run_id: "r1".into(),
+            status: "done".into(),
+            result_sha: Some("abc".into()),
+            observed_sha: None,
+            detail: None,
+        };
+        let back: RemoteWorkerResult =
+            serde_json::from_value(serde_json::to_value(&result).unwrap()).unwrap();
+        assert_eq!(back, result);
+        let sparse: RemoteWorkerResult = serde_json::from_value(serde_json::json!({
+            "ok": false, "node_id": "n", "run_id": "r", "status": "failed"
+        }))
+        .unwrap();
+        assert_eq!(sparse.result_sha, None);
+    }
+
+    #[test]
+    fn worker_run_and_run_status_need_their_own_scoped_grant() {
+        let policy = MeshPolicy::new(b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+        let mut node = sample_node("http://100.64.0.5:4311".into());
+        node.allowed_actions = vec!["worker_run".into(), "run_status".into()];
+        let parent = policy
+            .issue(MeshScope {
+                node_id: "node-win".into(),
+                allowed_repos: vec!["/repo/a".into(), "/repo/b".into()],
+                allowed_actions: vec!["worker_run".into(), "run_status".into()],
+                expires_at_epoch: 2000,
+            })
+            .unwrap();
+        let status_only = policy
+            .attenuate(
+                &parent,
+                MeshScope {
+                    node_id: "node-win".into(),
+                    allowed_repos: vec!["/repo/a".into()],
+                    allowed_actions: vec!["run_status".into()],
+                    expires_at_epoch: 1500,
+                },
+            )
+            .unwrap();
+        assert!(policy
+            .authorize(&status_only, &node, "/repo/a", "run_status", 1000)
+            .is_ok());
+        assert!(matches!(
+            policy.authorize(&status_only, &node, "/repo/a", "worker_run", 1000),
+            Err(Error::Denied(_))
+        ));
+        assert!(matches!(
+            policy.authorize(&status_only, &node, "/repo/b", "run_status", 1000),
+            Err(Error::Denied(_))
+        ));
+        // The node allowlist is enforced independently of the token.
+        node.allowed_actions = vec!["run_status".into()];
+        assert!(matches!(
+            policy.authorize(&parent, &node, "/repo/a", "worker_run", 1000),
+            Err(Error::Denied(_))
+        ));
     }
 }
