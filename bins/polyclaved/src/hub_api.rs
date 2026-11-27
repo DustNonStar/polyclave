@@ -12,18 +12,30 @@ use polyclave_core::{
 use polyclave_hub::{
     api_provider::ApiHubProvider,
     cli_provider::{CliHubProvider, SupervisedCli},
+    council::CouncilParticipant,
     curation::MemoryCurator,
+    pr_gate::{
+        pause_all as pr_gate_pause_all, GitMirrorPusher, MirrorPusher, PrGateDeps, ReviewOutcome,
+        ReviewWorktreeRequest, ReviewerExecutor, ReviewerSpec, RunPrGateRequest,
+        WorkerReviseExecutor,
+    },
     provider::{
         assemble, restore_api_history, ChatMessage, HubModelProvider, HubRequest, ProviderEvent,
         Role,
     },
     repo_tools::RepoScope,
+    scm::{
+        BoxFuture, GitHubConfig, GitHubScmClient, OpenPrRequest, PrChecksAndComments, PrState,
+        PreflightReport, PullRequestInfo, ScmClient, ScmError, SecretToken, SubmitReviewRequest,
+        SubmittedReview,
+    },
+    scm_observer::ScmObserver,
     triage::{Mandate, Triage},
     Error, Result as HubResult,
 };
-use polyclave_proto::{AgentEvent, ChangeTopic, MemoryKind, TurnMode, Vendor};
+use polyclave_proto::{AgentEvent, ChangeTopic, MemoryKind, PauseStateDto, TurnMode, Vendor};
 use polyclave_store::{now, Curator, HubCompletion, HubTurn, MemoryFilter, Store};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -33,9 +45,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 use tokio::{
-    sync::{broadcast, Notify},
+    sync::{broadcast, watch, Notify},
     task::{spawn_blocking, JoinHandle},
 };
 
@@ -107,11 +120,96 @@ struct Lifecycle {
     sessions: Mutex<HashMap<String, SessionDispatch>>,
     drained: Notify,
     server: tokio::sync::Mutex<Option<JoinHandle<std::io::Result<()>>>>,
+    observer: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
 }
+
+struct HostReviewerExecutor;
+impl ReviewerExecutor for HostReviewerExecutor {
+    fn run_review<'a>(
+        &'a self,
+        _req: ReviewWorktreeRequest,
+    ) -> BoxFuture<'a, HubResult<ReviewOutcome>> {
+        Box::pin(async { Err(Error::NotStarted) })
+    }
+}
+
+struct UnconfiguredScmClient;
+impl ScmClient for UnconfiguredScmClient {
+    fn preflight_repo<'a>(
+        &'a self,
+        _repo_slug: &'a str,
+        _base_branch: &'a str,
+    ) -> BoxFuture<'a, Result<PreflightReport, ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn open_or_find_pr<'a>(
+        &'a self,
+        _req: OpenPrRequest,
+    ) -> BoxFuture<'a, Result<PullRequestInfo, ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn submit_review<'a>(
+        &'a self,
+        _req: SubmitReviewRequest,
+    ) -> BoxFuture<'a, Result<SubmittedReview, ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("reviewer")) })
+    }
+    fn enable_auto_merge<'a>(
+        &'a self,
+        _pr_node_id: &'a str,
+        _expected_head_oid: &'a str,
+    ) -> BoxFuture<'a, Result<(), ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn disable_auto_merge<'a>(
+        &'a self,
+        _pr_node_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn get_pr_state<'a>(
+        &'a self,
+        _repo_slug: &'a str,
+        _pr_number: u64,
+    ) -> BoxFuture<'a, Result<PrState, ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn list_pr_checks_and_comments<'a>(
+        &'a self,
+        _repo_slug: &'a str,
+        _pr_number: u64,
+        _head_sha: &'a str,
+    ) -> BoxFuture<'a, Result<PrChecksAndComments, ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+}
+
+struct Stage2Deps {
+    scm: Mutex<Option<Arc<dyn ScmClient>>>,
+    reviewer: Mutex<Arc<dyn ReviewerExecutor>>,
+    pusher: Mutex<Arc<dyn MirrorPusher>>,
+    worker_revise: Mutex<Option<Arc<dyn WorkerReviseExecutor>>>,
+    council_participants: Mutex<Option<Vec<CouncilParticipant>>>,
+    default_reviewers: Mutex<Option<Vec<ReviewerSpec>>>,
+}
+
+impl Default for Stage2Deps {
+    fn default() -> Self {
+        Self {
+            scm: Mutex::new(None),
+            reviewer: Mutex::new(Arc::new(HostReviewerExecutor)),
+            pusher: Mutex::new(Arc::new(GitMirrorPusher::default())),
+            worker_revise: Mutex::new(None),
+            council_participants: Mutex::new(None),
+            default_reviewers: Mutex::new(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Hub {
     pub store: Store,
-    runs: RunManager,
+    pub runs: RunManager,
     triage: Triage,
     runner: TurnRunner,
     host: String,
@@ -120,6 +218,7 @@ pub struct Hub {
     mcp: String,
     lifecycle: Arc<Lifecycle>,
     stream: broadcast::Sender<(String, StreamEvent)>,
+    stage2: Arc<Stage2Deps>,
 }
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> HubResult<T> + Send + 'static,
@@ -149,6 +248,7 @@ impl Hub {
             mcp: format!("http://{addr}/mcp"),
             lifecycle: Default::default(),
             stream,
+            stage2: Default::default(),
         };
         let app = Router::new()
             .route("/mcp", post(http::mcp))
@@ -164,8 +264,307 @@ impl Hub {
     pub fn is_closed(&self) -> bool {
         self.lifecycle.shutdown.stopped()
     }
+    pub fn set_scm(&self, scm: Arc<dyn ScmClient>) {
+        *self.stage2.scm.lock().unwrap() = Some(scm);
+    }
+    pub fn scm(&self) -> Option<Arc<dyn ScmClient>> {
+        self.stage2.scm.lock().unwrap().clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_reviewer(&self, reviewer: Arc<dyn ReviewerExecutor>) {
+        *self.stage2.reviewer.lock().unwrap() = reviewer;
+    }
+    #[cfg(test)]
+    pub(crate) fn set_pusher(&self, pusher: Arc<dyn MirrorPusher>) {
+        *self.stage2.pusher.lock().unwrap() = pusher;
+    }
+    #[cfg(test)]
+    pub(crate) fn set_council_participants(&self, participants: Vec<CouncilParticipant>) {
+        *self.stage2.council_participants.lock().unwrap() = Some(participants);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_default_reviewers(&self, reviewers: Vec<ReviewerSpec>) {
+        *self.stage2.default_reviewers.lock().unwrap() = Some(reviewers);
+    }
+    pub async fn start_scm_observer(
+        &self,
+        scm: Arc<dyn ScmClient>,
+        hub_session_id: Option<String>,
+        interval: Duration,
+    ) {
+        self.set_scm(scm.clone());
+        let mut slot = self.lifecycle.observer.lock().await;
+        if let Some((prev_tx, prev_handle)) = slot.take() {
+            let _ = prev_tx.send(true);
+            let _ = prev_handle.await;
+        }
+        if self.is_closed() {
+            return;
+        }
+        let (tx, rx) = watch::channel(false);
+        let observer = ScmObserver::new(self.store.clone(), scm, hub_session_id);
+        let handle = observer.spawn(interval, rx);
+        *slot = Some((tx, handle));
+    }
+    pub async fn try_start_scm_observer_from_keychain(&self) {
+        let creds = spawn_blocking(|| {
+            let bot =
+                polyclave_os::read_provider_credential("Polyclave.GitHub", "bot_token").ok()?;
+            let rev = polyclave_os::read_provider_credential("Polyclave.GitHub", "reviewer_token")
+                .ok()?;
+            if bot.trim().is_empty() || rev.trim().is_empty() {
+                return None;
+            }
+            GitHubScmClient::new(GitHubConfig::new(
+                SecretToken::new(bot),
+                SecretToken::new(rev),
+            ))
+            .ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(client) = creds else {
+            return;
+        };
+        let hub_session = self
+            .store
+            .read(|db| {
+                db.query_row(
+                    "SELECT id FROM sessions WHERE role='hub' ORDER BY created_at,id LIMIT 1",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+            })
+            .ok()
+            .flatten();
+        self.start_scm_observer(Arc::new(client), hub_session, Duration::from_secs(30))
+            .await;
+    }
+    pub(crate) fn pr_gate_deps(&self) -> HubResult<PrGateDeps> {
+        let scm = self.scm().ok_or(Error::Credential)?;
+        let reviewer = self.stage2.reviewer.lock().unwrap().clone();
+        let pusher = self.stage2.pusher.lock().unwrap().clone();
+        let worker_revise = self.stage2.worker_revise.lock().unwrap().clone();
+        Ok(PrGateDeps {
+            store: self.store.clone(),
+            scm,
+            reviewer,
+            worker_revise,
+            pusher,
+        })
+    }
+    pub(crate) fn resolve_council_participants(
+        &self,
+        repo_cwd: &str,
+    ) -> HubResult<Vec<CouncilParticipant>> {
+        if let Some(injected) = self.stage2.council_participants.lock().unwrap().clone() {
+            return Ok(injected);
+        }
+        let repo = repo_cwd.to_owned();
+        let rows = self
+            .store
+            .read(move |db| {
+                let mut stmt = db.prepare(
+                    "SELECT s.profile_id, s.provider_model, s.vendor, p.kind, p.base_url
+                     FROM sessions s
+                     JOIN provider_profiles p ON p.id = s.profile_id
+                     WHERE s.role = 'manager' AND s.repo_cwd = ?1
+                     ORDER BY s.created_at, s.id",
+                )?;
+                let list = stmt
+                    .query_map([repo], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(list)
+            })
+            .map_err(|_| Error::Store)?;
+
+        let mut out = Vec::new();
+        for (profile_id, model, vendor_col, kind, base_url) in rows {
+            if kind != "openai_compat" {
+                continue;
+            }
+            let provider = ApiHubProvider::from_registered(&self.store, &profile_id)?;
+            let vendor = infer_vendor(
+                vendor_col.as_deref(),
+                &profile_id,
+                base_url.as_deref().unwrap_or(""),
+            );
+            out.push(CouncilParticipant {
+                vendor,
+                model,
+                provider: Arc::new(provider),
+            });
+        }
+        Ok(out)
+    }
+    pub(crate) fn resolve_default_reviewers(&self, repo_cwd: &str) -> Vec<ReviewerSpec> {
+        if let Some(injected) = self.stage2.default_reviewers.lock().unwrap().clone() {
+            return injected;
+        }
+        let repo = repo_cwd.to_owned();
+        let rows = self
+            .store
+            .read(move |db| {
+                let mut stmt = db.prepare(
+                    "SELECT s.profile_id, s.provider_model, s.vendor, p.base_url
+                     FROM sessions s
+                     JOIN provider_profiles p ON p.id = s.profile_id
+                     WHERE s.role = 'manager' AND s.repo_cwd = ?1
+                     ORDER BY s.created_at, s.id",
+                )?;
+                let list = stmt
+                    .query_map([repo], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(list)
+            })
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|(profile_id, model, vendor_col, base_url)| ReviewerSpec {
+                vendor: infer_vendor(
+                    vendor_col.as_deref(),
+                    &profile_id,
+                    base_url.as_deref().unwrap_or(""),
+                ),
+                model,
+            })
+            .collect()
+    }
+    pub(crate) async fn pause_all(&self, reason: Option<String>) -> HubResult<PauseStateDto> {
+        match self.scm() {
+            Some(scm) => pr_gate_pause_all(&self.store, scm.as_ref(), reason).await,
+            None => pr_gate_pause_all(&self.store, &UnconfiguredScmClient, reason).await,
+        }
+    }
+    pub(crate) fn prepare_pr_gate_run(
+        &self,
+        inputs: PrGateRunInputs,
+    ) -> Result<(RunPrGateRequest, PrGateDeps, polyclave_proto::RunDto), PrGatePrepError> {
+        if self
+            .store
+            .pause_state()
+            .map_err(|_| PrGatePrepError::Internal)?
+            .paused
+        {
+            return Err(PrGatePrepError::Paused);
+        }
+        let existing_gate = match self.store.pr_gate(&inputs.target_id) {
+            Ok(gate) => Some(gate),
+            Err(polyclave_store::Error::NotFound) => None,
+            Err(_) => return Err(PrGatePrepError::Internal),
+        };
+        let run_id = existing_gate
+            .as_ref()
+            .map(|g| g.run_id.clone())
+            .unwrap_or_else(|| inputs.target_id.clone());
+        let run = match self.runs.get(&run_id) {
+            Ok(run) => run,
+            Err(polyclave_store::Error::NotFound) => return Err(PrGatePrepError::NotFound),
+            Err(_) => return Err(PrGatePrepError::Internal),
+        };
+        let (mirror_remote, mandate_json): (String, String) = self
+            .store
+            .read(|db| {
+                db.query_row(
+                    "SELECT r.mirror_remote, t.mandate_json
+                     FROM runs r JOIN tickets t ON t.id = r.ticket_id
+                     WHERE r.id = ?1",
+                    [&run_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .map_err(|_| PrGatePrepError::Internal)?;
+        let default_touched_paths: Vec<String> = serde_json::from_str::<Value>(&mandate_json)
+            .ok()
+            .and_then(|v| v.get("allowed_paths").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let repo_slug = inputs
+            .repo_slug
+            .or_else(|| existing_gate.as_ref().map(|g| g.repo_slug.clone()))
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(PrGatePrepError::Invalid("repo_slug is required"))?;
+        let branch = inputs
+            .branch
+            .or_else(|| existing_gate.as_ref().map(|g| g.branch.clone()))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("polyclave/{}", run.id));
+        let base_branch = inputs
+            .base_branch
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| run.base_branch.clone());
+        let base_sha = inputs
+            .base_sha
+            .or_else(|| existing_gate.as_ref().map(|g| g.base_sha.clone()))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| run.base_sha.clone());
+        let head_sha = inputs
+            .head_sha
+            .or_else(|| run.result_sha.clone())
+            .or_else(|| run.observed_sha.clone())
+            .or_else(|| existing_gate.as_ref().map(|g| g.head_sha.clone()))
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(PrGatePrepError::Invalid(
+                "head_sha is required when run has no recorded commit SHA",
+            ))?;
+        let pr_title = inputs
+            .pr_title
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("Polyclave run {}", run.id));
+        let pr_body = inputs.pr_body.unwrap_or_default();
+        let touched_paths = inputs.touched_paths.unwrap_or(default_touched_paths);
+        let is_high_risk = inputs.is_high_risk.unwrap_or(false);
+        let reviewers = inputs
+            .reviewers
+            .unwrap_or_else(|| self.resolve_default_reviewers(&run.repo_cwd));
+        let hub_session_id = inputs
+            .hub_session_id
+            .or_else(|| Some(run.hub_session_id.clone()));
+        let deps = self.pr_gate_deps().map_err(|err| match err {
+            Error::Credential => PrGatePrepError::ScmUnconfigured,
+            _ => PrGatePrepError::Internal,
+        })?;
+        let req = RunPrGateRequest {
+            run_id: run.id.clone(),
+            hub_session_id,
+            mirror_path: PathBuf::from(mirror_remote),
+            repo_slug,
+            branch,
+            base_branch,
+            base_sha,
+            head_sha,
+            pr_title,
+            pr_body,
+            touched_paths,
+            is_high_risk,
+            reviewers,
+        };
+        Ok((req, deps, run))
+    }
     pub async fn close(&self) {
         self.lifecycle.shutdown.cancel();
+        if let Some((tx, handle)) = self.lifecycle.observer.lock().await.take() {
+            let _ = tx.send(true);
+            let _ = handle.await;
+        }
         let _ = self.stream.send((String::new(), StreamEvent::Shutdown));
         {
             let active = self.lifecycle.sessions.lock().unwrap();
@@ -515,6 +914,55 @@ fn ensure_private(path: &FsPath) -> HubResult<()> {
         _ => Err(Error::NotStarted),
     }
 }
+pub(crate) struct PrGateRunInputs {
+    pub target_id: String,
+    pub hub_session_id: Option<String>,
+    pub repo_slug: Option<String>,
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub base_sha: Option<String>,
+    pub head_sha: Option<String>,
+    pub pr_title: Option<String>,
+    pub pr_body: Option<String>,
+    pub touched_paths: Option<Vec<String>>,
+    pub is_high_risk: Option<bool>,
+    pub reviewers: Option<Vec<ReviewerSpec>>,
+}
+
+pub(crate) enum PrGatePrepError {
+    Paused,
+    NotFound,
+    ScmUnconfigured,
+    Invalid(&'static str),
+    Internal,
+}
+
+fn infer_vendor(vendor_col: Option<&str>, profile_id: &str, base_url: &str) -> Vendor {
+    if let Some(v) = vendor_col {
+        match v {
+            "codex" => return Vendor::Codex,
+            "claude" => return Vendor::Claude,
+            "agy" => return Vendor::Agy,
+            "dsh" => return Vendor::Dsh,
+            _ => {}
+        }
+    }
+    let lower_id = profile_id.to_ascii_lowercase();
+    let lower_url = base_url.to_ascii_lowercase();
+    if lower_id.contains("deepseek") || lower_id.contains("dsh") || lower_url.contains("deepseek") {
+        Vendor::Dsh
+    } else if lower_id.contains("claude") || lower_url.contains("anthropic") {
+        Vendor::Claude
+    } else if lower_id.contains("agy")
+        || lower_id.contains("gemini")
+        || lower_url.contains("generativelanguage")
+    {
+        Vendor::Agy
+    } else {
+        Vendor::Codex
+    }
+}
+
 #[derive(Clone)]
 struct ToolScope {
     turn: i64,

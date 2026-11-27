@@ -1,4 +1,9 @@
 use super::*;
+use polyclave_hub::{
+    council::{start_council as run_start_council, StartCouncilRequest},
+    pr_gate::{run_pr_gate as execute_pr_gate, ReviewerSpec},
+};
+use polyclave_proto::{CouncilLevel, PlanningPreference};
 use polyclave_store::{new_id, Error as StoreError};
 use rusqlite::OptionalExtension;
 
@@ -11,6 +16,15 @@ impl Hub {
         stop: Stop,
     ) -> HubResult<Value> {
         stop.check()?;
+        if matches!(name.as_str(), "start_council" | "run_pr_gate") {
+            let value = tokio::select! {
+                biased;
+                _ = stop.wait() => return Err(Error::Cancelled),
+                res = self.call_tool(&caller, &name, args) => res?,
+            };
+            stop.check()?;
+            return Ok(value);
+        }
         let hub = self.clone();
         // Keep ownership of the blocking operation until it actually returns. Cancellation
         // must not release the turn while an admitted dispatch is still taking effect.
@@ -21,6 +35,143 @@ impl Hub {
             Ok(value)
         })
         .await
+    }
+
+    pub(super) async fn call_tool(
+        &self,
+        caller: &ToolScope,
+        name: &str,
+        mut args: Value,
+    ) -> HubResult<Value> {
+        if !tool_list(caller.role == "hub")
+            .iter()
+            .any(|t| t["name"] == name)
+        {
+            return Err(Error::Policy);
+        }
+        match name {
+            "start_council" => {
+                let scope = RepoScope::from_registered(FsPath::new(&caller.repo))?;
+                if let Some(path) = args
+                    .as_object_mut()
+                    .ok_or(Error::Policy)?
+                    .remove("repo_cwd")
+                {
+                    scope.matches_requested(FsPath::new(path.as_str().ok_or(Error::Policy)?))?;
+                }
+                let req_input: StartCouncilTool =
+                    serde_json::from_value(args).map_err(|_| Error::Policy)?;
+                let hub = self.clone();
+                let caller_clone = caller.clone();
+                let req = blocking(move || {
+                    if hub
+                        .store
+                        .pause_state()
+                        .map_err(|_| Error::Store)?
+                        .paused
+                    {
+                        return Err(Error::Policy);
+                    }
+                    if let Some(ref ticket_id) = req_input.ticket_id {
+                        let valid_ticket: bool = hub
+                            .store
+                            .read(|db| {
+                                db.query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM tickets WHERE id=?1 AND hub_session_id=?2 AND repo_cwd=?3)",
+                                    params![ticket_id, caller_clone.session, caller_clone.repo],
+                                    |r| r.get(0),
+                                )
+                                .map_err(Into::into)
+                            })
+                            .map_err(|_| Error::Store)?;
+                        if !valid_ticket {
+                            return Err(Error::Policy);
+                        }
+                    }
+                    let participants = hub.resolve_council_participants(&caller_clone.repo)?;
+                    if participants.is_empty() {
+                        return Err(Error::Profile);
+                    }
+                    Ok(StartCouncilRequest {
+                        council_id: req_input.council_id,
+                        hub_session_id: Some(caller_clone.session),
+                        ticket_id: req_input.ticket_id,
+                        repo_cwd: caller_clone.repo,
+                        level: req_input.level,
+                        preference: req_input.preference.unwrap_or(PlanningPreference::Balanced),
+                        prompt: req_input.prompt,
+                        participants,
+                    })
+                })
+                .await?;
+                let council = run_start_council(&self.store, req).await?;
+                serde_json::to_value(council).map_err(|_| Error::Store)
+            }
+            "run_pr_gate" => {
+                let scope = RepoScope::from_registered(FsPath::new(&caller.repo))?;
+                if let Some(path) = args
+                    .as_object_mut()
+                    .ok_or(Error::Policy)?
+                    .remove("repo_cwd")
+                {
+                    scope.matches_requested(FsPath::new(path.as_str().ok_or(Error::Policy)?))?;
+                }
+                let req_input: RunPrGateTool =
+                    serde_json::from_value(args).map_err(|_| Error::Policy)?;
+                let reviewers = req_input.reviewers.map(|list| {
+                    list.into_iter()
+                        .map(|r| ReviewerSpec {
+                            vendor: r.vendor,
+                            model: r.model,
+                        })
+                        .collect()
+                });
+                let hub = self.clone();
+                let caller_clone = caller.clone();
+                let (req, deps) = blocking(move || {
+                    let (req, deps, run) = hub
+                        .prepare_pr_gate_run(PrGateRunInputs {
+                            target_id: req_input.run_id,
+                            hub_session_id: Some(caller_clone.session.clone()),
+                            repo_slug: Some(req_input.repo_slug),
+                            branch: Some(req_input.branch),
+                            base_branch: req_input.base_branch,
+                            base_sha: req_input.base_sha,
+                            head_sha: req_input.head_sha,
+                            pr_title: Some(req_input.pr_title),
+                            pr_body: req_input.pr_body,
+                            touched_paths: req_input.touched_paths,
+                            is_high_risk: req_input.is_high_risk,
+                            reviewers,
+                        })
+                        .map_err(|err| match err {
+                            PrGatePrepError::ScmUnconfigured => Error::Credential,
+                            PrGatePrepError::Internal => Error::Store,
+                            _ => Error::Policy,
+                        })?;
+                    let same_repo = match (
+                        polyclave_os::canonical_real_path(FsPath::new(&run.repo_cwd)),
+                        polyclave_os::canonical_real_path(FsPath::new(&caller_clone.repo)),
+                    ) {
+                        (Ok(a), Ok(b)) => a == b,
+                        _ => run.repo_cwd == caller_clone.repo,
+                    };
+                    if run.hub_session_id != caller_clone.session || !same_repo {
+                        return Err(Error::Policy);
+                    }
+                    Ok((req, deps))
+                })
+                .await?;
+                let gate = execute_pr_gate(&deps, req).await?;
+                serde_json::to_value(gate).map_err(|_| Error::Store)
+            }
+            _ => {
+                let hub = self.clone();
+                let caller = caller.clone();
+                let name = name.to_owned();
+                blocking(move || hub.tool(&caller, &name, args)).await
+            }
+        }
     }
     pub(super) fn tool(&self, caller: &ToolScope, name: &str, mut args: Value) -> HubResult<Value> {
         let session = caller.session.as_str();
@@ -82,6 +233,9 @@ impl Hub {
                 serde_json::from_value(args).map_err(|_| Error::Policy)?,
             ),
             "dispatch_task" => {
+                if self.store.pause_state().map_err(|_| Error::Store)?.paused {
+                    return Err(Error::Policy);
+                }
                 args["repo_cwd"] = json!(repo);
                 let request: RunRequest =
                     serde_json::from_value(args).map_err(|_| Error::Policy)?;
@@ -168,6 +322,32 @@ impl Hub {
         Ok(json!(ticket))
     }
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartCouncilTool {
+    council_id: Option<String>,
+    ticket_id: Option<String>,
+    level: Option<CouncilLevel>,
+    preference: Option<PlanningPreference>,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunPrGateTool {
+    run_id: String,
+    repo_slug: String,
+    branch: String,
+    base_branch: Option<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    pr_title: String,
+    pr_body: Option<String>,
+    touched_paths: Option<Vec<String>>,
+    is_high_risk: Option<bool>,
+    reviewers: Option<Vec<super::http::ReviewerInput>>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TicketTool {
@@ -278,6 +458,38 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
             tool("memory_commit","Promote an eligible candidate",json!({"id":string}),&["id"]),
             tool("memory_supersede","Version a verified project rule",json!({"id":string,"prior":string}),&["id","prior"]),
             tool("memory_archive","Archive an eligible rule",json!({"id":string}),&["id"]),
+            tool(
+                "start_council",
+                "Run a blind multi-model architecture council. Direction-level councils always wait for explicit user choice and never auto-start dev.",
+                json!({
+                    "council_id": string,
+                    "ticket_id": string,
+                    "level": {"enum": ["direction", "detail"]},
+                    "preference": {"enum": ["thorough", "balanced", "conservative"]},
+                    "prompt": string,
+                    "repo_cwd": string
+                }),
+                &["prompt"],
+            ),
+            tool(
+                "run_pr_gate",
+                "Run preflight, 3-layer touched_paths check, PR creation, and heterogeneous disposable worktree review for a completed run.",
+                json!({
+                    "run_id": string,
+                    "repo_slug": string,
+                    "branch": string,
+                    "base_branch": string,
+                    "base_sha": string,
+                    "head_sha": string,
+                    "pr_title": string,
+                    "pr_body": string,
+                    "touched_paths": strings,
+                    "is_high_risk": {"type": "boolean"},
+                    "reviewers": {"type": "array", "items": {"type": "object", "properties": {"vendor": string, "model": string}, "required": ["vendor", "model"], "additionalProperties": false}},
+                    "repo_cwd": string
+                }),
+                &["run_id", "repo_slug", "branch", "pr_title"],
+            ),
         ]);
     }
     tools

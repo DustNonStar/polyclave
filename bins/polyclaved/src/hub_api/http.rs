@@ -1,5 +1,10 @@
 use super::*;
 use crate::routes::{HttpError, Reply};
+use polyclave_hub::{
+    council::{start_council as run_start_council, StartCouncilRequest},
+    pr_gate::{resume_all as pr_gate_resume_all, run_pr_gate as execute_pr_gate, ReviewerSpec},
+};
+use polyclave_proto::{CouncilLevel, PlanningPreference};
 
 pub(super) async fn mcp(
     State(hub): State<Hub>,
@@ -38,9 +43,8 @@ pub(super) async fn mcp(
             };
             let args = input["params"]["arguments"].clone();
             let scope = ToolScope::new(turn, &session, &role, &repo);
-            let h = hub.clone();
-            match spawn_blocking(move || h.tool(&scope, &name, args)).await {
-                Ok(Ok(v)) => {
+            match hub.call_tool(&scope, &name, args).await {
+                Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"isError":false})
                 }
                 _ => {
@@ -75,6 +79,16 @@ pub fn router(hub: Hub) -> Router {
         .route("/sessions/{id}/repo-file", post(repo_file))
         .route("/usage", axum::routing::get(usage))
         .route("/sessions/{id}/memory", post(memory).get(memories))
+        .route(
+            "/councils",
+            axum::routing::get(councils).post(start_council),
+        )
+        .route("/councils/{id}/resolve", post(resolve_council))
+        .route("/pr-gates", axum::routing::get(pr_gates))
+        .route("/pr-gates/{id}", axum::routing::get(pr_gate))
+        .route("/pr-gates/{id}/run", post(run_pr_gate))
+        .route("/pause", axum::routing::get(pause_state).post(pause))
+        .route("/resume", post(resume))
         .with_state(hub)
 }
 
@@ -352,4 +366,270 @@ async fn cancel(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
     ))?;
     dispatch.stop.cancel();
     Ok(Json(json!({"accepted": true})))
+}
+
+fn map_hub_err(err: Error) -> HttpError {
+    match err {
+        Error::Policy | Error::Profile => HttpError(
+            StatusCode::CONFLICT,
+            "conflict",
+            "Request refused in the current state",
+        ),
+        Error::Credential => HttpError(
+            StatusCode::CONFLICT,
+            "scm_unconfigured",
+            "Required credentials are not configured",
+        ),
+        Error::Http { .. } | Error::Transport | Error::Protocol => HttpError(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Upstream SCM or provider request failed",
+        ),
+        _ => HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "Host operation failed",
+        ),
+    }
+}
+
+async fn councils(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || hub.store.list_councils().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartCouncilBody {
+    council_id: Option<String>,
+    hub_session_id: Option<String>,
+    ticket_id: Option<String>,
+    repo_cwd: Option<String>,
+    level: Option<CouncilLevel>,
+    preference: Option<PlanningPreference>,
+    prompt: String,
+}
+
+async fn start_council(State(hub): State<Hub>, Json(body): Json<StartCouncilBody>) -> Reply {
+    if body.prompt.trim().is_empty() || body.prompt.len() > 256 * 1024 {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Council prompt is required",
+        ));
+    }
+    let store = hub.store.clone();
+    if run_blocking(move || store.pause_state().map_err(HttpError::from))
+        .await?
+        .paused
+    {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "paused",
+            "Host is globally paused",
+        ));
+    }
+    let hub_for_prep = hub.clone();
+    let req = run_blocking(move || {
+        let repo_cwd = match (body.hub_session_id.as_deref(), body.repo_cwd) {
+            (Some(sid), None) => {
+                let (_, repo, _) = hub_for_prep.store.hub_scope(sid).map_err(HttpError::from)?;
+                repo
+            }
+            (Some(sid), Some(repo)) => {
+                let (_, scoped_repo, _) =
+                    hub_for_prep.store.hub_scope(sid).map_err(HttpError::from)?;
+                if scoped_repo != repo {
+                    return Err(HttpError(
+                        StatusCode::CONFLICT,
+                        "conflict",
+                        "Repository does not match hub session",
+                    ));
+                }
+                repo
+            }
+            (None, Some(repo)) if !repo.trim().is_empty() => repo,
+            _ => {
+                return Err(HttpError(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Repository path or hub_session_id is required",
+                ));
+            }
+        };
+        let participants = hub_for_prep
+            .resolve_council_participants(&repo_cwd)
+            .map_err(map_hub_err)?;
+        if participants.is_empty() {
+            return Err(HttpError(
+                StatusCode::CONFLICT,
+                "no_participants",
+                "No council participants are configured",
+            ));
+        }
+        Ok(StartCouncilRequest {
+            council_id: body.council_id,
+            hub_session_id: body.hub_session_id,
+            ticket_id: body.ticket_id,
+            repo_cwd,
+            level: body.level,
+            preference: body.preference.unwrap_or(PlanningPreference::Balanced),
+            prompt: body.prompt,
+            participants,
+        })
+    })
+    .await?;
+    let council = run_start_council(&hub.store, req)
+        .await
+        .map_err(map_hub_err)?;
+    Ok(Json(json!(council)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveCouncilBody {
+    chosen_label: String,
+    decision_note: Option<String>,
+}
+
+async fn resolve_council(
+    State(hub): State<Hub>,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveCouncilBody>,
+) -> Reply {
+    if body.chosen_label.trim().is_empty() {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "chosen_label is required",
+        ));
+    }
+    let decided = run_blocking(move || {
+        hub.store
+            .resolve_council(&id, &body.chosen_label, body.decision_note)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(decided)))
+}
+
+async fn pr_gates(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || hub.store.list_pr_gates().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+async fn pr_gate(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let gate = run_blocking(move || hub.store.pr_gate(&id).map_err(HttpError::from)).await?;
+    Ok(Json(json!(gate)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReviewerInput {
+    pub vendor: Vendor,
+    pub model: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RunPrGateBody {
+    repo_slug: Option<String>,
+    branch: Option<String>,
+    base_branch: Option<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    pr_title: Option<String>,
+    pr_body: Option<String>,
+    touched_paths: Option<Vec<String>>,
+    is_high_risk: Option<bool>,
+    reviewers: Option<Vec<ReviewerInput>>,
+    hub_session_id: Option<String>,
+}
+
+async fn run_pr_gate(
+    State(hub): State<Hub>,
+    Path(id): Path<String>,
+    body: Option<Json<RunPrGateBody>>,
+) -> Reply {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let reviewers = body.reviewers.map(|items| {
+        items
+            .into_iter()
+            .map(|r| ReviewerSpec {
+                vendor: r.vendor,
+                model: r.model,
+            })
+            .collect()
+    });
+    let hub_for_prep = hub.clone();
+    let (req, deps, _) = run_blocking(move || {
+        hub_for_prep
+            .prepare_pr_gate_run(PrGateRunInputs {
+                target_id: id,
+                hub_session_id: body.hub_session_id,
+                repo_slug: body.repo_slug,
+                branch: body.branch,
+                base_branch: body.base_branch,
+                base_sha: body.base_sha,
+                head_sha: body.head_sha,
+                pr_title: body.pr_title,
+                pr_body: body.pr_body,
+                touched_paths: body.touched_paths,
+                is_high_risk: body.is_high_risk,
+                reviewers,
+            })
+            .map_err(|err| match err {
+                PrGatePrepError::Paused => {
+                    HttpError(StatusCode::CONFLICT, "paused", "Host is globally paused")
+                }
+                PrGatePrepError::NotFound => {
+                    HttpError(StatusCode::NOT_FOUND, "not_found", "Not found")
+                }
+                PrGatePrepError::ScmUnconfigured => HttpError(
+                    StatusCode::CONFLICT,
+                    "scm_unconfigured",
+                    "GitHub credentials are not configured",
+                ),
+                PrGatePrepError::Invalid(detail) => {
+                    HttpError(StatusCode::BAD_REQUEST, "invalid_request", detail)
+                }
+                PrGatePrepError::Internal => HttpError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "Host operation failed",
+                ),
+            })
+    })
+    .await?;
+    let gate = execute_pr_gate(&deps, req).await.map_err(map_hub_err)?;
+    Ok(Json(json!(gate)))
+}
+
+async fn pause_state(State(hub): State<Hub>) -> Reply {
+    let state = run_blocking(move || hub.store.pause_state().map_err(HttpError::from)).await?;
+    Ok(Json(json!(state)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PauseBody {
+    reason: Option<String>,
+}
+
+async fn pause(State(hub): State<Hub>, body: Option<Json<PauseBody>>) -> Reply {
+    let reason = body.and_then(|Json(b)| b.reason);
+    let state = hub.pause_all(reason).await.map_err(|err| match err {
+        Error::Policy if hub.scm().is_none() => HttpError(
+            StatusCode::CONFLICT,
+            "scm_unconfigured",
+            "Pause persisted, but GitHub credentials are missing to revoke armed auto-merges",
+        ),
+        other => map_hub_err(other),
+    })?;
+    Ok(Json(json!(state)))
+}
+
+async fn resume(State(hub): State<Hub>) -> Reply {
+    let state = run_blocking(move || pr_gate_resume_all(&hub.store).map_err(map_hub_err)).await?;
+    Ok(Json(json!(state)))
 }

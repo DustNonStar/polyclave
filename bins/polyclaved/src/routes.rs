@@ -152,6 +152,19 @@ async fn run(State(app): State<App>, Path(id): Path<String>) -> Reply {
     ))
 }
 async fn accept(State(app): State<App>, Json(req): Json<RunRequest>) -> Reply {
+    if blocking({
+        let store = app.store.clone();
+        move || store.pause_state()
+    })
+    .await?
+    .paused
+    {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "paused",
+            "Host is globally paused",
+        ));
+    }
     Ok(Json(json!(
         blocking(move || {
             let (run, new) = app.runs.accept(req)?;
@@ -196,6 +209,19 @@ async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Reply {
     Ok(Json(json!({"accepted":true})))
 }
 async fn retry(State(app): State<App>, Path(id): Path<String>) -> Reply {
+    if blocking({
+        let store = app.store.clone();
+        move || store.pause_state()
+    })
+    .await?
+    .paused
+    {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "paused",
+            "Host is globally paused",
+        ));
+    }
     blocking(move || {
         let run = app.runs.get(&id)?;
         let attempt = app

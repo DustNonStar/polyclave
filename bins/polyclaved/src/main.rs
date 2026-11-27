@@ -91,6 +91,7 @@ async fn serve() -> io::Result<()> {
     for id in store.hub_idle_sessions().map_err(io::Error::other)? {
         hub.kick(id);
     }
+    hub.try_start_scm_observer_from_keychain().await;
     let stop_hub = hub.clone();
     let token = Uuid::new_v4().simple().to_string();
     let token_file = state.join("local-auth.token");
