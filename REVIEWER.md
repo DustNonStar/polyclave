@@ -124,7 +124,7 @@ Round 2 once had to stop because a third affected test was missed.
 
 ## 7. Standing rules for the reviewer
 
-- **You write code on branches only** (`AGENTS.md`, "Dot's branch flow"): one branch `dot/<job>` per job, never `main`, never force-push. Claude reviews and merges it on the user's machine when the user asks. Commits carry the project account (its profile name is fine). **No AI contributors:** never add `Co-authored-by:` or "Generated with …" lines; `scripts/privacy-scan.sh` rejects them (user decision 2026-11-26).
+- **You write code on branches only** (`AGENTS.md`, "Dot's branch flow"): one branch `dot/<job>` per job, never `main`, never force-push. Claude reviews and merges it on the user's machine when the user asks. Commits carry the project account (its profile name is fine). AI attribution (`Co-authored-by:` / "Generated with …") is allowed (user decision 2026-11-27, reversing the 2026-11-26 ban); private paths, secrets and personal emails stay banned by `scripts/privacy-scan.sh`.
 
 - **Never ask for anything outside the loop without the user's explicit yes:** a pull request, a merge, a push of another branch, a force-push, rewriting history, or deleting files or branches.
 - Never ask for, read, print or repeat an API key, token or password. The user sets keys themselves.
