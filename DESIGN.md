@@ -9,6 +9,9 @@
   - **Mobile Entrypoint (`apps/polyclave-app/src-tauri/src/lib.rs`):** Target-gated `mobile_entry_point` for iOS / Android alongside desktop `main.rs`.
   - **Devices & 10-min QR Pairing:** Zero-dependency inline SVG QR generator (`views/qr.ts`), paired device list with instant `Revoke`, and dual-identity verification over Tailscale / AgentMesh.
   - **AgentMesh Nodes & Private Notifications:** Deny-by-default mesh node visibility/revocation and private self-hosted `ntfy` / UnifiedPush wakeup configuration in Settings.
+- **Stage 4 additions:**
+  - **CUA Desktop Mutex & Reclaim:** Statusbar lock indicator + 1-click `Reclaim desktop` control in Settings.
+  - **Local Evolution, Teach-Once Skills & Opt-in Community Drafts:** Distill local suggestions from SQLite, save/rollback versioned skills synced to isolated vendor homes only, and preview redacted community drafts strictly opt-in.
 
 ---
 name: Polyclave

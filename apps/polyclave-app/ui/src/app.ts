@@ -89,14 +89,16 @@ async function loadSession(): Promise<void> {
 
 async function sync(): Promise<void> {
   if (!S.connection) return;
-  const [sessions, runs, profiles, tickets, usage, councils, prGates, pause, devices, meshNodes, notificationChannels] = await Promise.all([
+  const [sessions, runs, profiles, tickets, usage, councils, prGates, pause, devices, meshNodes, notificationChannels, cua, evolutionSuggestions, localSkills] = await Promise.all([
     api.sessions(), api.runs(), api.profiles(), api.tickets().catch(() => S.tickets), api.usage().catch(() => S.usage),
     api.councils().catch(() => S.councils), api.prGates().catch(() => S.prGates), api.pauseState().catch(() => S.pause),
     api.devices().catch(() => S.devices), api.meshNodes().catch(() => S.meshNodes), api.notificationChannels().catch(() => S.notificationChannels),
+    api.cua().catch(() => S.cua), api.evolutionSuggestions().catch(() => S.evolutionSuggestions), api.localSkills().catch(() => S.localSkills),
   ]);
   S.sessions = sessions; S.runs = runs; S.profiles = profiles; S.tickets = tickets; S.usage = usage;
   S.councils = councils; S.prGates = prGates; S.pause = pause;
   S.devices = devices; S.meshNodes = meshNodes; S.notificationChannels = notificationChannels;
+  S.cua = cua; S.evolutionSuggestions = evolutionSuggestions; S.localSkills = localSkills;
   if (!S.global && (!S.selected || !sessions.some(s => s.id === S.selected))) S.selected = sessions.find(s => s.role === 'hub')?.id ?? null;
   if (S.selected) {
     const id = S.selected;

@@ -54,6 +54,9 @@ export function renderStatus(): void {
   if (S.pause.paused) {
     countNodes.unshift(h('span', { class: 'pill-tag status-paused', 'data-tone': 'review', text: 'Paused' }));
   }
+  if (S.cua.locked) {
+    countNodes.unshift(h('span', { class: 'pill-tag status-cua', 'data-tone': 'review', text: 'CUA locked' }));
+  }
   byId('counts').replaceChildren(...countNodes);
 
   const quota = byId('quota');

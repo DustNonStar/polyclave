@@ -2,9 +2,10 @@
 import { request } from './sse.js';
 import type { Connection } from './sse.js';
 import type {
-  ClientKind, CouncilDto, CouncilLevel, JsonValue, MemoryItemDto, MemoryKind, MeshNodeDto,
-  NotificationChannelDto, NotificationChannelKind, PairedDeviceDto, PairingTicketDto,
-  PauseStateDto, PlanningPreference, PrGateDto, RunDto, SessionDto, Vendor,
+  ClientKind, CommunityDraftDto, CouncilDto, CouncilLevel, CuaLockDto, EvolutionSuggestionDto,
+  JsonValue, LocalSkillDto, MemoryItemDto, MemoryKind, MeshNodeDto, NotificationChannelDto,
+  NotificationChannelKind, PairedDeviceDto, PairingTicketDto, PauseStateDto, PlanningPreference,
+  PrGateDto, RunDto, SessionDto, Vendor,
 } from '../generated/proto.js';
 
 export interface Profile { id: string; display_name: string; kind: string; models: string[] }
@@ -87,6 +88,18 @@ export function api(connection: () => Connection | null) {
     upsertNotificationChannel: (body: { kind: NotificationChannelKind; label: string; endpoint: string; topic: string; enabled?: boolean }) =>
       call<NotificationChannelDto>('/api/notifications/channels', body),
     testNotifications: () => call<{ delivered: number }>('/api/notifications/test', {}),
+    cua: () => call<CuaLockDto>('/api/cua'),
+    reclaimCua: () => call<CuaLockDto>('/api/cua/reclaim', {}),
+    evolutionSuggestions: () => call<EvolutionSuggestionDto[]>('/api/evolution/suggestions'),
+    distillEvolution: () => call<EvolutionSuggestionDto[]>('/api/evolution/distill', {}),
+    applyEvolution: (id: string) => call<EvolutionSuggestionDto>('/api/evolution/suggestions/' + enc(id) + '/apply', {}),
+    rollbackEvolution: (id: string) => call<EvolutionSuggestionDto>('/api/evolution/suggestions/' + enc(id) + '/rollback', {}),
+    localSkills: () => call<LocalSkillDto[]>('/api/skills'),
+    saveLocalSkill: (body: { name: string; description: string; body_md: string; synced_vendors?: Vendor[] }) =>
+      call<LocalSkillDto>('/api/skills', body),
+    rollbackLocalSkill: (id: string) => call<LocalSkillDto>('/api/skills/' + enc(id) + '/rollback', {}),
+    communityDraft: () => call<CommunityDraftDto>('/api/community/draft'),
+    setCommunityOptIn: (opt_in: boolean) => call<{ opt_in: boolean }>('/api/community/opt-in', { opt_in }),
   };
 }
 export type Api = ReturnType<typeof api>;

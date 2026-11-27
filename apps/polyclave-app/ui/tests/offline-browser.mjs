@@ -66,6 +66,12 @@ const server=createServer(async(req,res)=>{
     if(path==='/api/notifications/test'&&req.method==='POST'){
       res.end(JSON.stringify({delivered:1}));return;
     }
+    if(path==='/api/cua/reclaim'&&req.method==='POST'){
+      res.end(JSON.stringify({locked:false,holder_run_id:null,target_window:null,idle_threshold_secs:30,acquired_at:null,reclaimed_at:'2026-11-27T00:05:00Z'}));return;
+    }
+    if(path==='/api/evolution/distill'&&req.method==='POST'){
+      res.end(JSON.stringify([{id:'e1',kind:'routing',title:'Keep Flash-first routing',rationale:'Low latency',payload_json:{},status:'proposed',supersedes_id:null,created_at:'2026-11-27T00:00:00Z',updated_at:'2026-11-27T00:00:00Z'}]));return;
+    }
     const data=path==='/api/sessions'?[session]:path==='/api/profiles'?[{id:'builtin-hub',kind:'codex_cli',display_name:'Codex CLI',models:['default']},{id:'deepseek-api',kind:'openai_compat',display_name:'DeepSeek API',models:['deepseek-flash','deepseek-v4-pro']}]:
       path.endsWith('/messages')?messages:path==='/api/usage'?[{vendor:'DeepSeek',context:240000,tokens:32000,cost:.37}]:
       path==='/api/councils'?(stage2Active?[councilState]:[]):path==='/api/pr-gates'?(stage2Active?[prGateState]:[]):path==='/api/pause'?pausedState:[];
@@ -173,10 +179,12 @@ try{
     await page.getByRole('dialog').waitFor({state:'visible'});
     assert.deepEqual(await page.getByRole('radiogroup',{name:'Motion intensity'}).getByRole('radio').allTextContents(),['Off · 0fps','Subtle','Standard','Ultra']);
     assert.ok((await page.getByRole('dialog').textContent()).includes('not reported'));
-    // Stage 3: generate inline SVG pairing QR & test private notification wakeup inside Settings.
+    // Stage 3 & 4: generate inline SVG pairing QR, test private notification, reclaim CUA & distill evolution.
     await page.locator('[data-focus-key="create-qr"]').click();
     await page.locator('.qr-svg').waitFor({state:'visible'});
     await page.locator('[data-focus-key="test-notify"]').click();
+    await page.locator('[data-focus-key="cua-reclaim"]').click();
+    await page.locator('[data-focus-key="distill-evo"]').click();
     assert.equal(await page.getByRole('dialog').evaluate(d=>d.scrollWidth<=d.clientWidth+1),true);
     await page.getByRole('button',{name:'Close',exact:true}).click();
     await page.getByRole('button',{name:'Dark theme',exact:true}).click();

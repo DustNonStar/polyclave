@@ -2,8 +2,9 @@
 import type { Connection } from '../api/sse.js';
 import type { HubMessage, Profile, ProviderUsage, RunDetail, TicketIntent } from '../api/client.js';
 import type {
-  CouncilDto, MemoryItemDto, MeshNodeDto, NotificationChannelDto, PairedDeviceDto,
-  PairingTicketDto, PauseStateDto, PrGateDto, RunDto, SessionDto, Vendor,
+  CouncilDto, CuaLockDto, EvolutionSuggestionDto, LocalSkillDto, MemoryItemDto, MeshNodeDto,
+  NotificationChannelDto, PairedDeviceDto, PairingTicketDto, PauseStateDto, PrGateDto, RunDto,
+  SessionDto, Vendor,
 } from '../generated/proto.js';
 
 export type Panel = 'Topology' | 'Review' | 'Files' | 'Memory';
@@ -29,6 +30,9 @@ export const S = {
   meshNodes: [] as MeshNodeDto[],
   notificationChannels: [] as NotificationChannelDto[],
   lastPairing: null as { ticket: PairingTicketDto; secret: string; qr_uri: string } | null,
+  cua: { locked: false, holder_run_id: null, target_window: null, idle_threshold_secs: 30, acquired_at: null, reclaimed_at: null } as CuaLockDto,
+  evolutionSuggestions: [] as EvolutionSuggestionDto[],
+  localSkills: [] as LocalSkillDto[],
   /** Selected Hub session; null with global=true shows the cross-project Global Hub. */
   selected: null as string | null,
   global: false,

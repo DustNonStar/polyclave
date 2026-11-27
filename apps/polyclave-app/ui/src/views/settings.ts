@@ -189,12 +189,79 @@ function notifySection(api: Api, act: Actions): HTMLElement {
   return wrap;
 }
 
+function cuaSection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { class: 'card', style: 'display:grid;gap:10px' });
+  wrap.append(
+    h('div', { class: 'row' },
+      h('span', { class: 'card-title grow', text: S.cua.locked ? 'Desktop CUA lock held by ' + (S.cua.holder_run_id ?? 'agent') : 'Desktop CUA lock is free' }),
+      h('span', { class: 'pill-tag', 'data-tone': S.cua.locked ? 'review' : 'done', text: S.cua.locked ? 'Locked' : 'Idle' })),
+    h('p', { class: 'field-hint', text: 'Single-machine mutex. Acquires only after ' + S.cua.idle_threshold_secs + 's of user idle; click Reclaim Desktop anytime to take control back immediately.' }),
+    h('div', { class: 'actions' },
+      button('Reclaim desktop', () => {
+        void api.reclaimCua().then(c => { S.cua = c; act.tell('Desktop reclaimed', 'info'); return act.refresh(); }).catch(act.problem);
+      }, 'btn-danger', { 'data-focus-key': 'cua-reclaim' })));
+  return wrap;
+}
+
+function evolutionAndSkillsSection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { style: 'display:grid;gap:10px' });
+  wrap.append(h('div', { class: 'card', style: 'display:grid;gap:8px' },
+    h('p', { class: 'field-hint', text: 'Local-only distillation from SQLite history and Teach-Once versioned skills synced strictly to isolated vendor homes (never user global skills).' }),
+    h('div', { class: 'actions' },
+      button('Distill local suggestions', () => {
+        void api.distillEvolution().then(async () => { act.tell('Local evolution suggestions distilled', 'info'); await act.refresh(); }).catch(act.problem);
+      }, 'btn-primary', { 'data-focus-key': 'distill-evo' }))));
+  for (const e of S.evolutionSuggestions.slice(0, 6)) {
+    wrap.append(h('div', { class: 'card', style: 'display:grid;gap:6px' },
+      h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: e.title }), h('span', { class: 'pill-tag', text: e.status })),
+      h('p', { class: 'field-hint', text: e.rationale }),
+      h('div', { class: 'actions' },
+        e.status === 'proposed' ? button('Apply', () => { void api.applyEvolution(e.id).then(() => act.refresh()).catch(act.problem); }, 'btn-ghost') : null,
+        e.status === 'applied' ? button('Rollback', () => { void api.rollbackEvolution(e.id).then(() => act.refresh()).catch(act.problem); }, 'btn-danger') : null)));
+  }
+  const [nameL, nameIn] = textField('Teach-Once skill name', { placeholder: 'fast-verify', mono: true });
+  const [bodyL, bodyIn] = textField('Skill instructions', { placeholder: '# Fast Verify\ncargo test --locked' });
+  wrap.append(h('div', { class: 'card', style: 'display:grid;gap:8px' },
+    nameL, bodyL,
+    h('div', { class: 'actions' },
+      button('Save & sync skill', () => {
+        if (!nameIn.value.trim() || !bodyIn.value.trim()) { act.tell('Skill name and body required'); return; }
+        void api.saveLocalSkill({ name: nameIn.value.trim(), description: 'Teach-Once workflow skill', body_md: bodyIn.value.trim() })
+          .then(async () => { nameIn.value = ''; bodyIn.value = ''; act.tell('Skill saved and synced to isolated homes', 'info'); await act.refresh(); })
+          .catch(act.problem);
+      }, 'btn-primary', { 'data-focus-key': 'save-skill' }))));
+  for (const sk of S.localSkills.slice(0, 4)) {
+    wrap.append(h('div', { class: 'card row' },
+      h('div', { class: 'grow' }, h('div', { class: 'card-title', text: sk.name + ' · v' + sk.version + (sk.enabled ? '' : ' (disabled)') }), h('p', { class: 'field-hint', text: sk.description })),
+      sk.supersedes_id ? button('Rollback', () => { void api.rollbackLocalSkill(sk.id).then(() => act.refresh()).catch(act.problem); }, 'btn-ghost') : null));
+  }
+  return wrap;
+}
+
+function communitySection(api: Api, act: Actions): HTMLElement {
+  const wrap = h('div', { class: 'card', style: 'display:grid;gap:10px' });
+  const preview = h('p', { class: 'field-hint mono', text: 'Opt-in is disabled by default. Nothing is ever uploaded automatically.' });
+  wrap.append(
+    h('p', { class: 'field-hint', text: 'When explicitly enabled, Polyclave generates a locally redacted markdown draft (stripping paths, emails, and secrets) for your review.' }),
+    h('div', { class: 'actions' },
+      button('Enable & preview redacted draft', () => {
+        void api.setCommunityOptIn(true).then(() => api.communityDraft()).then(d => {
+          preview.textContent = d.title + ' (stripped ' + d.stripped_items + ' items): ' + d.redacted_markdown.slice(0, 140);
+        }).catch(act.problem);
+      }, 'btn-ghost', { 'data-focus-key': 'preview-community' })),
+    preview);
+  return wrap;
+}
+
 export function openSettings(api: Api, act: Actions, setTheme: (light: boolean) => void): void {
   const sections: [string, string, () => Node[]][] = [
     ['usage', 'Usage & limits', () => [vendorCards()]],
     ['devices', 'Devices & pairing', () => [remoteDevicesSection(api, act)]],
     ['mesh', 'AgentMesh nodes', () => [meshSection(api, act)]],
     ['notify', 'Private notifications', () => [notifySection(api, act)]],
+    ['cua', 'CUA desktop lock', () => [cuaSection(api, act)]],
+    ['evolution', 'Evolution & skills', () => [evolutionAndSkillsSection(api, act)]],
+    ['community', 'Community draft', () => [communitySection(api, act)]],
     ['context', 'Context', () => {
       const ctx = S.usage.reduce((n, u) => Math.max(n, u.context ?? 0), 0);
       const canvas = h('canvas', { id: 'settings-vial', 'aria-hidden': 'true' });
