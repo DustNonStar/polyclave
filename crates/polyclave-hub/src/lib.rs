@@ -1,0 +1,20 @@
+//! Hub providers and the canonical conversation boundary.
+pub mod api_provider;
+pub mod provider;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("provider profile is invalid or unavailable")]
+    Profile,
+    #[error("provider credential is unavailable")]
+    Credential,
+    #[error("provider could not complete the request")]
+    Transport,
+    #[error("provider returned an invalid or incomplete stream")]
+    Protocol,
+    #[error("provider response exceeded the configured bound")]
+    Limit,
+    #[error("the local conversation ledger could not be accessed")]
+    Store,
+}
+pub type Result<T> = std::result::Result<T, Error>;

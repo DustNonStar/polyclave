@@ -5,6 +5,7 @@ members = [
   "crates/polyclave-store",
   "crates/polyclave-adapters",
   "crates/polyclave-core",
+  "crates/polyclave-hub",
   "bins/polyclaved",
 ]
 resolver = "2"

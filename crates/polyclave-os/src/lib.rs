@@ -230,3 +230,21 @@ pub fn exclude_old_supervisor(identity: &ProcessIdentity) -> io::Result<()> {
         std::thread::park_timeout(std::time::Duration::from_millis(20));
     }
 }
+
+/// Reads only an explicitly bound native credential. Never falls back to a mock store.
+pub fn read_provider_credential(service: &str, account: &str) -> io::Result<String> {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        keyring::Entry::new(service, account)
+            .and_then(|entry| entry.get_password())
+            .map_err(|_| io::Error::other("native credential unavailable"))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (service, account);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native credential store is not configured",
+        ))
+    }
+}
