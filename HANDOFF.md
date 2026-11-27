@@ -990,3 +990,50 @@ Branch `claude/approval-card-evidence-a09726` (`35aece8`, `b117cc4`) was fast-fo
 - `AGENTS.md` 和 `GEMINI.md` 第 1、3 条还写着"Keep the Node tests unchanged…""For archived Node-only work, use the legacy check"，但 Node 测试已经随 `legacy-node` 一起删除了。
 - v5 设计规范里还没写入今天的三项所有者决定（按 origin 发布、A + C、里程碑收窄）。
 - 这三个都是规则或设计文档，需要所有者确认后再改。
+
+## 2026-11-27 独立安全与运行链路审查（Gemini，基于 `main@82a8107`）
+
+范围：在 `main@82a8107` 上对照实际运行链路做独立审查，补充上方“详细复查（合并审查者）”的发现，供下一轮复查与修复参考。
+
+### 新发现的问题（均未修）
+
+1. **[高危安全] `ScmObserver` 绕过 Admission Policy，把外部 GitHub 评论直接写成 `source='user'`**。
+   - **位置**：`crates/polyclave-hub/src/scm_observer.rs:72-76`。
+   - **现象与影响**：`emit_event` 直接调用 `self.store.hub_enqueue(hub_id, &intent, &event.summary)`，未经过 `Triage::inferred`。外部 PR 评论与机器人消息以 `source='user'` 落库，存在间接提示词注入风险，且可被误认为本人显式消息从而满足 `basis_msg_id`。
+   - **修法与验收**：存储层拆出外部事件入队方法（强制 `source='host'`）；`ScmObserver` 必须经 `Triage::inferred` 过滤 `bot_actors_json` 与 `inferred_mode` 后再入队。补反例测试验证外部评论永不落为 `source='user'`。
+
+2. **[阻断 + 安全] 手机端 Tailscale 访问 403，且配对交换接口可伪造 `peer_identity`**。
+   - **位置**：`bins/polyclaved/src/auth.rs:32-38`；`bins/polyclaved/src/routes.rs:300-316`。
+   - **现象与影响**：
+     - `LocalAuth::allowed_origin` 仅放行 `http://127.0.0.1:{port}` 与 `tauri://localhost`（及 `http/https://tauri.localhost`），手机经 `https://<host>.ts.net` 发 POST 批准会被拒 403。
+     - `exchange_pairing` 挂载在 `public_api`（无 Host/Origin 校验），且第 312 行 `let peer = header_peer.or(body.peer_identity);` 信任客户端自报的 `peer_identity`。
+   - **修法与验收**：当存在受信任 Tailscale/Mesh 身份头且请求 `Host` 与 `Origin` 主机名一致（同源 `https://<host>`）时放行，仍拒绝跨站 Origin；移除 `exchange_pairing` 的 `body.peer_identity` 兜底（仅认受信任反向代理/Tailscale 身份头），并补 Host/Origin 校验与回归测试。
+
+3. **[逻辑缺陷] `ScmObserver` 把 GitHub Review ID 与 Issue Comment ID 混用同一个游标**。
+   - **位置**：`crates/polyclave-hub/src/scm_observer.rs:152-205`。
+   - **现象与影响**：`poll_once` 用同一个 `cursor.last_comment_id` 与 `max_seen_id` 比较 `review.id` 和 `comment.id`。GitHub 上两者是独立自增序列，ID 较小的一侧会被永久跳过。
+   - **修法与验收**：在 `scm_observer_cursors` 中拆分 `last_review_id` 与 `last_comment_id`（沿用 live-schema 幂等升级步骤，不撞 `user_version == 10` 测试），补交叉 ID 顺序的回归测试。
+
+4. **[功能断链] `ScmObserver` 事件无法触发手机私密推送通知**。
+   - **位置**：`crates/polyclave-hub/src/scm_observer.rs:77-81`；`crates/polyclave-hub/src/notify.rs:148-163`。
+   - **现象与影响**：`emit_event` 写入 `ChangeTopic::PrGate` 的 `ObservedEvent` 只有 `kind`（`ci_failure` / `merge_conflict` / `human_review` 等）而无 `status` 字段；`classify_attention_change` 第 153 行强制取 `payload.get("status")`，导致 CI 失败、合并冲突、人工评审永远不会唤醒通知。
+   - **修法与验收**：`classify_attention_change` 同时识别 `topic == "pr_gate"` 下的 `kind`（`ci_failure` / `merge_conflict` / `human_review`），只发元数据摘要，补单测。
+
+5. **[适配缺口] `dsh` Worker 仍未注入 `mcp_url`**。
+   - **位置**：`crates/polyclave-adapters/src/dsh.rs:34-49`。
+   - **现象与影响**：`2aec8e4` 已移除无效的 `--model` 参数，但 `dsh_worker` 仍只设置了 `DSH_HOME` 与 `POLYCLAVE_MCP_TOKEN`，从未把 `ctx.mcp_url` 写入配置或传给 `dsh`，真实 `dsh` 无法调用 `submit_result`。
+   - **修法与验收**：结合 `PLAN-ISSUES.md` 中 `dsh` 模型选择条目一并推进，需先实测 `dsh` 支持的 MCP 配置方式，再补齐注入与测试。
+
+### 统一修复优先级建议（供 DeepSeek v4.1 Flash 复查与接手修复）
+
+合并上方“详细复查（合并审查者）”的 6 项与本节 5 项，建议按以下顺序修复：
+
+- **P0（主线用户故事阻断）**：
+  1. PR 门禁首次推送防覆盖、24 KB diff 检查前置到推送前、返工路径越界转人工补发 Hub 通知（合并审查者 #1/#3/#4）。
+  2. Tailscale 同源放行与 `exchange_pairing` 移除 `body.peer_identity` 兜底及 Host/Origin 校验（Gemini #2）。
+  3. `ScmObserver` 禁写 `source='user'`（经 `Triage::inferred` + `source='host'`）、拆分 `last_review_id` / `last_comment_id` 游标、接入 `notify.rs` 私密推送（Gemini #1/#3/#4）。
+  4. 按 SHA 记录测试结果供审批卡展示（`PLAN-ISSUES.md` detail 条目）。
+- **P1（次要缺陷）**：
+  5. Mesh `request_id` 按发送节点与 Hub 会话做命名空间隔离，429/400/403 退还主控 Ticket 额度（合并审查者 #2/#5）。
+  6. 审批卡 `Worker's claim` 取值优化（合并审查者 #6）。
+  7. `dsh` 注入 `mcp_url` 与模型选择（Gemini #5 及 `PLAN-ISSUES.md` detail 条目）。
