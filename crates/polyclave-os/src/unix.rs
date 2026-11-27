@@ -44,6 +44,7 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
         .args(wrapper_arguments(spec))
         .current_dir(&spec.cwd)
         .env_clear()
+        .env_clear()
         .envs(spec.env.iter().cloned())
         .process_group(0)
         .stdin(Stdio::piped())
