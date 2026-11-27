@@ -4,7 +4,7 @@ use polyclave_hub::{
     pr_gate::{run_pr_gate as execute_pr_gate, ReviewerSpec},
 };
 use polyclave_proto::{CouncilLevel, PlanningPreference};
-use polyclave_store::{new_id, Error as StoreError};
+use polyclave_store::{new_id, remote_dispatch::RemoteOutcome, Error as StoreError};
 use rusqlite::OptionalExtension;
 
 impl Hub {
@@ -186,6 +186,8 @@ impl Hub {
                     request_id: Option<String>,
                     #[serde(default)]
                     run_id: Option<String>,
+                    #[serde(default)]
+                    ticket_id: Option<String>,
                 }
                 let input: DispatchRemoteArgs =
                     serde_json::from_value(args).map_err(|_| Error::Policy)?;
@@ -200,8 +202,20 @@ impl Hub {
                 {
                     return Err(Error::Policy);
                 }
+                // A remote Run is charged to the primary Ticket that dispatches it,
+                // under the same rules as dispatch_task.
+                let worker_run = input.action == "worker_run";
+                if worker_run
+                    && input
+                        .ticket_id
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty())
+                {
+                    return Err(Error::Policy);
+                }
                 let hub = self.clone();
                 let caller_repo = caller.repo.clone();
+                let caller_session = caller.session.clone();
                 let action = input.action.clone();
                 let (endpoint, req) = blocking(move || {
                     if hub.store.pause_state().map_err(|_| Error::Store)?.paused {
@@ -223,11 +237,45 @@ impl Hub {
                         allowed_actions: vec![action.clone()],
                         expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
                     };
+                    let mut instructions = input.instructions;
+                    if worker_run {
+                        let ticket = input.ticket_id.as_deref().ok_or(Error::Policy)?;
+                        let request_id = input.request_id.as_deref().ok_or(Error::Policy)?;
+                        let first = hub
+                            .store
+                            .remote_dispatch(&caller_session, request_id)
+                            .map_err(|_| Error::Store)?
+                            .is_none();
+                        let (ticket_repo, wrapped) = hub.triage.remote_ticket(
+                            &caller_session,
+                            ticket,
+                            &caller_repo,
+                            &instructions,
+                            first,
+                        )?;
+                        // One BEGIN IMMEDIATE transaction reserves runs_used and
+                        // records the (session, request_id) row; a resend is free.
+                        match hub.store.charge_remote_dispatch(
+                            &caller_session,
+                            request_id,
+                            &node.id,
+                            ticket,
+                            &ticket_repo,
+                        ) {
+                            Ok(_) => {}
+                            Err(StoreError::BudgetExceededError) => {
+                                let _ = hub.store.hub_close_ticket_budget(ticket);
+                                return Err(Error::Policy);
+                            }
+                            Err(_) => return Err(Error::Policy),
+                        }
+                        instructions = wrapped;
+                    }
                     let token = hub.mesh_policy().issue(scope).map_err(|_| Error::Policy)?;
                     let mut req = polyclave_mesh::RemoteDispatchRequest::new(
                         caller_repo,
                         action,
-                        input.instructions,
+                        instructions,
                         token,
                     );
                     req.vendor = input.vendor;
@@ -239,10 +287,49 @@ impl Hub {
                 })
                 .await?;
                 let client = polyclave_mesh::MeshClient::new().map_err(|_| Error::Transport)?;
-                client
-                    .dispatch(&endpoint, &req)
-                    .await
-                    .map_err(|_| Error::Policy)
+                let sent = client.dispatch(&endpoint, &req).await;
+                if !worker_run {
+                    return sent.map_err(|_| Error::Policy);
+                }
+                // Record what the receiver answered. The reservation stays in every
+                // case: the Hub retries with the same request_id, which is free.
+                let (outcome, run_id, detail) = match &sent {
+                    Ok(value) => (
+                        RemoteOutcome::Admitted,
+                        value["run_id"].as_str().map(str::to_owned),
+                        None,
+                    ),
+                    Err(polyclave_mesh::Error::Rejected(429)) => {
+                        (RemoteOutcome::AtLimit, None, Some("HTTP 429".to_owned()))
+                    }
+                    Err(polyclave_mesh::Error::Rejected(code)) => {
+                        (RemoteOutcome::Refused, None, Some(format!("HTTP {code}")))
+                    }
+                    Err(_) => (RemoteOutcome::Unreachable, None, None),
+                };
+                let hub = self.clone();
+                let session = caller.session.clone();
+                let request_id = req.request_id.clone().unwrap_or_default();
+                let _ = blocking(move || {
+                    hub.store
+                        .record_remote_dispatch_outcome(
+                            &session,
+                            &request_id,
+                            outcome,
+                            run_id,
+                            detail,
+                        )
+                        .map_err(|_| Error::Store)
+                })
+                .await;
+                match sent {
+                    Ok(value) => Ok(value),
+                    Err(polyclave_mesh::Error::Rejected(429)) => Err(Error::Http {
+                        status: 429,
+                        detail: "the node is at its concurrency limit; nothing was started. Retry later with the same request_id (not charged again)".into(),
+                    }),
+                    Err(_) => Err(Error::Policy),
+                }
             }
             _ => {
                 let hub = self.clone();
@@ -571,7 +658,7 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
             ),
             tool(
                 "dispatch_remote",
-                "Dispatch an allowlisted action to an online federated mesh node using an attenuated capability token. Use action worker_run (with instructions, a required request_id that you reuse unchanged when retrying the same dispatch, and optional vendor, model, base_branch) to start a Worker Run on that node, and run_status (with run_id) to read its result.",
+                "Dispatch an allowlisted action to an online federated mesh node using an attenuated capability token. Use action worker_run (with instructions, the approved ticket_id it is charged to, a required request_id that you reuse unchanged when retrying the same dispatch, and optional vendor, model, base_branch) to start a Worker Run on that node; each new request_id uses one run of the Ticket's budget, and a retry with the same request_id, also after a restart, is not charged again. Use run_status (with run_id) to read its result.",
                 json!({
                     "node_id": string,
                     "action": string,
@@ -580,7 +667,8 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
                     "model": string,
                     "base_branch": string,
                     "request_id": string,
-                    "run_id": string
+                    "run_id": string,
+                    "ticket_id": string
                 }),
                 &["node_id", "action"],
             ),

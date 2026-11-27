@@ -1969,6 +1969,7 @@ async fn mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote(
         .unwrap();
 
     let scope = ToolScope::new(1, "hub", "hub", &repo);
+    insert_ticket(&primary.store, "t-mesh", "hub", &repo, 1, "active");
     let worker_run = json!({
         "node_id": "node-win",
         "action": "worker_run",
@@ -1976,7 +1977,8 @@ async fn mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote(
         "vendor": "codex",
         "model": "gpt-5",
         "base_branch": "main",
-        "request_id": "req-mesh-1"
+        "request_id": "req-mesh-1",
+        "ticket_id": "t-mesh"
     });
     let started: polyclave_mesh::RemoteWorkerResult = serde_json::from_value(
         primary
@@ -2476,4 +2478,509 @@ async fn mesh_concurrency_setting_persists_through_the_local_api_and_is_enforced
     assert_eq!(f.remote.runs.list().unwrap().len(), 1);
 
     f.remote.close().await;
+}
+
+/// Inserts a Ticket for `repo` owned by `hub` with a valid mandate.
+fn insert_ticket(store: &Store, id: &str, hub: &str, repo: &str, max_runs: u32, status: &str) {
+    let (id, hub, repo, status) = (
+        id.to_owned(),
+        hub.to_owned(),
+        repo.to_owned(),
+        status.to_owned(),
+    );
+    store
+        .write(move |db| {
+            db.execute(
+                "INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,
+                    status,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Remote work',?4,'explicit_user',?5,?6,'now','now')",
+                params![
+                    id,
+                    hub,
+                    repo,
+                    json!({"goal":"Add a CHANGELOG entry","allowed_paths":["CHANGELOG.md"],
+                        "forbidden_actions":[],"acceptance_criteria":["entry exists"]})
+                    .to_string(),
+                    max_runs,
+                    status
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn ticket_use(store: &Store, id: &str) -> (u32, String) {
+    let id = id.to_owned();
+    store
+        .read(move |db| {
+            Ok(db.query_row(
+                "SELECT runs_used,status FROM tickets WHERE id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+}
+
+struct MeshPair {
+    _p_dir: tempfile::TempDir,
+    _r_dir: tempfile::TempDir,
+    primary: Hub,
+    remote: Hub,
+    repo: String,
+    srv: tokio::task::JoinHandle<()>,
+}
+
+async fn mesh_pair() -> MeshPair {
+    let shared_key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (p_dir, primary, _rx) = test_hub().await;
+    primary.set_mesh_key(shared_key.clone());
+    let r_dir = tempfile::tempdir().unwrap();
+    let remote = mesh_worker_hub(r_dir.path()).await;
+    remote.set_mesh_key(shared_key);
+    let repo = mesh_git_repo(&r_dir.path().join("repo"));
+    remote
+        .store
+        .upsert_mesh_node(mesh_node("node-win", "http://127.0.0.1:1".into(), &[&repo]))
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().nest("/mesh", crate::hub_api::mesh_router(remote.clone()));
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    primary
+        .store
+        .upsert_mesh_node(mesh_node("node-win", format!("http://{addr}"), &[&repo]))
+        .unwrap();
+    MeshPair {
+        _p_dir: p_dir,
+        _r_dir: r_dir,
+        primary,
+        remote,
+        repo,
+        srv,
+    }
+}
+
+fn remote_worker_run(ticket: &str, request_id: &str) -> Value {
+    json!({
+        "node_id": "node-win",
+        "action": "worker_run",
+        "instructions": "Add a CHANGELOG entry.",
+        "base_branch": "main",
+        "ticket_id": ticket,
+        "request_id": request_id
+    })
+}
+
+#[tokio::test]
+async fn dispatch_remote_charges_the_primary_ticket_once_per_request_id() {
+    let p = mesh_pair().await;
+    insert_ticket(&p.primary.store, "t-remote", "hub", &p.repo, 2, "active");
+    let scope = ToolScope::new(1, "hub", "hub", &p.repo);
+
+    // The first dispatch reserves one run and records the key.
+    let first = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-remote", "req-a"),
+        )
+        .await
+        .unwrap();
+    let run_a = first["run_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-remote"),
+        (1, "active".into())
+    );
+    let row = p
+        .primary
+        .store
+        .remote_dispatch("hub", "req-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.node_id.as_str(),
+            row.ticket_id.as_str(),
+            row.outcome.as_str()
+        ),
+        ("node-win", "t-remote", "admitted")
+    );
+    assert_eq!(row.remote_run_id.as_deref(), Some(run_a.as_str()));
+    // The remote Worker got the Ticket mandate with the task, as dispatch_task does.
+    let remote_run = p.remote.runs.get(&run_a).unwrap();
+    assert!(remote_run
+        .instructions
+        .starts_with("Owner Ticket mandate (host data):"));
+    assert!(remote_run.instructions.ends_with("Add a CHANGELOG entry."));
+    // No Run is admitted on the primary.
+    assert!(p.primary.runs.list().unwrap().is_empty());
+
+    // A resend of the same key is not charged and reaches the same Run.
+    let again = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-remote", "req-a"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again["run_id"], first["run_id"]);
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-remote"),
+        (1, "active".into())
+    );
+    assert_eq!(p.remote.runs.list().unwrap().len(), 1);
+
+    // The same key cannot be moved to another Ticket.
+    insert_ticket(&p.primary.store, "t-other", "hub", &p.repo, 2, "active");
+    assert!(p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-other", "req-a")
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-other"),
+        (0, "active".into())
+    );
+
+    p.srv.abort();
+    p.remote.close().await;
+    p.primary.close().await;
+}
+
+#[tokio::test]
+async fn dispatch_remote_resend_after_a_crash_is_not_charged_twice_and_exhaustion_blocks() {
+    let p = mesh_pair().await;
+    insert_ticket(&p.primary.store, "t-crash", "hub", &p.repo, 2, "active");
+    let scope = ToolScope::new(1, "hub", "hub", &p.repo);
+
+    // Crash after the reservation, before anything was sent: the row exists,
+    // is still `reserved`, and the receiver has no Run.
+    let charged = p
+        .primary
+        .store
+        .charge_remote_dispatch("hub", "req-crash", "node-win", "t-crash", &p.repo)
+        .unwrap();
+    assert!(matches!(
+        charged,
+        polyclave_store::remote_dispatch::RemoteCharge::Charged(_)
+    ));
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-crash"),
+        (1, "active".into())
+    );
+    assert!(p.remote.runs.list().unwrap().is_empty());
+
+    // On resume the Hub finds its earlier dispatch by key and resends it:
+    // the Run is admitted once and the Ticket is not charged again.
+    let resumed = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-crash", "req-crash"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-crash"),
+        (1, "active".into())
+    );
+    assert_eq!(
+        p.primary
+            .store
+            .remote_dispatch("hub", "req-crash")
+            .unwrap()
+            .unwrap()
+            .remote_run_id
+            .as_deref(),
+        resumed["run_id"].as_str()
+    );
+    assert_eq!(p.remote.runs.list().unwrap().len(), 1);
+
+    // Crash after the receiver admitted the Run but before the answer was
+    // recorded: the row stays `reserved`; the resend returns the same Run.
+    p.primary
+        .store
+        .charge_remote_dispatch("hub", "req-lost", "node-win", "t-crash", &p.repo)
+        .unwrap();
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-crash"),
+        (2, "active".into())
+    );
+    let token = p
+        .remote
+        .mesh_policy()
+        .issue(polyclave_mesh::MeshScope {
+            node_id: "node-win".into(),
+            allowed_repos: vec![p.repo.clone()],
+            allowed_actions: vec!["worker_run".into()],
+            expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
+        })
+        .unwrap();
+    let (_, mandate_text) = p
+        .primary
+        .triage
+        .remote_ticket("hub", "t-crash", &p.repo, "Add a CHANGELOG entry.", false)
+        .unwrap();
+    let mut direct =
+        polyclave_mesh::RemoteDispatchRequest::new(&p.repo, "worker_run", mandate_text, token);
+    direct.base_branch = Some("main".into());
+    direct.request_id = Some("req-lost".into());
+    let (code, delivered) = post_mesh_dispatch(&p.remote, json!(direct)).await;
+    assert_eq!(code, StatusCode::OK, "{delivered}");
+    // The last slot was used, so the Ticket is exhausted yet still resendable.
+    let resent = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-crash", "req-lost"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resent["run_id"], delivered["run_id"]);
+    assert_eq!(p.remote.runs.list().unwrap().len(), 2);
+    assert_eq!(ticket_use(&p.primary.store, "t-crash").0, 2);
+
+    // A new key on the exhausted Ticket is refused before any network call and
+    // the Ticket waits on the user, exactly as dispatch_task does.
+    assert!(p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-crash", "req-new")
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-crash"),
+        (2, "blocked_on_user".into())
+    );
+    assert!(p
+        .primary
+        .store
+        .remote_dispatch("hub", "req-new")
+        .unwrap()
+        .is_none());
+    assert_eq!(p.remote.runs.list().unwrap().len(), 2);
+    // The atomic charge refuses on its own too, with BudgetExceededError.
+    insert_ticket(&p.primary.store, "t-one", "hub", &p.repo, 1, "active");
+    p.primary
+        .store
+        .charge_remote_dispatch("hub", "req-one-a", "node-win", "t-one", &p.repo)
+        .unwrap();
+    assert!(matches!(
+        p.primary
+            .store
+            .charge_remote_dispatch("hub", "req-one-b", "node-win", "t-one", &p.repo),
+        Err(polyclave_store::Error::BudgetExceededError)
+    ));
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-one"),
+        (1, "blocked_on_user".into())
+    );
+
+    p.srv.abort();
+    p.remote.close().await;
+    p.primary.close().await;
+}
+
+#[tokio::test]
+async fn dispatch_remote_refuses_a_foreign_wrong_repo_or_closed_ticket_before_sending() {
+    let (_dir, primary, _rx) = test_hub().await;
+    primary.set_mesh_key(b"0123456789abcdef0123456789abcdef".to_vec());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let app = axum::Router::new().fallback(move || {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            StatusCode::OK
+        }
+    });
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let repo = "/repo/mesh-primary";
+    primary
+        .store
+        .upsert_mesh_node(mesh_node("node-win", format!("http://{addr}"), &[repo]))
+        .unwrap();
+    primary
+        .store
+        .write(|db| {
+            db.execute(
+                "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                 VALUES('hub2','Other Hub','hub','/repo/mesh-primary','api','m1','now')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    insert_ticket(&primary.store, "t-foreign", "hub2", repo, 4, "active");
+    insert_ticket(
+        &primary.store,
+        "t-elsewhere",
+        "hub",
+        "/repo/other",
+        4,
+        "active",
+    );
+    insert_ticket(&primary.store, "t-done", "hub", repo, 4, "done");
+    insert_ticket(&primary.store, "t-cancelled", "hub", repo, 4, "cancelled");
+    insert_ticket(&primary.store, "t-proposed", "hub", repo, 4, "proposed");
+    insert_ticket(
+        &primary.store,
+        "t-blocked",
+        "hub",
+        repo,
+        4,
+        "blocked_on_user",
+    );
+    let scope = ToolScope::new(1, "hub", "hub", repo);
+
+    let mut cases: Vec<Value> = [
+        "t-foreign",
+        "t-elsewhere",
+        "t-done",
+        "t-cancelled",
+        "t-proposed",
+        "t-blocked",
+        "t-missing",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, t)| remote_worker_run(t, &format!("req-bad-{i}")))
+    .collect();
+    // A missing or blank ticket_id is refused too.
+    let mut no_ticket = remote_worker_run("", "req-bad-none");
+    no_ticket.as_object_mut().unwrap().remove("ticket_id");
+    cases.push(no_ticket);
+    cases.push(remote_worker_run("  ", "req-bad-blank"));
+    for args in cases {
+        assert!(
+            primary
+                .call_tool(&scope, "dispatch_remote", args.clone())
+                .await
+                .is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for t in [
+        "t-foreign",
+        "t-elsewhere",
+        "t-done",
+        "t-cancelled",
+        "t-proposed",
+        "t-blocked",
+    ] {
+        assert_eq!(ticket_use(&primary.store, t).0, 0, "{t}");
+    }
+    let rows: i64 = primary
+        .store
+        .read(|db| Ok(db.query_row("SELECT COUNT(*) FROM remote_dispatches", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    srv.abort();
+    primary.close().await;
+}
+
+#[tokio::test]
+async fn dispatch_remote_at_the_receiver_limit_is_retryable_and_charged_once() {
+    let p = mesh_pair().await;
+    insert_ticket(&p.primary.store, "t-limit", "hub", &p.repo, 3, "active");
+    let scope = ToolScope::new(1, "hub", "hub", &p.repo);
+    p.remote
+        .store
+        .set_mesh_node_concurrency("node-win", 1)
+        .unwrap();
+
+    let first = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-limit", "req-l1"),
+        )
+        .await
+        .unwrap();
+    let first_run = first["run_id"].as_str().unwrap().to_owned();
+    mesh_run_settled(&p.remote, &first_run).await;
+    force_run_status(&p.remote, &first_run, "running");
+
+    // The receiver is full: a clear 429 comes back, nothing is admitted, and the
+    // row records it. The reservation is kept.
+    let refused = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-limit", "req-l2"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, Error::Http { status: 429, .. }),
+        "{refused:?}"
+    );
+    assert_eq!(p.remote.runs.list().unwrap().len(), 1);
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-limit"),
+        (2, "active".into())
+    );
+    assert_eq!(
+        p.primary
+            .store
+            .remote_dispatch("hub", "req-l2")
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "at_limit"
+    );
+
+    // Once the slot frees, the same request_id goes through without a new charge.
+    force_run_status(&p.remote, &first_run, "done");
+    let second = p
+        .primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            remote_worker_run("t-limit", "req-l2"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(second["run_id"], first["run_id"]);
+    assert_eq!(
+        ticket_use(&p.primary.store, "t-limit"),
+        (2, "active".into())
+    );
+    let row = p
+        .primary
+        .store
+        .remote_dispatch("hub", "req-l2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.outcome, "admitted");
+    assert_eq!(row.remote_run_id.as_deref(), second["run_id"].as_str());
+    mesh_run_settled(&p.remote, second["run_id"].as_str().unwrap()).await;
+
+    p.srv.abort();
+    p.remote.close().await;
+    p.primary.close().await;
 }

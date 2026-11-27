@@ -82,6 +82,49 @@ impl Triage {
         }
         Ok(InferredAdmission::Proposal)
     }
+    /// Checks `ticket` for a mesh `worker_run` the way [`Triage::dispatch`]
+    /// checks it for a local Run: owned by `hub`, a valid mandate, the same
+    /// repository and, for a first dispatch (`first`), active with budget left;
+    /// an exhausted Ticket moves to `blocked_on_user`. Returns the repository
+    /// recorded on the Ticket and `instructions` wrapped in its mandate. The
+    /// charge itself is made atomically by `Store::charge_remote_dispatch`.
+    pub fn remote_ticket(
+        &self,
+        hub: &str,
+        ticket: &str,
+        repo: &str,
+        instructions: &str,
+        first: bool,
+    ) -> Result<(String, String)> {
+        let (saved, mandate) = self
+            .store
+            .hub_ticket_mandate(ticket)
+            .map_err(|_| Error::Policy)?;
+        if saved.hub != hub {
+            return Err(Error::Policy);
+        }
+        let mandate: Mandate = serde_json::from_value(mandate).map_err(|_| Error::Policy)?;
+        if !mandate.valid() {
+            return Err(Error::Policy);
+        }
+        let same_repo = saved.repo == repo
+            || matches!(
+                (
+                    polyclave_os::canonical_real_path(Path::new(&saved.repo)),
+                    polyclave_os::canonical_real_path(Path::new(repo)),
+                ),
+                (Ok(a), Ok(b)) if a == b
+            );
+        if !same_repo {
+            return Err(Error::Policy);
+        }
+        if first {
+            self.store
+                .hub_ticket_for_dispatch(hub, ticket, &saved.repo)
+                .map_err(|_| Error::Policy)?;
+        }
+        Ok((saved.repo, under_mandate(&mandate, instructions)))
+    }
     pub fn dispatch(&self, mut request: RunRequest) -> Result<(RunDto, bool)> {
         let ticket = request.ticket_id.as_ref().ok_or(Error::Policy)?.clone();
         let repo =
@@ -101,11 +144,7 @@ impl Triage {
         self.store
             .hub_ticket_for_dispatch(&request.hub_session_id, &ticket, repo)
             .map_err(|_| Error::Policy)?;
-        request.instructions = format!(
-            "Owner Ticket mandate (host data):\n{}\n\nTask under this mandate:\n{}",
-            json!(mandate),
-            request.instructions
-        );
+        request.instructions = under_mandate(&mandate, &request.instructions);
         // RunManager reserves the budget with admission in the single SQLite
         // writer. A competing caller cannot spend a slot this check observed.
         match self.runs.accept(request) {
@@ -117,6 +156,15 @@ impl Triage {
             Err(_) => Err(Error::Policy),
         }
     }
+}
+
+/// The Worker's instructions, prefixed with the Ticket mandate as host data.
+fn under_mandate(mandate: &Mandate, instructions: &str) -> String {
+    format!(
+        "Owner Ticket mandate (host data):\n{}\n\nTask under this mandate:\n{}",
+        json!(mandate),
+        instructions
+    )
 }
 
 #[cfg(test)]

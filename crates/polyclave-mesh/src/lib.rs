@@ -66,6 +66,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("mesh transport failed")]
     Transport,
+    #[error("remote node answered HTTP {0}")]
+    Rejected(u16),
     #[error("mesh serialization failed")]
     Serde(#[from] serde_json::Error),
 }
@@ -379,7 +381,7 @@ impl MeshClient {
             .await
             .map_err(|_| Error::Transport)?;
         if !resp.status().is_success() {
-            return Err(Error::Denied("remote node rejected request"));
+            return Err(Error::Rejected(resp.status().as_u16()));
         }
         resp.json::<serde_json::Value>()
             .await

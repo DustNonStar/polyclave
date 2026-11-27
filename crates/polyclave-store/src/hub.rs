@@ -585,7 +585,7 @@ fn load_ticket(db: &Connection, id: &str) -> Result<TicketIntent> {
     .optional()?
     .ok_or(Error::NotFound)
 }
-fn publish_ticket(db: &Connection, id: &str) -> Result<TicketIntent> {
+pub(crate) fn publish_ticket(db: &Connection, id: &str) -> Result<TicketIntent> {
     let t = load_ticket(db, id)?;
     Store::append_change(db, ChangeTopic::Ticket, id, &serde_json::to_value(&t)?)?;
     Ok(t)
