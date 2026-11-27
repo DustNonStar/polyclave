@@ -248,3 +248,10 @@ pub fn read_provider_credential(service: &str, account: &str) -> io::Result<Stri
         ))
     }
 }
+
+#[cfg(any(target_os = "macos", windows))]
+pub fn write_provider_credential(service: &str, account: &str, value: &str) -> io::Result<()> {
+    keyring::Entry::new(service, account)
+        .and_then(|entry| entry.set_password(value))
+        .map_err(|_| io::Error::other("native credential could not be saved"))
+}

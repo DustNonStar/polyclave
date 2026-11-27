@@ -9,3 +9,4 @@ node_modules/
 # Rust workspace and archived Node dependencies
 /target/
 /legacy-node/node_modules/
+/apps/polyclave-app/src-tauri/icons/

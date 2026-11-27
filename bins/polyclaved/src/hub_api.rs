@@ -548,6 +548,11 @@ async fn mcp(State(hub): State<Hub>, headers: HeaderMap, Json(input): Json<Value
 
 pub fn router(hub: Hub) -> Router {
     Router::new()
+        .route(
+            "/profiles/{id}/credential-binding",
+            axum::routing::get(binding),
+        )
+        .route("/tickets", axum::routing::get(tickets))
         .route("/profiles", axum::routing::get(profiles))
         .route("/sessions/{id}/profile", post(profile))
         .route("/sessions/{id}/messages", post(enqueue).get(messages))
@@ -676,4 +681,18 @@ async fn profile(State(hub): State<Hub>, Path(id): Path<String>, Json(p): Json<P
         .map_err(store_status)?;
     hub.kick(id);
     Ok(Json(json!({"updated":true})))
+}
+
+async fn binding(State(hub): State<Hub>, Path(id): Path<String>) -> Web {
+    let p = ApiHubProvider::from_registered(&hub.store, &id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let identity = p.credential_binding();
+    Ok(Json(
+        json!({"service":identity.service,"account":identity.account}),
+    ))
+}
+async fn tickets(State(hub): State<Hub>) -> Web {
+    Ok(Json(json!(hub
+        .store
+        .hub_tickets()
+        .map_err(store_status)?)))
 }

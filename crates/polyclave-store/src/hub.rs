@@ -557,3 +557,15 @@ impl Store {
         })
     }
 }
+
+impl Store {
+    pub fn hub_tickets(&self) -> Result<Vec<TicketIntent>> {
+        self.read(|db| {
+            let mut q = db.prepare("SELECT id FROM tickets ORDER BY created_at,id")?;
+            let ids = q
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids.iter().map(|id| load_ticket(db, id)).collect()
+        })
+    }
+}
