@@ -130,6 +130,7 @@ impl Store {
         // so they apply once to every v10 ledger, new or existing.
         crate::mesh_limits::upgrade(&migration)?;
         crate::remote_dispatch::upgrade(&migration)?;
+        crate::scm_cursors::upgrade(&migration)?;
         migration.commit()?;
         let (tx, rx) = mpsc::sync_channel::<Job>(128);
         let thread = std::thread::Builder::new()

@@ -205,7 +205,13 @@ impl ScmObserver {
                 .await
                 .map_err(map_scm_err)?;
 
-            let mut max_seen_id = cursor.last_comment_id.unwrap_or(0);
+            // Reviews and comments are numbered in separate GitHub sequences, so
+            // each has its own cursor; sharing one would hide the smaller ids.
+            let mut last_review_id = self
+                .store
+                .scm_review_cursor(&gate.repo_slug, pr_number)
+                .map_err(map_store_err)?
+                .unwrap_or(0);
 
             for review in details.reviews {
                 // Ignore host-submitted reviews carrying `[agent-reviewer · …]`.
@@ -213,10 +219,8 @@ impl ScmObserver {
                     continue;
                 }
                 let rid = review.id as i64;
-                if rid > cursor.last_comment_id.unwrap_or(0) {
-                    if rid > max_seen_id {
-                        max_seen_id = rid;
-                    }
+                if rid > last_review_id {
+                    last_review_id = rid;
                     let ev = ObservedEvent {
                         gate_id: gate.id.clone(),
                         repo_slug: gate.repo_slug.clone(),
@@ -237,6 +241,8 @@ impl ScmObserver {
                     }
                 }
             }
+
+            let mut max_seen_id = cursor.last_comment_id.unwrap_or(0);
 
             for comment in details.comments {
                 if is_agent_reviewer_marker(&comment.body) {
@@ -266,6 +272,18 @@ impl ScmObserver {
                         events.push(ev);
                     }
                 }
+            }
+
+            if last_review_id
+                > self
+                    .store
+                    .scm_review_cursor(&gate.repo_slug, pr_number)
+                    .map_err(map_store_err)?
+                    .unwrap_or(0)
+            {
+                self.store
+                    .save_scm_review_cursor(&gate.repo_slug, pr_number, last_review_id)
+                    .map_err(map_store_err)?;
             }
 
             if max_seen_id > cursor.last_comment_id.unwrap_or(0) {
@@ -464,6 +482,87 @@ mod tests {
             .unwrap(),
         );
         ScmObserver::new(store.clone(), scm, Some("hub".into()))
+    }
+
+    #[tokio::test]
+    async fn a_large_review_id_does_not_hide_later_comments_with_smaller_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("ledger")).unwrap();
+        create_gate(&store);
+
+        // GitHub numbers reviews and issue comments independently: the review
+        // id here is far above the comment ids.
+        let comments: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(vec![json!({
+                "id": 5, "user": { "login": "alice" }, "body": "first", "created_at": "t"
+            })]));
+        let state = comments.clone();
+        let router = Router::new()
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}",
+                get(|| async {
+                    Json(json!({
+                        "number": 42, "node_id": "PR_node_42", "state": "open", "merged": false,
+                        "mergeable": true, "mergeable_state": "clean",
+                        "html_url": "https://github.com/org/repo/pull/42",
+                        "head": { "sha": "sha_abc" }, "auto_merge": null
+                    }))
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                get(|| async { Json(json!({ "check_runs": [] })) }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/issues/{num}/comments",
+                get(move || {
+                    let state = state.clone();
+                    async move { Json(json!(*state.lock().unwrap())) }
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}/reviews",
+                get(|| async {
+                    Json(json!([{
+                        "id": 900, "user": { "login": "bob" }, "state": "APPROVED",
+                        "commit_id": "sha_abc", "body": "ok", "submitted_at": "t"
+                    }]))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let observer = observer_for(&store, &format!("http://{addr}"));
+
+        let first = observer.poll_once().await.unwrap();
+        assert!(first
+            .iter()
+            .any(|e| e.kind == ObservedEventKind::HumanReview));
+        assert!(first.iter().any(|e| e.summary.contains("comment by alice")));
+        assert_eq!(store.scm_review_cursor("org/repo", 42).unwrap(), Some(900));
+
+        // A new comment whose id is still below the review id must be seen.
+        comments.lock().unwrap().push(json!({
+            "id": 6, "user": { "login": "carol" }, "body": "second", "created_at": "t"
+        }));
+        let second = observer.poll_once().await.unwrap();
+        assert!(
+            second
+                .iter()
+                .any(|e| e.summary.contains("comment by carol")),
+            "a comment below the review id must not be skipped: {second:?}"
+        );
+        assert!(!second
+            .iter()
+            .any(|e| e.summary.contains("comment by alice")));
+
+        // The review is not repeated either.
+        assert!(!second
+            .iter()
+            .any(|e| e.kind == ObservedEventKind::HumanReview));
+        server.abort();
     }
 
     #[tokio::test]

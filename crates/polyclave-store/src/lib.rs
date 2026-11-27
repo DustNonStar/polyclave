@@ -4,6 +4,7 @@ mod memory;
 pub mod mesh_limits;
 mod publish;
 pub mod remote_dispatch;
+mod scm_cursors;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
 pub use publish::{insert_run_origin_snapshot, OriginSnapshot};
 mod stage2;
