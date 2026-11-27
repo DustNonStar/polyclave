@@ -224,3 +224,15 @@ Options:
 **What the fix does now:** `dsh_args` no longer takes a model; `dsh_worker` refuses a set model with `Error::DshModelUnsupported` ("`dsh headless` has no way to choose a model; leave the model unset for dsh"), and the runner shows that message. The Hub CLI transport (`crates/polyclave-hub/src/cli_provider.rs`) no longer passes `--model` for `dsh` and refuses a non-`default` model with `Error::Profile`. A dsh Worker therefore runs on whatever model its isolated profile defaults to.
 
 **Proposed follow-up:** in a job that allows one real `dsh` run, find the config key the headless agent obeys, then set it through a `--patch <path>` overlay written under the isolated `DSH_HOME` (never the user's `~/.dsh`), and lift the refusal with a test that checks the overlay. Separately, item 9 also notes that `mcp_url` is not injected into `dsh`; this fix does not cover that.
+
+## [detail] The host records no test result per SHA, so the approval card cannot show one
+
+Found while building the approval evidence card (2026-11-27). Nothing stores "tests for SHA X":
+
+- `submit_result` (`crates/polyclave-adapters/src/mcp.rs`, `Submit`) carries only `run_id`, `branch` and `sha`; the stored receipt in `results.payload_json` has no test summary and no list of unfinished or unverified items.
+- The SCM observer (`crates/polyclave-hub/src/scm_observer.rs`) reads GitHub check runs for a PR's head SHA but only emits failures as Hub queue text and `pr_gate` change-log entries, and keeps `scm_observer_cursors.last_check_sha` (which SHA it looked at, not whether checks passed). Nothing ties that to a Run's SHA.
+
+So the card's "Tests for this exact SHA" row always says "No test result recorded for <sha>", and its "Request satisfied" row says the Worker cannot list unfinished items.
+
+**What recording them would need (not built):** a `test_results` table keyed by `(run_id, sha, source)` with `source` in {`worker_claim`, `host_run`, `ci`}, status (`passed`/`failed`/`pending`), a summary and the time; for CI, the SCM observer writes one row per check-run conclusion for `head_sha` when it equals a Run's `result_sha`/`observed_sha`; optionally an extended `submit_result` with `tests` and `not_done` fields stored as the Worker's claim and shown labelled as such. `RunEvidenceDto` would then gain a list filtered by the exact SHA, so a result from an older SHA can never show. A host-run test (the host itself running the project's tests on the mirror SHA) is the only source that is not a claim and would need a direction decision.
+

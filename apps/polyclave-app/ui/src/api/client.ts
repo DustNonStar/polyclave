@@ -5,7 +5,7 @@ import type {
   ClientKind, CommunityDraftDto, CouncilDto, CouncilLevel, CuaLockDto, EvolutionSuggestionDto,
   JsonValue, LocalSkillDto, MemoryItemDto, MemoryKind, MeshNodeDto, MeshNodeLimitDto, NotificationChannelDto,
   NotificationChannelKind, PairedDeviceDto, PairingTicketDto, PauseStateDto, PlanningPreference,
-  PrGateDto, RunDto, SessionDto, Vendor,
+  PrGateDto, RunDto, RunEvidenceDto, SessionDto, Vendor,
 } from '../generated/proto.js';
 
 export interface Profile { id: string; display_name: string; kind: string; models: string[] }
@@ -17,7 +17,8 @@ export interface HubMessage {
 }
 export interface TicketIntent { id: string; hub: string; repo: string; used: number; limit: number; status: string }
 export interface CommitSummary { files: string; commits: string }
-export interface RunDetail { run: RunDto; commit: CommitSummary | null }
+/** `evidence` is absent from daemons older than the approval-evidence change. */
+export interface RunDetail { run: RunDto; commit: CommitSummary | null; evidence?: RunEvidenceDto | null }
 export interface ProviderUsage {
   vendor: string; tokens?: number | null; cost?: number | null; context?: number | null; turns?: number | null;
   five_hour?: number | null; weekly?: number | null; balance?: number | null; series?: number[] | null;

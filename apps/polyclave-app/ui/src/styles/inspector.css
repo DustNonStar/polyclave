@@ -86,6 +86,20 @@
 .diff-row .del { color: var(--red); }
 .diff-row.commit .path { color: var(--ink); font-family: var(--font); font-size: var(--fs-sm); }
 .diff-row.commit .hash { color: var(--faint); }
+/* Approval evidence: summary line, then delivery / tests / decision rows */
+.evidence { display: grid; gap: 10px; min-width: 0; }
+.evidence-summary { font-size: var(--fs-md); font-weight: 600; color: var(--ink); line-height: 1.4; overflow-wrap: anywhere; }
+.evidence-rows { display: grid; gap: 0; margin: 0; min-width: 0; }
+.evidence-row { position: relative; display: grid; gap: 4px; padding: 9px 0 9px 12px; border-top: 1px solid var(--line-soft); min-width: 0; }
+.evidence-row::before { content: ""; position: absolute; left: 0; top: 11px; bottom: 11px; width: var(--rail); border-radius: 2px; background: var(--line); }
+.evidence-row[data-tone="done"]::before { background: var(--done); }
+.evidence-row[data-tone="review"]::before { background: var(--orange); }
+.evidence-row[data-tone="fail"]::before { background: var(--red); }
+.evidence-row dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.evidence-label { flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink); }
+.evidence-row dd { margin: 0; display: grid; gap: 3px; min-width: 0; }
+.evidence-fact { font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.evidence-source { font-size: var(--fs-xs); color: var(--mute); line-height: 1.45; overflow-wrap: anywhere; }
 .decision { display: grid; gap: 10px; }
 .decision .actions button { min-height: 34px; }
 .decision-note { font-size: var(--fs-xs); color: var(--faint); line-height: 1.5; }

@@ -12,6 +12,7 @@ import { icon } from './icons.js';
 import type { IconName } from './icons.js';
 import { dispatchWorker, rememberRule, startCouncilDialog } from './flows.js';
 import { areaField } from './dialog.js';
+import { approvalEvidence, evidenceCard } from './evidence.js';
 
 const PANELS: readonly [Panel, IconName][] = [['Topology', 'topology'], ['Review', 'review'], ['Files', 'file'], ['Memory', 'memory']];
 
@@ -379,7 +380,8 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
     r.detail ? h('p', { class: 'card-sub', text: r.detail }) : null,
     r.resolution ? h('p', { class: 'card-sub', text: 'Resolution: ' + r.resolution }) : null);
 
-  const nodes: Node[] = [sub, runs.length > 1 ? picker : h('span'), head];
+  const evidence = approvalEvidence(r, detail?.evidence);
+  const nodes: Node[] = [sub, runs.length > 1 ? picker : h('span'), head, evidenceCard(evidence)];
 
   const diff = h('section', { class: 'diff-well' }, h('div', { class: 'diff-title' }, icon('branch', 'ic--sm'), 'What changed', sha ? h('span', { class: 'sha', text: short(sha) }) : null));
   if (detail?.commit) {
@@ -420,7 +422,7 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
       if (sha) acts.append(button([icon('check'), 'Accept ' + short(sha)], () => { confirmAccept = r.id; void renderInspector(api, act).then(() => document.querySelector<HTMLElement>('[data-focus-key="confirm-accept"]')?.focus()); }, 'btn-primary', { 'data-focus-key': 'accept' }));
       acts.append(button('Mark failed', () => resolve('fail'), 'btn-danger', { 'data-focus-key': 'fail' }), button('Allow retry', () => resolve('allow_retry'), 'btn-ghost', { 'data-focus-key': 'allow-retry' }));
     }
-    decision.append(h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: 'Host verification decision' })), noteL, err, acts,
+    decision.append(h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: sha ? 'Your decision on ' + short(sha) : 'Your decision' })), noteL, err, acts,
       h('p', { class: 'decision-note', text: sha ? 'Accept applies only to ' + short(sha) + ', the SHA shown here. Allow retry supersedes this attempt and starts a fresh branch on the next run.' : 'No result SHA was observed, so this run can only be failed or retried.' }));
   } else {
     decision.append(h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: r.status === 'done' ? 'Accepted and verified' : r.status === 'failed' ? 'Closed as failed' : 'Worker in progress' })));
