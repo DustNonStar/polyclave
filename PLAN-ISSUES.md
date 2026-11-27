@@ -163,7 +163,7 @@ Nothing for this item is implemented on branch `claude/mesh-run-budget-b7a297`; 
 
 **Resolved (project owner, 2026-11-27): A + C.** (A) Each remote Run is charged to the primary Ticket that dispatched it: `dispatch_remote` with `action = worker_run` requires an active, same-repository Ticket owned by the calling Hub session. In one primary transaction it reserves `runs_used` and records a remote-dispatch row keyed by (Hub session, `request_id`). A resend finds that row and is not charged again, and exhaustion behaves exactly as in `dispatch_task`. (C) Each receiver also enforces a per-node **concurrency** limit: at most N mesh-admitted Runs from one `mesh_nodes` row may be non-terminal at once. **The default is N = 3**, chosen to keep vendor quota from draining too fast. The user can change N per node in Settings. A dispatch over the limit is refused with a clear, retryable status and is not queued silently. C is a concurrency cap, not a total; the total budget stays with A.
 
-## [detail] Decision A (charge the primary Ticket) breaks an existing mesh test that sends `worker_run` without a Ticket
+## [detail, resolved] Decision A (charge the primary Ticket) breaks an existing mesh test that sends `worker_run` without a Ticket
 
 Decision A above makes `ticket_id` required for `dispatch_remote` with `action = worker_run`. One existing test encodes the old behaviour: `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote` (`bins/polyclaved/src/hub_api/tests.rs`, the `worker_run` JSON at about line 1972 has no `ticket_id`) unwraps the result at line 1985.
 
@@ -181,8 +181,12 @@ Every other test passes, including the four new A tests. The rules say not to ch
 
 **Proposed fix (exact test change to authorize):** in that test, before the first `call_tool`, insert an active Ticket owned by session `hub` for `repo` with a valid mandate and `max_runs` ≥ 1 (the new helper `insert_ticket(&primary.store, "t-mesh", "hub", &repo, 1, "active")` does this), and add `"ticket_id": "t-mesh"` to the `worker_run` JSON. Nothing else changes: the existing assertions stay as they are (the remote Run, its single-Run bookkeeping Ticket on the receiver, `primary.runs.list()` still empty, idempotent resend, `run_status`). Optionally add `assert_eq!` that the primary Ticket's `runs_used` is 1 after both sends. Once authorized, `wip/mesh-budget-a` gets that one test edit and is rebased onto the review branch.
 
-## [detail] The mesh schema steps check the live schema instead of bumping `user_version`
+**Resolved:** Approved by merge reviewer 2026-11-27: consequence of owner decision A + C; only adds a Ticket and ticket_id, no assertion changed.
+
+## [detail, resolved] The mesh schema steps check the live schema instead of bumping `user_version`
 
 The task asked for a store migration that keeps existing databases upgradable. The existing test `run_origin_snapshot_migrates_from_v9_keeps_the_first_snapshot_and_survives_reopen` (`crates/polyclave-store/tests/store.rs:872`) asserts `user_version == 10` after upgrading, so a v11 bump would break it. Instead, `mesh_limits::upgrade` and `remote_dispatch::upgrade` run inside the migration transaction on every open: they add `mesh_nodes.max_concurrent_runs` only when `pragma_table_info` lacks it and use `CREATE TABLE IF NOT EXISTS`. Existing ledgers upgrade once; new ledgers get the same schema (tested by `mesh_concurrency_column_upgrades_an_existing_ledger_with_default_three`). If the reviewer prefers a version bump, the fix is a v11 step plus changing that assertion to 11, which needs a work-list line for the test change.
 
 Also a detail choice to confirm: a mesh Run holds one of the node's slots while it is `pending` or `running`. `needs_review`, `interrupted`, `done` and `failed` free it, because no Worker process is running and on the receiver nothing would otherwise release a Run waiting for review. Counting every non-terminal state instead is a one-line change in `crates/polyclave-store/src/mesh_limits.rs` (`ACTIVE_SQL`).
+
+**Resolved:** Accepted by merge reviewer 2026-11-27: no `user_version` bump (live-schema steps), `needs_review` and `interrupted` free a slot, and the limit lives in the separate `MeshNodeLimitDto`.

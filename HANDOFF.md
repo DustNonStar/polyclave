@@ -890,3 +890,9 @@ Issues: two `[detail]` items opened in `PLAN-ISSUES.md` (the A test conflict; th
 Cleanup: the scratch daemon on port 4417 was stopped (`pgrep` empty, port closed); the Playwright browsers closed with their script. No fake codex left running (test fixtures only).
 Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
 Not done: A is not on the review branch (see above). Not verified: a real second machine. Every mesh test runs both nodes in one process over loopback, with a fake codex; no real vendor CLI ran. Native Windows CI has not run on this branch.
+
+### Addendum: A joins the review branch (merge reviewer approval, 2026-11-27)
+
+The merge reviewer approved the one test edit and accepted the three design choices. `feat(hub): charge remote worker_run to the primary Ticket` was cherry-picked from `wip/mesh-budget-a` onto this branch as b7b5534. The approved edit is folded into it: `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote` now inserts an active Ticket `t-mesh` for session `hub` and `repo` and passes `"ticket_id": "t-mesh"`. No assertion changed. Both `PLAN-ISSUES.md` items are marked resolved.
+
+Tests at b7b5534 (macOS only): fmt clean; clippy `-D warnings` clean; `cargo test --locked --workspace` 149 passed, 0 failed (main had 141; 8 new); proto check passes and `proto.ts` has no diff; UI `tsc --noEmit` and `npm run build` pass. Native Windows CI has not run. The local branch `wip/mesh-budget-a` is no longer needed.
