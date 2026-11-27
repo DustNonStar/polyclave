@@ -42,6 +42,7 @@ mod tests {
             TicketDto,
             RunDto,
             AttemptDto,
+            RunEvidenceDto,
             TurnDto,
             MemoryItemDto,
             ProviderProfileDto,
@@ -121,5 +122,24 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | {{ [key
         assert!(value.get("os_proc_id").is_none());
         assert_eq!(value["phase"], "authorized");
         assert!(!TurnDto::decl().contains("mcp_token"));
+    }
+
+    #[test]
+    fn run_evidence_serializes_missing_receipt_and_claim_as_null_and_has_no_test_field() {
+        let evidence = RunEvidenceDto {
+            attempt_no: 2,
+            receipt_sha: None,
+            worker_claim: None,
+        };
+        let value = serde_json::to_value(&evidence).unwrap();
+        // Exact equality: the host records no test results, so there is no test field.
+        assert_eq!(
+            value,
+            serde_json::json!({"attempt_no": 2, "receipt_sha": null, "worker_claim": null})
+        );
+        assert_eq!(
+            serde_json::from_value::<RunEvidenceDto>(value).unwrap(),
+            evidence
+        );
     }
 }

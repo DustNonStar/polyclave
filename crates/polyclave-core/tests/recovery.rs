@@ -4,7 +4,7 @@ use polyclave_core::{
     runner::{RunnerConfig, TurnRunner},
     runs::{Resolution, RunManager, RunRequest},
 };
-use polyclave_proto::{RunStatus, TurnMode};
+use polyclave_proto::{RunEvidenceDto, RunStatus, TurnMode};
 use polyclave_store::Error;
 use rusqlite::params;
 fn fixture() -> (tempfile::TempDir, RunManager, TurnRunner, RunRequest) {
@@ -383,4 +383,47 @@ fn admission_snapshots_origin_without_credentials_and_ignores_later_changes() {
     let (bare, _) = rm.accept(req).unwrap();
     let empty = rm.store.run_origin_snapshot(&bare.id).unwrap().unwrap();
     assert!(empty.urls.is_empty() && empty.push_urls.is_empty());
+}
+
+#[test]
+fn approval_evidence_reads_only_the_current_attempt_and_never_an_older_receipt() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let w = rm.begin(&r.id, TurnMode::Start).unwrap();
+    let turn = crashed(&rm, &w, "previous-boot".into());
+    let receipt = "a".repeat(40);
+    let (id, attempt, sha) = (r.id.clone(), w.attempt.id, receipt.clone());
+    rm.store.write(move |db| {
+        db.execute("INSERT INTO results(run_id,attempt_id,turn_id,accepted,payload_json,created_at) VALUES(?1,?2,?3,1,?4,'now')",
+            params![id,attempt,turn,serde_json::json!({"sha":sha}).to_string()])?;
+        for text in ["Started the change", "Changed the parser; Windows tests not run"] {
+            db.execute("INSERT INTO events(turn_id,event_kind,payload_json,created_at) VALUES(?1,'progress',?2,'now')",
+                params![turn,serde_json::json!({"text":text}).to_string()])?;
+        }
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        rm.evidence_for_run(&rm.get(&r.id).unwrap()).unwrap(),
+        RunEvidenceDto {
+            attempt_no: 1,
+            receipt_sha: Some(receipt),
+            worker_claim: Some("Changed the parser; Windows tests not run".into()),
+        }
+    );
+
+    // The receipt names a commit the mirror does not hold, so R1 does not verify it.
+    std::fs::write(runner.marker(turn), b"released").unwrap();
+    assert_eq!(runner.recover().unwrap(), 1);
+    assert_eq!(rm.get(&r.id).unwrap().status, RunStatus::NeedsReview);
+    rm.resolve(&r.id, Resolution::AllowRetry, "fixture retry")
+        .unwrap();
+    rm.begin(&r.id, TurnMode::Retry).unwrap();
+    assert_eq!(
+        rm.evidence_for_run(&rm.get(&r.id).unwrap()).unwrap(),
+        RunEvidenceDto {
+            attempt_no: 2,
+            receipt_sha: None,
+            worker_claim: None,
+        }
+    );
 }

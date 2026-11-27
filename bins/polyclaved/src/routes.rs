@@ -158,7 +158,8 @@ async fn run(State(app): State<App>, Path(id): Path<String>) -> Reply {
         blocking(move || {
             let run = app.runs.get(&id)?;
             let commit = app.runs.commit_for_run(&run)?;
-            Ok(json!({"run":run,"commit":commit}))
+            let evidence = app.runs.evidence_for_run(&run)?;
+            Ok(json!({"run":run,"commit":commit,"evidence":evidence}))
         })
         .await?,
     ))

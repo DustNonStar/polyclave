@@ -5,7 +5,9 @@ use crate::{
 };
 use polyclave_adapters::mcp::{AttemptScope, HostTools};
 use polyclave_os::canonical_real_path;
-use polyclave_proto::{AttemptDto, ChangeTopic, RunDto, RunStatus, TurnMode, Vendor, WriterCheck};
+use polyclave_proto::{
+    AttemptDto, ChangeTopic, RunDto, RunEvidenceDto, RunStatus, TurnMode, Vendor, WriterCheck,
+};
 use polyclave_store::{
     decode_enum, enum_value, insert_run_origin_snapshot, new_id, now, parse_json, reserve_ticket,
     Error, Store,
@@ -321,6 +323,54 @@ impl RunManager {
             .commit_summary(&self.attempt_git(run, run.current_attempt)?, sha)
             .map(Some)
             .map_err(|_| Error::Invalid("mirror is unavailable for the selected commit"))
+    }
+
+    /// Approval evidence for the Run's current Attempt only: the accepted
+    /// `submit_result` receipt and the latest `report_progress` claim. Nothing
+    /// from an older Attempt is returned.
+    pub fn evidence_for_run(&self, run: &RunDto) -> Result<RunEvidenceDto> {
+        let (id, number) = (run.id.clone(), run.current_attempt);
+        self.store.read(move |db| {
+            let attempt: Option<i64> = db
+                .query_row(
+                    "SELECT id FROM attempts WHERE run_id=?1 AND attempt_no=?2",
+                    params![id, number],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(attempt) = attempt else {
+                return Ok(RunEvidenceDto {
+                    attempt_no: number,
+                    receipt_sha: None,
+                    worker_claim: None,
+                });
+            };
+            let receipt_sha = db
+                .query_row(
+                    "SELECT json_extract(payload_json,'$.sha') FROM results
+                     WHERE attempt_id=?1 AND accepted=1 ORDER BY id DESC LIMIT 1",
+                    [attempt],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            let worker_claim = db
+                .query_row(
+                    "SELECT json_extract(e.payload_json,'$.text') FROM events e
+                     JOIN turns t ON t.id=e.turn_id
+                     WHERE t.attempt_id=?1 AND e.event_kind='progress'
+                     ORDER BY e.id DESC LIMIT 1",
+                    [attempt],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            Ok(RunEvidenceDto {
+                attempt_no: number,
+                receipt_sha,
+                worker_claim,
+            })
+        })
     }
 
     pub(crate) fn attempt_git(&self, run: &RunDto, number: u32) -> Result<AttemptGit> {

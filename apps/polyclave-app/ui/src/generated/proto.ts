@@ -47,6 +47,8 @@ export type RunDto = { id: string, ticket_id: string, hub_session_id: string, wo
 
 export type AttemptDto = { id: number, run_id: string, attempt_no: number, branch: string, worktree_path: string, agent_thread_id: string | null, corrections: number, status: AttemptStatus, created_at: string, ended_at: string | null, };
 
+export type RunEvidenceDto = { attempt_no: number, receipt_sha: string | null, worker_claim: string | null, };
+
 export type TurnDto = { id: number, session_id: string, run_id: string | null, attempt_id: number | null, parent_turn_id: number | null, mode: TurnMode, status: TurnStatus, phase: TurnPhase, exit_code: number | null, end_reason: EndReason | null, writer_check: WriterCheck | null, started_at: string, ended_at: string | null, };
 
 export type MemoryItemDto = { id: string, scope: MemoryScope, repo_cwd: string | null, kind: MemoryKind, title: string, content: string, tags: Array<string>, evidence: JsonValue | null, status: MemoryStatus, supersedes_id: string | null, created_by: string, source_run_id: string | null, source_turn_id: number | null, created_at: string, updated_at: string, };

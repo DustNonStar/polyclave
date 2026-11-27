@@ -259,6 +259,23 @@ pub struct AttemptDto {
     pub ended_at: Option<String>,
 }
 
+/// Evidence the approval card shows for a Run's current Attempt.
+///
+/// Every field is read for that Attempt only, so a receipt or a claim from an
+/// older Attempt (and so an older SHA) is never shown as current evidence. The
+/// host records no test results, so this type has no test field.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct RunEvidenceDto {
+    // The Attempt this evidence belongs to.
+    pub attempt_no: u32,
+    // SHA the Worker submitted with `submit_result` and the host accepted for
+    // this Attempt. R1 compares it with the authoritative mirror tip.
+    pub receipt_sha: Option<String>,
+    // Latest `report_progress` text from this Attempt's turns: the Worker's own
+    // claim, never a host check.
+    pub worker_claim: Option<String>,
+}
+
 /// Public projection. The host-only authorization secret is not part of this type.
 ///
 /// ```compile_fail
