@@ -896,3 +896,12 @@ Not done: A is not on the review branch (see above). Not verified: a real second
 The merge reviewer approved the one test edit and accepted the three design choices. `feat(hub): charge remote worker_run to the primary Ticket` was cherry-picked from `wip/mesh-budget-a` onto this branch as b7b5534. The approved edit is folded into it: `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote` now inserts an active Ticket `t-mesh` for session `hub` and `repo` and passes `"ticket_id": "t-mesh"`. No assertion changed. Both `PLAN-ISSUES.md` items are marked resolved.
 
 Tests at b7b5534 (macOS only): fmt clean; clippy `-D warnings` clean; `cargo test --locked --workspace` 149 passed, 0 failed (main had 141; 8 new); proto check passes and `proto.ts` has no diff; UI `tsc --noEmit` and `npm run build` pass. Native Windows CI has not run. The local branch `wip/mesh-budget-a` is no longer needed.
+
+## Mesh budget A + C review: passed, merged
+
+Branch `claude/mesh-budget-ac-238293` (`312398d..27c6fcf`) was fast-forwarded into `main`. It implements the owner decision A + C.
+
+- C (`312398d`, `fe41091`): each receiver caps how many mesh-admitted Runs from one sending node can be `pending` or `running` at once. The default is 3, the cap is checked inside the admission transaction, and over the cap the receiver answers 429 and queues nothing. Settings has a per-node stepper from 1 to 16; hand-check images are in `handcheck/mesh-budget-ac/`.
+- A (`b7b5534`): remote `worker_run` requires the calling Hub session's active, same-repository Ticket. Each dispatch is charged exactly once, keyed by Hub session and `request_id`, and the charge is never refunded. Exhaustion moves the Ticket to `blocked_on_user`.
+- The merge reviewer approved one existing-test edit: adding a Ticket and `ticket_id` to `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote`. No assertion changed.
+- Local macOS after the fast-forward: fmt and Clippy clean, 149 passed, 0 failed, the `proto.ts` check clean, privacy scan clean. Not verified: a real second machine and Windows CI.
