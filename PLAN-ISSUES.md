@@ -35,3 +35,26 @@ State left behind:
 To proceed, one of these is needed: add this third swap to the allowed changes (recommended — it is the same one-line reorder the work list already permits twice), or rule that `fail` may still resolve a run of a frozen session, which contradicts item 2's "each of accept / fail / allow_retry rejects".
 
 **Resolved (Claude, 2026-11-26):** the third change is allowed. Item 2 of the work list now names it: insert `store.unfreezeSession(session.id)` directly before the `fail` resolve in `it('resolve accept and fail clear stale detail', …)`, nothing else. The kept patch was reviewed and is fine to apply as it is.
+
+## [direction, open] v5 Phase 1A recovery cannot infer whether go was delivered
+
+The v5 spec (lines 17, 245–263, 343–345) and Phase 1A plan (lines 16, 84–86) require a restart to mark every pre-go crash as `never_started`. The database records `authorized` before the host sends `go`, but the listed schema and recovery inputs do not retain evidence of delivery or wrapper-side start. Once the wrapper has exited, these two cases can have the same evidence: host loss after authorization but before go, and host loss after go and the wrapper/target have exited. Neither a missing process nor a missing result proves that no write was attempted.
+
+Evidence: a scratch `python3` pipe-and-SQLite check waited for the wrapper's ready line, committed authorized, and either closed the pipe or sent go first. After the wrapper exited, the observations were:
+
+```
+authorized then EOF: target never started; recovery evidence=authorized / absent
+authorized then go: target started; recovery evidence=authorized / absent
+```
+
+The existing `src/recovery.ts:83–115` only uses `never_started` for the persisted prepared phase. The scratch check demonstrates the missing evidence, not platform-specific process-tree behavior. Classifying all authorized rows as never started would be unsafe.
+
+Recommended: keep prepared/ready/authorized/go sequencing, and add a durable wrapper-side permit as a strict precondition to starting the Worker. Define the durable permit as the recovery boundary: no permit after the old wrapper has been excluded means the Worker never started; permit present or writer not excluded means conservatively handle possible execution. Add barrier tests for authorized-before-go and permit-before-spawn crashes. Alternative: keep the current protocol/schema and explicitly classify the authorized crash window conservatively, even when the host had not sent go. Neither option relaxes R1.
+
+## [detail, open] v5 Phase 1A Task 4 names a nonexistent rusqlite feature
+
+The v5 spec (line 86) and Phase 1A plan (line 54) name both `bundled` and `fts5` as rusqlite features. The [published feature list](https://docs.rs/crate/rusqlite/0.43.0/features) includes `bundled` but not `fts5`; the [bundled SQLite build](https://github.com/rusqlite/rusqlite/blob/master/libsqlite3-sys/build.rs) compiles with `SQLITE_ENABLE_FTS5`. Requiring a Cargo feature named `fts5` is not the same as requiring FTS5 support.
+
+Proposed correction: build against bundled SQLite and require a real test that creates the FTS5 table and executes MATCH on macOS and Windows. Keep WAL, single-writer design, search, and the test gate unchanged.
+
+Stopped before Task 1 at base `d8388a3`; no implementation, migration, or live vendor probe has run.
