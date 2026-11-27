@@ -9,23 +9,29 @@
 .notice button { margin-left: auto; min-height: 24px; height: 24px; padding: 0 8px; font-size: var(--fs-xs); background: transparent; }
 
 .pet-dock { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; height: 60px; padding: 0 64px 0 14px; pointer-events: none; }
-#pet-stage { width: 264px; height: 60px; image-rendering: pixelated; image-rendering: crisp-edges; }
+#pet-stage {
+  width: 480px; max-width: calc(100% - 110px); height: 60px;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+  pointer-events: auto; cursor: grab; touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+#pet-stage.is-dragging { cursor: grabbing; }
 :root[data-theme="light"] #pet-stage { filter: drop-shadow(0 0 .6px rgba(15, 23, 42, .55)) drop-shadow(0 1px 1px rgba(15, 23, 42, .12)); }
 .pet-caption { font: 500 var(--fs-xs) var(--mono); color: var(--faint); padding-bottom: 6px; white-space: nowrap; }
 
 .composer {
   position: relative;
   border-radius: var(--r-lg);
-  background: var(--glass-strong);
+  background: color-mix(in srgb, var(--card) 94%, transparent);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-composer), inset 0 1px 0 var(--edge-hi);
-  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   transition: border-color .2s, box-shadow .2s;
 }
 /* Fine prism rims, top and bottom (1.5px) */
 .composer::before, .composer::after {
   content: ""; position: absolute; left: 14px; right: 14px; height: 1.5px; border-radius: 2px; pointer-events: none;
   background: linear-gradient(90deg, transparent, var(--spectrum), transparent);
+  background-size: 200% 100%;
   opacity: .55; transition: opacity .25s;
 }
 .composer::before { top: -1px; }
@@ -33,6 +39,49 @@
 .composer:focus-within { border-color: color-mix(in srgb, var(--blue) 30%, var(--line)); }
 .composer:focus-within::before { opacity: .95; }
 .composer:focus-within::after { opacity: .55; }
+:root[data-motion-state="running"] .composer::before,
+:root[data-motion-state="thinking"] .composer::before {
+  opacity: .98; animation: prism-sweep 2.6s linear infinite;
+}
+:root[data-motion-state="running"] .composer::after,
+:root[data-motion-state="thinking"] .composer::after {
+  opacity: .65; animation: prism-sweep 2.6s linear infinite reverse;
+}
+@keyframes prism-sweep {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-motion-state="running"] .composer::before,
+  :root[data-motion-state="thinking"] .composer::before,
+  :root[data-motion-state="running"] .composer::after,
+  :root[data-motion-state="thinking"] .composer::after { animation: none; }
+}
+
+.queued-tray {
+  margin-bottom: 8px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  overflow: hidden;
+}
+.queued-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; cursor: pointer; list-style: none;
+  font-size: var(--fs-sm);
+}
+.queued-head::-webkit-details-marker { display: none; }
+.queued-title { font-weight: 600; color: var(--ink); }
+.queued-sub { color: var(--faint); font-size: var(--fs-xs); margin-right: auto; }
+.queued-list { border-top: 1px solid var(--line); display: grid; }
+.queued-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 12px; font-size: var(--fs-sm); color: var(--ink-2);
+}
+.queued-item + .queued-item { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
+.queued-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-pill { font: 500 var(--fs-xs) var(--mono); color: var(--blue); flex: none; }
 
 .composer-prism { position: absolute; top: -13px; right: 18px; width: 30px; height: 26px; pointer-events: none; display: grid; place-items: center; }
 .composer-prism svg { width: 13px; height: 22px; shape-rendering: crispEdges; filter: drop-shadow(0 0 5px rgba(170, 180, 255, .45)); }

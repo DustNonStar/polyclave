@@ -132,16 +132,29 @@ export function renderChat(api: Api, act: Actions): void {
 
   const scroller = byId('history-scroll');
   const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 64;
+  const queued = S.global ? [] : S.messages.filter(m => m.queued && m.source === 'user');
+  const visibleMessages = S.messages.filter(m => !(m.queued && m.source === 'user'));
+  const tray = byId<HTMLDetailsElement>('queued-tray');
+  tray.hidden = queued.length === 0;
+  if (queued.length) {
+    byId('queued-count').textContent = String(queued.length);
+    byId('queued-list').replaceChildren(...queued.map((m, idx) =>
+      h('li', { class: 'queued-item' },
+        h('span', { class: 'queued-text', text: m.text }),
+        h('span', { class: 'queued-pill', text: '#' + (idx + 1) }))));
+  } else {
+    byId('queued-list').replaceChildren();
+  }
   const history = byId('history');
   withFocusPreserved(history, () => {
     history.replaceChildren();
     if (S.global) { history.append(overview(act)); return; }
-    if (!S.messages.length && !sessionRuns().length) { history.append(welcome()); return; }
+    if (!visibleMessages.length && !sessionRuns().length) { history.append(welcome()); return; }
     // Interleave messages with the Worker runs this Hub dispatched, by creation time where known.
     type Item = { at: string; node: () => HTMLElement };
-    const items: Item[] = S.messages.map((m, i) => ({ at: m.created_at ?? String(i).padStart(8, '0'), node: () => messageNode(api, act, m) }));
+    const items: Item[] = visibleMessages.map((m, i) => ({ at: m.created_at ?? String(i).padStart(8, '0'), node: () => messageNode(api, act, m) }));
     const runItems: Item[] = sessionRuns().map(r => ({ at: r.created_at, node: () => runCard(act, r) }));
-    const merged = S.messages.every(m => m.created_at) ? [...items, ...runItems].sort((a, b) => a.at.localeCompare(b.at)) : [...items, ...runItems];
+    const merged = visibleMessages.every(m => m.created_at) ? [...items, ...runItems].sort((a, b) => a.at.localeCompare(b.at)) : [...items, ...runItems];
     for (const item of merged) history.append(item.node());
   });
 

@@ -35,5 +35,4 @@ document.addEventListener('pc-settings', () => {
   const vial = document.getElementById('settings-vial');
   if (vial instanceof HTMLCanvasElement) mountVial(vial, clock);
 });
-document.addEventListener('pointerdown', () => clock.interact(), { passive: true });
 clock.wake();

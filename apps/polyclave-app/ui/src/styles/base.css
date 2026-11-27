@@ -8,6 +8,12 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea, pre, code, .msg-body, #stream, .file-output, .diff-pre, .mem-body, .think-body {
+  user-select: text;
+  -webkit-user-select: text;
 }
 h1, h2, h3, h4, p, ul, ol, pre, figure { margin: 0; }
 ul, ol { padding: 0; list-style: none; }

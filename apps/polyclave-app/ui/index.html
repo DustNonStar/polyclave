@@ -77,6 +77,14 @@
           <canvas id="pet-stage" aria-hidden="true"></canvas>
           <span class="pet-caption" id="pet-caption">Partners resting</span>
         </div>
+        <details id="queued-tray" class="queued-tray" open hidden>
+          <summary class="queued-head">
+            <span class="queued-title">Queued messages</span>
+            <span class="badge" id="queued-count">0</span>
+            <span class="queued-sub">Sends after the current turn finishes</span>
+          </summary>
+          <ul id="queued-list" class="queued-list"></ul>
+        </details>
         <form id="compose" class="composer">
           <span class="composer-prism" id="composer-prism" aria-hidden="true"></span>
           <label class="sr" for="prompt">Message</label>

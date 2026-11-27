@@ -2,11 +2,11 @@
 dialog {
   width: min(560px, calc(100% - 24px)); max-height: calc(100% - 32px);
   padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg);
-  background: var(--card); color: var(--ink); box-shadow: var(--shadow-pop);
+  background: var(--bg); color: var(--ink); box-shadow: var(--shadow-pop);
   overflow: hidden;
 }
 dialog[data-size="wide"] { width: min(1120px, calc(100% - 24px)); height: min(820px, calc(100% - 32px)); }
-dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+dialog::backdrop { background: var(--scrim); }
 #dialog-content { display: flex; flex-direction: column; max-height: inherit; height: 100%; min-height: 0; }
 .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line-soft); }
 .dlg-head h2 { font-size: var(--fs-lg); font-weight: 600; flex: 1; min-width: 0; }
