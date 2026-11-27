@@ -505,16 +505,17 @@ impl MockPusher {
     }
 }
 impl MirrorPusher for MockPusher {
-    fn push_mirror_branch<'a>(
+    fn push_verified_sha<'a>(
         &'a self,
         _mirror_path: &'a FsPath,
-        refspec: &'a str,
+        sha: &'a str,
         branch: &'a str,
+        _expected_remote_tip: Option<&'a str>,
     ) -> BoxFuture<'a, HubResult<()>> {
         self.pushed
             .lock()
             .unwrap()
-            .push((refspec.to_owned(), branch.to_owned()));
+            .push((sha.to_owned(), branch.to_owned()));
         Box::pin(async { Ok(()) })
     }
 }
@@ -564,6 +565,9 @@ fn git_cmd(dir: &FsPath, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Builds a Run whose result comes from the real promotion path: the host
+/// mirror admits the Run, the Worker pushes its attempt branch, R1 classifies
+/// the tip as Done, and `sync_done` promotes it to `refs/heads/polyclave/<id>`.
 fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
     let repo = polyclave_os::canonical_real_path(&dir.join("repo")).unwrap();
     git_cmd(&repo, &["init", "-b", "main", "--template="]);
@@ -573,19 +577,15 @@ fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
     std::fs::write(repo.join("src/lib.rs"), "pub fn v() -> i32 { 1 }\n").unwrap();
     git_cmd(&repo, &["add", "."]);
     git_cmd(&repo, &["commit", "-m", "initial"]);
-    let base_sha = git_cmd(&repo, &["rev-parse", "HEAD"]);
 
-    let mirror = dir.join("mirror.git");
-    git_cmd(
-        dir,
-        &[
-            "clone",
-            "--bare",
-            repo.to_str().unwrap(),
-            mirror.to_str().unwrap(),
-        ],
-    );
-    let mirror = polyclave_os::canonical_real_path(&mirror).unwrap();
+    let run_id = "ra0000ad1".to_owned();
+    let mirrors = MirrorManager::new(dir).unwrap();
+    let run_git = mirrors.admit(&repo, &run_id, "main").unwrap();
+    let base_sha = run_git.base.clone();
+    let attempt = polyclave_core::mirror::AttemptGit {
+        run: run_git.clone(),
+        number: 1,
+    };
 
     let work = dir.join("work");
     git_cmd(
@@ -596,22 +596,49 @@ fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
     git_cmd(&work, &["config", "user.email", "worker@example.invalid"]);
     std::fs::write(work.join("src/lib.rs"), "pub fn v() -> i32 { 2 }\n").unwrap();
     git_cmd(&work, &["add", "."]);
-    git_cmd(&work, &["commit", "-m", "change"]);
-    let head_sha = git_cmd(&work, &["rev-parse", "HEAD"]);
-
-    let run_id = "r-gate-1".to_owned();
-    let final_ref = format!("refs/polyclave/runs/{run_id}/final");
+    git_cmd(
+        &work,
+        &[
+            "commit",
+            "-m",
+            "change",
+            "--trailer",
+            &format!("Run-Id: {run_id}"),
+        ],
+    );
+    let tip = git_cmd(&work, &["rev-parse", "HEAD"]);
     git_cmd(
         &work,
         &[
             "push",
-            mirror.to_str().unwrap(),
-            &format!("HEAD:{final_ref}"),
+            run_git.mirror.to_str().unwrap(),
+            &format!("HEAD:{}", attempt.full_ref()),
         ],
     );
 
+    // R1: the accepted receipt SHA, the mirror tip and the trailers agree.
+    let verdict = polyclave_core::classify::classify_run(
+        polyclave_proto::WriterCheck::Excluded,
+        Some(&tip),
+        mirrors.reconcile(&attempt),
+    );
+    assert_eq!(
+        verdict.status,
+        polyclave_proto::RunStatus::Done,
+        "{verdict:?}"
+    );
+    let head_sha = verdict.result_sha.clone().unwrap();
+    mirrors.sync_done(&attempt, &head_sha).unwrap();
+    assert_eq!(
+        git_cmd(
+            &repo,
+            &["rev-parse", &format!("refs/heads/polyclave/{run_id}")]
+        ),
+        head_sha
+    );
+
     let repo_str = repo.to_str().unwrap().to_owned();
-    let mirror_str = mirror.to_str().unwrap().to_owned();
+    let mirror_str = run_git.mirror.to_str().unwrap().to_owned();
     let base_clone = base_sha.clone();
     let head_clone = head_sha.clone();
     let run_clone = run_id.clone();

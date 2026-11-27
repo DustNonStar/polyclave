@@ -58,12 +58,21 @@ pub trait WorkerReviseExecutor: Send + Sync {
     ) -> BoxFuture<'a, Result<String>>;
 }
 
+/// Publishes an R1-verified commit to the remote PR branch.
 pub trait MirrorPusher: Send + Sync {
-    fn push_mirror_branch<'a>(
+    /// Pushes exactly `sha` from the host mirror to `refs/heads/<branch>` on the
+    /// remote, then confirms the remote branch tip equals `sha`.
+    ///
+    /// `expected_remote_tip` is the lease: `Some(tip)` requires the remote branch
+    /// to be at `tip` before the push (a revise round leases on the SHA the gate
+    /// pushed last); `None` leases on the tip read from the remote just before
+    /// the push, or on the branch being absent.
+    fn push_verified_sha<'a>(
         &'a self,
         mirror_path: &'a Path,
-        refspec: &'a str,
+        sha: &'a str,
         branch: &'a str,
+        expected_remote_tip: Option<&'a str>,
     ) -> BoxFuture<'a, Result<()>>;
 }
 
@@ -80,50 +89,128 @@ impl GitMirrorPusher {
     }
 }
 
+fn is_full_oid(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn clean_git(git: &Path, mirror: &Path) -> Command {
+    let mut cmd = Command::new(git);
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .arg("-C")
+        .arg(mirror);
+    cmd
+}
+
+/// Reads the remote tip of `dest` (`None` when the branch is absent).
+fn remote_tip(git: &Path, mirror: &Path, remote: &str, dest: &str) -> Result<Option<String>> {
+    let out = clean_git(git, mirror)
+        .args(["ls-remote", "--refs", remote, dest])
+        .output()
+        .map_err(|_| Error::Transport)?;
+    if !out.status.success() {
+        return Err(Error::Transport);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split('\t');
+        if let (Some(oid), Some(name)) = (parts.next(), parts.next()) {
+            if name == dest {
+                if !is_full_oid(oid) {
+                    return Err(Error::Protocol);
+                }
+                return Ok(Some(oid.to_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 impl MirrorPusher for GitMirrorPusher {
-    fn push_mirror_branch<'a>(
+    fn push_verified_sha<'a>(
         &'a self,
         mirror_path: &'a Path,
-        refspec: &'a str,
+        sha: &'a str,
         branch: &'a str,
+        expected_remote_tip: Option<&'a str>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if !is_full_oid(sha) || expected_remote_tip.is_some_and(|t| !is_full_oid(t)) {
+                return Err(Error::Policy);
+            }
             let git = resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?;
             let remote = if self.remote.is_empty() {
                 "origin".to_owned()
             } else {
                 self.remote.clone()
             };
-            let push_spec = format!("{refspec}:refs/heads/{branch}");
+            let dest = format!("refs/heads/{branch}");
             let mirror = mirror_path.to_path_buf();
-            let out = tokio::task::spawn_blocking(move || {
-                let mut cmd = Command::new(&git);
-                for (key, _) in std::env::vars_os() {
-                    if key
-                        .to_string_lossy()
-                        .to_ascii_uppercase()
-                        .starts_with("GIT_")
+            let sha = sha.to_owned();
+            let expected = expected_remote_tip.map(str::to_owned);
+            tokio::task::spawn_blocking(move || {
+                let fmt = clean_git(&git, &mirror)
+                    .args(["check-ref-format", &dest])
+                    .output()
+                    .map_err(|_| Error::Transport)?;
+                if !fmt.status.success() {
+                    return Err(Error::Policy);
+                }
+                // The SHA must name a commit the host mirror already holds.
+                let commit = clean_git(&git, &mirror)
+                    .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+                    .output()
+                    .map_err(|_| Error::Transport)?;
+                if !commit.status.success() {
+                    return Err(Error::Policy);
+                }
+                let observed = remote_tip(&git, &mirror, &remote, &dest)?;
+                if let Some(expected) = &expected {
+                    if observed.as_deref() != Some(expected.as_str())
+                        && observed.as_deref() != Some(sha.as_str())
                     {
-                        cmd.env_remove(key);
+                        return Err(Error::Policy);
                     }
                 }
-                cmd.env("GIT_CONFIG_NOSYSTEM", "1")
-                    .env("GIT_CONFIG_GLOBAL", "")
-                    .env("GIT_TERMINAL_PROMPT", "0")
-                    .env("LC_ALL", "C")
-                    .stdin(Stdio::null())
-                    .arg("-C")
-                    .arg(&mirror)
-                    .args(["push", &remote, &push_spec])
-                    .output()
+                if observed.as_deref() != Some(sha.as_str()) {
+                    let lease = format!(
+                        "--force-with-lease={dest}:{}",
+                        observed.as_deref().unwrap_or("")
+                    );
+                    let out = clean_git(&git, &mirror)
+                        .args([
+                            "push",
+                            "--porcelain",
+                            &lease,
+                            &remote,
+                            &format!("{sha}:{dest}"),
+                        ])
+                        .output()
+                        .map_err(|_| Error::Transport)?;
+                    if !out.status.success() {
+                        return Err(Error::Transport);
+                    }
+                }
+                // Confirm what the remote now serves is exactly the verified SHA.
+                if remote_tip(&git, &mirror, &remote, &dest)?.as_deref() != Some(sha.as_str()) {
+                    return Err(Error::Policy);
+                }
+                Ok(())
             })
             .await
             .map_err(|_| Error::Transport)?
-            .map_err(|_| Error::Transport)?;
-            if !out.status.success() {
-                return Err(Error::Transport);
-            }
-            Ok(())
         })
     }
 }
@@ -374,10 +461,10 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err)?;
     }
 
-    // Push R1-verified authoritative mirror branch and open/find PR
-    let final_ref = format!("refs/polyclave/runs/{}/final", req.run_id);
+    // Push exactly the R1-verified SHA from the authoritative mirror, then
+    // open/find the PR. The pusher confirms the remote tip equals that SHA.
     deps.pusher
-        .push_mirror_branch(&req.mirror_path, &final_ref, &req.branch)
+        .push_verified_sha(&req.mirror_path, &current_head, &req.branch, None)
         .await?;
 
     let pr = deps
@@ -534,7 +621,12 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         }
 
         deps.pusher
-            .push_mirror_branch(&req.mirror_path, &final_ref, &req.branch)
+            .push_verified_sha(
+                &req.mirror_path,
+                &new_head,
+                &req.branch,
+                Some(current_head.as_str()),
+            )
             .await?;
         current_head = new_head;
         gate = deps
@@ -882,17 +974,18 @@ mod tests {
         pushed: Mutex<Vec<(String, String)>>,
     }
     impl MirrorPusher for MockPusher {
-        fn push_mirror_branch<'a>(
+        fn push_verified_sha<'a>(
             &'a self,
             _mirror_path: &'a Path,
-            refspec: &'a str,
+            sha: &'a str,
             branch: &'a str,
+            _expected_remote_tip: Option<&'a str>,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async move {
                 self.pushed
                     .lock()
                     .unwrap()
-                    .push((refspec.to_owned(), branch.to_owned()));
+                    .push((sha.to_owned(), branch.to_owned()));
                 Ok(())
             })
         }
@@ -1149,6 +1242,133 @@ mod tests {
         assert_eq!(revise.bounces.load(Ordering::SeqCst), 1);
         assert_eq!(gate.status, PrGateStatus::Escalated);
         assert_eq!(gate.scope_violations, vec!["README.md".to_owned()]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn git_pusher_pushes_exact_sha_with_lease_and_confirms_remote_tip() {
+        let fix = setup_git_and_store();
+        let remote = fix._dir.path().join("remote.git");
+        git(
+            fix._dir.path(),
+            &["init", "--bare", "--template=", remote.to_str().unwrap()],
+        );
+        let pusher = GitMirrorPusher::new(remote.to_str().unwrap());
+        let tip = |branch: &str| git(&remote, &["rev-parse", &format!("refs/heads/{branch}")]);
+
+        // First push: the branch is absent, so the lease is "must not exist".
+        pusher
+            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "feat/x", None)
+            .await
+            .unwrap();
+        assert_eq!(tip("feat/x"), fix.good_head_sha);
+        // Nothing else was published from the mirror.
+        let refs = git(&remote, &["for-each-ref", "--format=%(refname)"]);
+        assert_eq!(refs, "refs/heads/feat/x");
+
+        // Re-pushing the same SHA is a no-op that still confirms the tip.
+        pusher
+            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "feat/x", None)
+            .await
+            .unwrap();
+
+        // A revise round leases on the SHA it pushed last; a stale lease is refused
+        // and leaves the remote untouched.
+        let stale = pusher
+            .push_verified_sha(
+                &fix.mirror,
+                &fix.bad_head_sha_2,
+                "feat/x",
+                Some(fix.bad_head_sha_1.as_str()),
+            )
+            .await;
+        assert!(stale.is_err());
+        assert_eq!(tip("feat/x"), fix.good_head_sha);
+
+        // With the right lease a non-fast-forward revise head is published exactly.
+        pusher
+            .push_verified_sha(
+                &fix.mirror,
+                &fix.bad_head_sha_2,
+                "feat/x",
+                Some(fix.good_head_sha.as_str()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tip("feat/x"), fix.bad_head_sha_2);
+
+        // Abbreviated SHAs, unknown commits and bad branch names are refused.
+        assert!(pusher
+            .push_verified_sha(&fix.mirror, &fix.good_head_sha[..12], "feat/y", None)
+            .await
+            .is_err());
+        assert!(pusher
+            .push_verified_sha(&fix.mirror, &"a".repeat(40), "feat/y", None)
+            .await
+            .is_err());
+        assert!(pusher
+            .push_verified_sha(&fix.mirror, &fix.good_head_sha, "bad..name", None)
+            .await
+            .is_err());
+        assert!(git(&remote, &["for-each-ref", "--format=%(refname)"]) == "refs/heads/feat/x");
+    }
+
+    #[tokio::test]
+    async fn gate_pushes_the_verified_head_sha_not_a_side_ref() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let gate = run_pr_gate(
+            &deps,
+            RunPrGateRequest {
+                run_id: "run1".into(),
+                hub_session_id: None,
+                mirror_path: fix.mirror.clone(),
+                repo_slug: "org/repo".into(),
+                branch: "feat/sha".into(),
+                base_branch: "main".into(),
+                base_sha: fix.base_sha.clone(),
+                head_sha: fix.good_head_sha.clone(),
+                pr_title: "feat: sha".into(),
+                pr_body: "body".into(),
+                touched_paths: vec!["src/**".into()],
+                is_high_risk: false,
+                reviewers: vec![ReviewerSpec {
+                    vendor: Vendor::Claude,
+                    model: "claude-sonnet-4-6".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
+        assert_eq!(
+            *pusher.pushed.lock().unwrap(),
+            vec![(fix.good_head_sha.clone(), "feat/sha".to_owned())]
+        );
+        assert_eq!(
+            gh.enable_auto_merge_calls.lock().unwrap()[0].1,
+            fix.good_head_sha
+        );
         server.abort();
     }
 }
