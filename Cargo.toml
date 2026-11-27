@@ -1,0 +1,15 @@
+[workspace]
+members = [
+  "crates/polyclave-proto",
+  "crates/polyclave-os",
+  "crates/polyclave-store",
+  "crates/polyclave-adapters",
+  "crates/polyclave-core",
+  "bins/polyclaved",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

@@ -22,7 +22,7 @@ for f in $(git diff --name-only --diff-filter=AM "$base"..HEAD); do
   case "$f" in
     .handcheck/*|.impeccable/critique/*|.state-*|*.sqlite*|node_modules/*|.env*) echo "privacy-scan: must not be committed: $f"; fail=1 ;;
   esac
-  if [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 400000 ]; then echo "privacy-scan: file over 400 KB: $f"; fail=1; fi
+  if [ "$f" != Cargo.lock ] && [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 400000 ]; then echo "privacy-scan: file over 400 KB: $f"; fail=1; fi
 done
 # 4. Commit authors must use a noreply address.
 if git log --format='%ae%n%ce' "$base"..HEAD | sort -u | grep -vE '@users\.noreply\.github\.com$|^noreply@github\.com$' | grep .; then

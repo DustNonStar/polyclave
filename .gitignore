@@ -5,3 +5,7 @@ node_modules/
 .state-*/
 .impeccable/critique/
 .handcheck/
+
+# Rust workspace and archived Node dependencies
+/target/
+/legacy-node/node_modules/

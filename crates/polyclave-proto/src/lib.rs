@@ -1,0 +1,1 @@
+//! polyclave-proto workspace member.
