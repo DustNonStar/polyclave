@@ -806,3 +806,12 @@ Branch `claude/pr-gate-fix-335f12` (`3dec8e4..32ab418`) was fast-forwarded into 
 - `32ab418`: before any push or PR, the gate checks that each selected reviewer has a provider; if one does not, the gate escalates without pushing.
 - Local macOS after the fast-forward: fmt clean, Clippy `-D warnings` clean, `cargo test --locked --workspace` 130 passed, 0 failed; privacy scan clean. Windows CI has not run yet.
 - Open (direction): the host mirror is created with `git init --bare` and has no `origin`, so a real PR push still has nowhere to go. Where the GitHub URL and the bot credential come from must be decided. Also not verified: real vendor CLIs, real API reviewers, real GitHub push, PR and auto-merge.
+
+## Pairing QR fix review: passed, merged
+
+Branch `claude/pairing-qr-fix-5a523f` (`05ae56e`) was fast-forwarded into `main`.
+
+- `views/qr.ts` now encodes the pairing URI as a standard QR code (ISO/IEC 18004, byte mode, error correction M) with a 4-module quiet zone, using `qrcode-generator@2.0.4`. `build.mjs` copies the encoder into `dist`, so the page still makes no external requests.
+- `tests/qr-roundtrip.mjs` rasterizes the built SVG in Chrome and decodes it with `jsqr@1.4.0` (dev only). The decoded text equals the URI byte for byte for short, 69-byte daemon-shaped, and longer URIs. It runs in `npm run test:browser`, which CI calls.
+- `DESIGN.md` was updated in the same commit.
+- Not verified: a real phone scan, pairing approval and revocation. Nit: today's 69-byte URI is version 5 (45 modules including the quiet zone) on a 112 px tile, about 2.5 CSS px per module. If phone scans are unreliable, enlarge the tile.
