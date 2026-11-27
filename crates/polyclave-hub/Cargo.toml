@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 polyclave-os = { path = "../polyclave-os" }
+polyclave-core = { path = "../polyclave-core" }
+globset = "0.4"
 polyclave-adapters = { path = "../polyclave-adapters" }
 futures-util = "0.3"
 polyclave-proto = { path = "../polyclave-proto" }

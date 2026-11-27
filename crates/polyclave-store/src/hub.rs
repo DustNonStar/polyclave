@@ -312,3 +312,40 @@ fn end_without_reply(db: &Connection, turn: i64, reason: &str, recovered: bool) 
     }
     Ok(())
 }
+
+impl Store {
+    pub fn register_manager(
+        &self,
+        hub: &str,
+        profile: &str,
+        model: &str,
+        name: &str,
+    ) -> Result<String> {
+        if name.trim().is_empty() || name.len() > 120 {
+            return Err(Error::Invalid("invalid advisor name"));
+        }
+        let (hub, profile, model, name) = (
+            hub.to_owned(),
+            profile.to_owned(),
+            model.to_owned(),
+            name.to_owned(),
+        );
+        self.write(move|db|{
+            let repo:String=db.query_row("SELECT repo_cwd FROM sessions WHERE id=?1 AND role='hub'",[&hub],|r|r.get(0))
+                .optional()?.ok_or(Error::NotFound)?;
+            let (kind,models):(String,String)=db.query_row("SELECT kind,models_json FROM provider_profiles WHERE id=?1",[&profile],
+                |r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::NotFound)?;
+            let allowed:Vec<String>=serde_json::from_str(&models)?;
+            if !allowed.contains(&model){return Err(Error::ConflictError);}
+            let existing:Option<String>=db.query_row("SELECT id FROM sessions WHERE role='manager' AND repo_cwd=?1 AND profile_id=?2 AND provider_model=?3",
+                params![repo,profile,model],|r|r.get(0)).optional()?;
+            if let Some(id)=existing{return Ok(id);}
+            let id=crate::new_id('s');
+            let vendor=match kind.as_str(){"codex_cli"=>Some("codex"),"claude_cli"=>Some("claude"),_=>None};
+            db.execute("INSERT INTO sessions(id,name,role,vendor,repo_cwd,profile_id,provider_model,created_at)
+                VALUES(?1,?2,'manager',?3,?4,?5,?6,?7)",
+                params![id,name,vendor,repo,profile,model,now(db)?])?;
+            Ok(id)
+        })
+    }
+}

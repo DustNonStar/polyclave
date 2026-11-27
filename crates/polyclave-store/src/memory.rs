@@ -1,7 +1,7 @@
 use crate::{decode_enum, enum_value, new_id, now, parse_json, Error, Result, Store};
 use polyclave_proto::{ChangeTopic, MemoryItemDto, MemoryKind, MemoryScope};
 use rusqlite::{named_params, params, Connection};
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug)]
 pub struct CandidateMemory {
@@ -116,4 +116,109 @@ impl Store {
             Ok(result)
         })
     }
+}
+
+/// Trusted actor identity is assigned by the host, never deserialized from a tool.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum Curator {
+    User,
+    Hub,
+}
+#[derive(Clone)]
+pub enum MemoryAction {
+    Commit,
+    Supersede(String),
+    Archive,
+}
+
+impl Store {
+    /// Draft a correction only from a persisted user message in the selected project.
+    pub fn draft_correction(
+        &self,
+        session: &str,
+        message: i64,
+        kind: MemoryKind,
+        title: &str,
+        content: &str,
+    ) -> Result<MemoryItemDto> {
+        if !matches!(
+            kind,
+            MemoryKind::Constraint | MemoryKind::Preference | MemoryKind::Pitfall
+        ) || title.trim().is_empty()
+            || title.len() > 256
+            || content.trim().is_empty()
+            || content.len() > 4096
+        {
+            return Err(Error::Invalid("invalid correction draft"));
+        }
+        let (session, title, content) = (session.to_owned(), title.to_owned(), content.to_owned());
+        self.write(move|db|{
+            use rusqlite::OptionalExtension;
+            let row:Option<(String,Option<i64>)>=db.query_row("SELECT s.repo_cwd,m.turn_id FROM messages m
+                JOIN sessions s ON s.id=m.session_id WHERE m.id=?1 AND m.session_id=?2 AND m.source='user'",
+                params![message,session],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            let Some((repo,turn))=row else{return Err(Error::NotFound);};
+            let id=new_id('m');
+            db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,evidence_json,status,created_by,
+                source_turn_id,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?8)",
+                params![id,repo,enum_value(kind)?,title,content,json!({"source_msg_id":message,"requires_user_confirmation":true}).to_string(),turn,now(db)?])?;
+            publish_memory(db,&id)
+        })
+    }
+
+    pub fn curate_memory(
+        &self,
+        repo: &str,
+        id: &str,
+        actor: Curator,
+        action: MemoryAction,
+    ) -> Result<MemoryItemDto> {
+        let (repo, id) = (repo.to_owned(), id.to_owned());
+        self.write(move|db|{
+            use rusqlite::OptionalExtension;
+            let existing=db.query_row(&format!("SELECT {COLUMNS} FROM memory_items m WHERE m.id=?1"),[&id],read_memory)
+                .optional()?.ok_or(Error::NotFound)?;
+            let in_scope=existing.repo_cwd.as_deref()==Some(repo.as_str()) ||
+                (existing.scope==MemoryScope::Global && actor==Curator::User);
+            if !in_scope{return Err(Error::ConflictError);}
+            if actor!=Curator::User && existing.evidence.as_ref().and_then(|e|e.get("requires_user_confirmation")).and_then(Value::as_bool)==Some(true) {
+                return Err(Error::ConflictError);
+            }
+            let stamp=now(db)?;
+            match action {
+                MemoryAction::Commit=>{
+                    if existing.status!=polyclave_proto::MemoryStatus::Candidate{return Err(Error::ConflictError);}
+                    db.execute("UPDATE memory_items SET status='verified',updated_at=?2 WHERE id=?1",params![id,stamp])?;
+                },
+                MemoryAction::Supersede(prior)=>{
+                    if id==prior || existing.status!=polyclave_proto::MemoryStatus::Candidate {return Err(Error::ConflictError);}
+                    let old=db.query_row(&format!("SELECT {COLUMNS} FROM memory_items m WHERE m.id=?1"),[&prior],read_memory)
+                        .optional()?.ok_or(Error::NotFound)?;
+                    if old.scope!=existing.scope || old.repo_cwd!=existing.repo_cwd || old.kind!=existing.kind ||
+                        old.status!=polyclave_proto::MemoryStatus::Verified{
+                        return Err(Error::ConflictError);
+                    }
+                    db.execute("UPDATE memory_items SET status='superseded',updated_at=?2 WHERE id=?1",params![prior,stamp])?;
+                    publish_memory(db,&prior)?;
+                    db.execute("UPDATE memory_items SET status='verified',supersedes_id=?2,updated_at=?3 WHERE id=?1",params![id,prior,stamp])?;
+                },
+                MemoryAction::Archive=>{
+                    if matches!(existing.status,polyclave_proto::MemoryStatus::Archived|polyclave_proto::MemoryStatus::Superseded){
+                        return Err(Error::ConflictError);
+                    }
+                    db.execute("UPDATE memory_items SET status='archived',updated_at=?2 WHERE id=?1",params![id,stamp])?;
+                }
+            }
+            publish_memory(db,&id)
+        })
+    }
+}
+fn publish_memory(db: &Connection, id: &str) -> Result<MemoryItemDto> {
+    let item = db.query_row(
+        &format!("SELECT {COLUMNS} FROM memory_items m WHERE m.id=?1"),
+        [id],
+        read_memory,
+    )?;
+    Store::append_change(db, ChangeTopic::Memory, id, &serde_json::to_value(&item)?)?;
+    Ok(item)
 }

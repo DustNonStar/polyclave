@@ -1,7 +1,9 @@
 //! Hub providers and the canonical conversation boundary.
 pub mod api_provider;
 pub mod cli_provider;
+pub mod curation;
 pub mod provider;
+pub mod repo_tools;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,5 +23,7 @@ pub enum Error {
     Limit,
     #[error("the local conversation ledger could not be accessed")]
     Store,
+    #[error("requested action is outside the registered scope")]
+    Policy,
 }
 pub type Result<T> = std::result::Result<T, Error>;

@@ -514,3 +514,26 @@ fn current_attempt(db: &Connection, r: &RunDto) -> Result<Option<AttemptDto>> {
         .optional()?;
     id.map(|a| load_attempt(db, a)).transpose()
 }
+
+impl RunManager {
+    pub fn read_review_diff(
+        &self,
+        id: &str,
+        scope: &Path,
+        allow_path: impl Fn(&str) -> bool,
+    ) -> Result<(Vec<String>, String)> {
+        let r = self.get(id)?;
+        if Path::new(&r.repo_cwd) != scope {
+            return Err(Error::ConflictError);
+        }
+        let tip = r
+            .result_sha
+            .as_ref()
+            .or(r.observed_sha.as_ref())
+            .ok_or(Error::ConflictError)?;
+        let git = self.attempt_git(&r, r.current_attempt)?;
+        self.git
+            .review_diff(&git, tip, allow_path)
+            .map_err(|_| Error::ConflictError)
+    }
+}

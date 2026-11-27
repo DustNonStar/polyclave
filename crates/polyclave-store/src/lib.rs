@@ -4,7 +4,7 @@ mod memory;
 pub use hub::{HubCompletion, HubMessage, HubTurn, ThreadDelta};
 mod writer;
 
-pub use memory::{CandidateMemory, MemoryFilter};
+pub use memory::{CandidateMemory, Curator, MemoryAction, MemoryFilter};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 pub use writer::{Changes, Store};

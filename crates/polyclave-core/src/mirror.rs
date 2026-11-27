@@ -463,3 +463,67 @@ pub(crate) fn validate_oid(oid: &str) -> Result<()> {
     }
     Ok(())
 }
+
+impl MirrorManager {
+    /// Bounded read of authoritative mirror evidence, never from a Worker's cwd.
+    pub fn review_diff(
+        &self,
+        a: &AttemptGit,
+        tip: &str,
+        allow_path: impl Fn(&str) -> bool,
+    ) -> Result<(Vec<String>, String)> {
+        self.with_repo(&a.run.repo, |repo| {
+            self.validate_run(&a.run, repo)?;
+            validate_attempt(a)?;
+            validate_oid(tip)?;
+            let range = format!("{}..{tip}", a.run.base);
+            let names = self.git(
+                &a.run.mirror,
+                [
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    &range,
+                    "--",
+                ],
+            )?;
+            if !names.status.success() {
+                return Err(GitError::Command("read review changed paths"));
+            }
+            if names.stdout.len() > 131_072 {
+                return Err(GitError::Invalid("too many changed paths"));
+            }
+            let names = std::str::from_utf8(&names.stdout)
+                .map_err(|_| GitError::Invalid("non-Unicode review path"))?;
+            let files: Vec<String> = names
+                .split('\0')
+                .filter(|p| !p.is_empty() && allow_path(p))
+                .take(100)
+                .map(str::to_owned)
+                .collect();
+            if files.is_empty() {
+                return Ok((files, String::new()));
+            }
+            let mut args: Vec<&str> = vec![
+                "--literal-pathspecs",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                &range,
+                "--",
+            ];
+            args.extend(files.iter().map(String::as_str));
+            let output = self.require(&a.run.mirror, args, "read review diff")?;
+            let mut diff =
+                output[..output.floor_char_boundary(output.len().min(32_768))].to_owned();
+            if diff.len() < output.len() {
+                diff.push_str("\n[Diff truncated by host]");
+            }
+            Ok((files, diff))
+        })
+    }
+}
