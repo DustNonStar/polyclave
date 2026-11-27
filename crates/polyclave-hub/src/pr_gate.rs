@@ -16,6 +16,57 @@ use std::{
 
 const MAX_REVISE_ROUNDS: u32 = 3;
 
+/// Largest full-range review diff (stat, commit list and patch) a reviewer is
+/// given. A larger change is never truncated for review: the gate escalates it
+/// to a human, because an `approve` on a partial diff would approve code no
+/// reviewer read, and a forced `revise` would only spend revise rounds on a
+/// size problem the Worker cannot fix by addressing review comments.
+pub const MAX_REVIEW_DIFF_BYTES: usize = 24_576;
+
+/// The whole PR range `base..head` prepared for a reviewer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReviewDiff {
+    Complete { text: String, commits: usize },
+    TooLarge { bytes: usize },
+}
+
+/// Renders the full PR range `base..head` (commit list, stat and patch) from
+/// `repo`, or reports that it exceeds [`MAX_REVIEW_DIFF_BYTES`].
+pub fn review_diff(repo: &Path, base: &str, head: &str) -> Result<ReviewDiff> {
+    if !is_full_oid(base) || !is_full_oid(head) {
+        return Err(Error::Policy);
+    }
+    let git = resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?;
+    let range = format!("{base}..{head}");
+    let run = |args: &[&str]| -> Result<String> {
+        let out = clean_git(&git, repo)
+            .args(args)
+            .output()
+            .map_err(|_| Error::Transport)?;
+        if !out.status.success() {
+            return Err(Error::Policy);
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let log = run(&["log", "--no-decorate", "--format=%H %s", &range, "--"])?;
+    let commits = log.lines().filter(|l| !l.trim().is_empty()).count();
+    let patch = run(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--stat",
+        "--patch",
+        base,
+        head,
+        "--",
+    ])?;
+    let text = format!("Commits ({commits}):\n{log}\n{patch}");
+    if text.len() > MAX_REVIEW_DIFF_BYTES {
+        return Ok(ReviewDiff::TooLarge { bytes: text.len() });
+    }
+    Ok(ReviewDiff::Complete { text, commits })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewerSpec {
     pub vendor: Vendor,
@@ -27,6 +78,8 @@ pub struct ReviewWorktreeRequest {
     pub gate_id: String,
     pub repo_slug: String,
     pub pr_number: u64,
+    /// The PR base; the reviewer sees the whole range `base_sha..head_sha`.
+    pub base_sha: String,
     pub head_sha: String,
     pub worktree_path: PathBuf,
     pub vendor: Vendor,
@@ -528,6 +581,22 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .set_pr_gate_status(&gate.id, PrGateStatus::Reviewing)
             .map_err(map_store_err)?;
 
+        // Reviewers see the whole PR range; never review a truncated diff.
+        if let ReviewDiff::TooLarge { bytes } =
+            review_diff(&req.mirror_path, &req.base_sha, &current_head)?
+        {
+            return escalate(
+                deps,
+                &gate.id,
+                req.hub_session_id.as_deref(),
+                "diff_too_large",
+                &format!(
+                    "the PR diff {}..{} is {bytes} bytes, over the {MAX_REVIEW_DIFF_BYTES}-byte review limit; a human must review it",
+                    req.base_sha, current_head
+                ),
+            );
+        }
+
         let mut revise_comments = Vec::new();
         for spec in &selected_reviewers {
             let mirror = req.mirror_path.clone();
@@ -535,6 +604,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             let gate_id = gate.id.clone();
             let repo_slug = req.repo_slug.clone();
             let pr_number = pr.number;
+            let base_sha = req.base_sha.clone();
             let reviewer = deps.reviewer.clone();
             let spec_clone = spec.clone();
 
@@ -547,6 +617,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
                             gate_id,
                             repo_slug,
                             pr_number,
+                            base_sha,
                             head_sha: sha,
                             worktree_path: wt_path,
                             vendor: spec_clone.vendor,
@@ -1558,6 +1629,162 @@ mod tests {
         .unwrap();
         assert_eq!(gate.status, PrGateStatus::Escalated);
         assert!(pusher.pushed.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    /// Adds one commit on top of the good head (writing `file`) and publishes it
+    /// to the mirror's `main`, so `base..new` spans two commits.
+    fn extend_good_head(fix: &GitFixture, file: &str, contents: &str) -> String {
+        let work = fix._dir.path().join("work");
+        git(&work, &["checkout", "main"]);
+        std::fs::write(work.join(file), contents).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-m", "second"]);
+        let sha = git(&work, &["rev-parse", "HEAD"]);
+        git(
+            &work,
+            &["push", fix.mirror.to_str().unwrap(), "HEAD:refs/heads/main"],
+        );
+        sha
+    }
+
+    struct RangeReviewer {
+        seen: Mutex<Vec<(ReviewWorktreeRequest, ReviewDiff)>>,
+    }
+    impl ReviewerExecutor for RangeReviewer {
+        fn run_review<'a>(
+            &'a self,
+            req: ReviewWorktreeRequest,
+        ) -> BoxFuture<'a, Result<ReviewOutcome>> {
+            Box::pin(async move {
+                let diff = review_diff(&req.worktree_path, &req.base_sha, &req.head_sha)?;
+                self.seen.lock().unwrap().push((req, diff));
+                Ok(ReviewOutcome {
+                    verdict: ReviewVerdict::Approve,
+                    comments: "LGTM".to_owned(),
+                })
+            })
+        }
+    }
+
+    fn range_request(fix: &GitFixture, head: &str, branch: &str) -> RunPrGateRequest {
+        RunPrGateRequest {
+            run_id: "run1".into(),
+            hub_session_id: None,
+            mirror_path: fix.mirror.clone(),
+            repo_slug: "org/repo".into(),
+            branch: branch.into(),
+            base_branch: "main".into(),
+            base_sha: fix.base_sha.clone(),
+            head_sha: head.to_owned(),
+            pr_title: "feat: range".into(),
+            pr_body: "body".into(),
+            touched_paths: vec!["src/**".into()],
+            is_high_risk: false,
+            reviewers: vec![ReviewerSpec {
+                vendor: Vendor::Claude,
+                model: "claude-sonnet-4-6".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_sees_the_whole_two_commit_pr_range() {
+        let fix = setup_git_and_store();
+        let head = extend_good_head(&fix, "src/two.rs", "pub fn two() {}\n");
+
+        // The helper covers both commits; `git show <head>` would miss src/lib.rs.
+        let ReviewDiff::Complete { text, commits } =
+            review_diff(&fix.mirror, &fix.base_sha, &head).unwrap()
+        else {
+            panic!("small range must be complete");
+        };
+        assert_eq!(commits, 2);
+        assert!(text.contains(&fix.good_head_sha) && text.contains(&head));
+        assert!(text.contains("src/lib.rs") && text.contains("src/two.rs"));
+        assert!(text.contains("pub fn base() -> i32 { 1 }") && text.contains("pub fn two()"));
+        assert!(review_diff(&fix.mirror, &fix.base_sha[..12], &head).is_err());
+
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let reviewer = Arc::new(RangeReviewer {
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: reviewer.clone(),
+            worker_revise: None,
+            pusher: Arc::new(MockPusher {
+                pushed: Mutex::new(Vec::new()),
+            }),
+        };
+        let gate = run_pr_gate(&deps, range_request(&fix, &head, "feat/range"))
+            .await
+            .unwrap();
+        assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
+        let seen = reviewer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.base_sha, fix.base_sha);
+        assert_eq!(seen[0].0.head_sha, head);
+        // Inside the disposable worktree the reviewer got the same full range.
+        assert_eq!(
+            seen[0].1,
+            ReviewDiff::Complete {
+                text: text.clone(),
+                commits: 2
+            }
+        );
+        assert_eq!(gh.enable_auto_merge_calls.lock().unwrap()[0].1, head);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_pr_range_escalates_instead_of_a_truncated_review() {
+        let fix = setup_git_and_store();
+        let big: String = (0..MAX_REVIEW_DIFF_BYTES / 16)
+            .map(|i| format!("// line {i:08}\n"))
+            .collect();
+        let head = extend_good_head(&fix, "src/big.rs", &big);
+        assert!(matches!(
+            review_diff(&fix.mirror, &fix.base_sha, &head).unwrap(),
+            ReviewDiff::TooLarge { bytes } if bytes > MAX_REVIEW_DIFF_BYTES
+        ));
+
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let reviewer = Arc::new(RangeReviewer {
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: reviewer.clone(),
+            worker_revise: None,
+            pusher: Arc::new(MockPusher {
+                pushed: Mutex::new(Vec::new()),
+            }),
+        };
+        let gate = run_pr_gate(&deps, range_request(&fix, &head, "feat/big"))
+            .await
+            .unwrap();
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert!(!gate.auto_merge_armed);
+        assert!(reviewer.seen.lock().unwrap().is_empty());
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
         server.abort();
     }
 }

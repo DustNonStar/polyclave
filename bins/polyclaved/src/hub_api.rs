@@ -15,9 +15,9 @@ use polyclave_hub::{
     council::CouncilParticipant,
     curation::MemoryCurator,
     pr_gate::{
-        pause_all as pr_gate_pause_all, GitMirrorPusher, MirrorPusher, PrGateDeps, ReviewOutcome,
-        ReviewWorktreeRequest, ReviewerExecutor, ReviewerSpec, RunPrGateRequest,
-        WorkerReviseExecutor,
+        pause_all as pr_gate_pause_all, review_diff, GitMirrorPusher, MirrorPusher, PrGateDeps,
+        ReviewDiff, ReviewOutcome, ReviewWorktreeRequest, ReviewerExecutor, ReviewerSpec,
+        RunPrGateRequest, WorkerReviseExecutor,
     },
     provider::{
         assemble, restore_api_history, ChatMessage, HubModelProvider, HubReply, HubRequest,
@@ -340,48 +340,28 @@ impl ReviewerExecutor for HostReviewerExecutor {
     ) -> BoxFuture<'a, HubResult<ReviewOutcome>> {
         Box::pin(async move {
             let worktree = req.worktree_path.clone();
+            let base_sha = req.base_sha.clone();
             let head_sha = req.head_sha.clone();
-            let diff = spawn_blocking(move || {
-                let mut cmd = std::process::Command::new("git");
-                for (key, _) in std::env::vars_os() {
-                    if key
-                        .to_string_lossy()
-                        .to_ascii_uppercase()
-                        .starts_with("GIT_")
-                    {
-                        cmd.env_remove(key);
-                    }
-                }
-                let out = cmd
-                    .env("GIT_CONFIG_NOSYSTEM", "1")
-                    .env("GIT_CONFIG_GLOBAL", "")
-                    .env("GIT_TERMINAL_PROMPT", "0")
-                    .env("LC_ALL", "C")
-                    .arg("-C")
-                    .arg(&worktree)
-                    .args(["show", "--stat", "--patch", &head_sha])
-                    .output()
-                    .map_err(|_| Error::NotStarted)?;
-                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-                if text.len() > 24_576 {
-                    let mut cut = 24_576;
-                    while cut > 0 && !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    text.truncate(cut);
-                }
-                Ok::<String, Error>(text)
-            })
-            .await
-            .map_err(|_| Error::NotStarted)??;
+            // The whole PR range, never one commit and never a truncated diff:
+            // the gate escalates an oversized range before review, and this
+            // refuses one too rather than let a partial diff be approved.
+            let (diff, commits) =
+                match spawn_blocking(move || review_diff(&worktree, &base_sha, &head_sha))
+                    .await
+                    .map_err(|_| Error::NotStarted)??
+                {
+                    ReviewDiff::Complete { text, commits } => (text, commits),
+                    ReviewDiff::TooLarge { .. } => return Err(Error::Limit),
+                };
 
             let provider = self.resolve_provider(req.vendor, &req.worktree_path)?;
             let (tx, _) = broadcast::channel(64);
             let prompt = format!(
-                "Review PR #{} ({}) at commit {}.\n\
+                "Review PR #{} ({}): the whole change from base {} to head {} ({} commit(s)). \
+                 The diff below is complete and untruncated.\n\
                  Return ONLY valid JSON: {{\"verdict\":\"approve\"|\"revise\",\"comments\":\"...\"}}.\n\n\
                  Diff:\n{}",
-                req.pr_number, req.repo_slug, req.head_sha, diff
+                req.pr_number, req.repo_slug, req.base_sha, req.head_sha, commits, diff
             );
             let reply = provider
                 .complete(
