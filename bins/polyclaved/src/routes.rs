@@ -8,7 +8,7 @@ use axum::{
         IntoResponse, Response,
     },
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use polyclave_core::{
     runner::TurnRunner,
@@ -36,7 +36,8 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
     let extension = app.hub.clone().map(crate::hub_api::router);
     let public_api = Router::new()
         .route("/pairing/exchange", post(exchange_pairing))
-        .with_state(app.clone());
+        .with_state(app.clone())
+        .layer(axum::Extension(auth.clone()));
     let api = Router::new()
         .route("/sessions", get(sessions).post(register))
         .route("/runs", get(runs).post(accept))
@@ -294,22 +295,64 @@ async fn register(State(app): State<App>, Json(input): Json<Register>) -> Reply 
 #[serde(deny_unknown_fields)]
 struct ExchangePairingBody {
     secret: String,
-    peer_identity: Option<String>,
 }
 
+/// Exchanges a one-time pairing ticket for a device token.
+///
+/// This route has no token yet — the phone has not got one — so it validates the
+/// request instead: exactly one `Host`, no self-declared identity, and an
+/// `Origin` that is either absent or this very host over https. The peer
+/// identity comes only from the proxy header, never from the body: a body field
+/// would let any client claim `dust@tailnet` and satisfy the dual-identity check
+/// for a device it never proved.
 async fn exchange_pairing(
     State(app): State<App>,
+    Extension(auth): Extension<LocalAuth>,
     headers: HeaderMap,
     Json(body): Json<ExchangePairingBody>,
 ) -> Reply {
-    let header_peer = headers
+    let peer = headers
         .get("tailscale-user-login")
         .or_else(|| headers.get("x-agentmesh-node"))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let peer = header_peer.or(body.peer_identity);
+    let host = if headers.get_all(axum::http::header::HOST).iter().count() == 1 {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+    } else {
+        None
+    };
+    // Either the loopback page (the daemon's own machine) or a request the
+    // trusted proxy tagged with an identity may pair.
+    let refused = || {
+        HttpError(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Pairing request refused",
+        )
+    };
+    let Some(host) = host else {
+        return Err(refused());
+    };
+    if host != auth.loopback_host() && peer.is_none() {
+        return Err(refused());
+    }
+    match headers.get(axum::http::header::ORIGIN) {
+        Some(_) if headers.get_all(axum::http::header::ORIGIN).iter().count() != 1 => {
+            return Err(refused());
+        }
+        Some(origin)
+            if !origin
+                .to_str()
+                .is_ok_and(|o| auth.origin_matches_host(o, host)) =>
+        {
+            return Err(refused());
+        }
+        _ => {}
+    }
     let (device, token) =
         blocking(move || app.store.exchange_pairing_ticket(&body.secret, peer)).await?;
     Ok(Json(json!({ "device": device, "token": token })))

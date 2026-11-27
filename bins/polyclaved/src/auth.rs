@@ -29,12 +29,32 @@ impl LocalAuth {
             store,
         }
     }
-    fn allowed_origin(&self, origin: &str) -> bool {
-        origin == self.web_origin
+    fn allowed_origin(&self, origin: &str, host: Option<&str>, peer: Option<&str>) -> bool {
+        if origin == self.web_origin
             || matches!(
                 origin,
                 "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
             )
+        {
+            return true;
+        }
+        // A phone or tablet reaches this daemon through Tailscale Serve, which
+        // terminates TLS and sets the identity header. Then the page's own
+        // origin must be allowed — otherwise approving from the phone is a 403 —
+        // but nothing else: the origin must be https and name exactly the Host
+        // the browser used, so a cross-site page is still refused.
+        match (peer, host) {
+            (Some(peer), Some(host)) => !peer.is_empty() && same_https_origin(origin, host),
+            _ => false,
+        }
+    }
+    /// The loopback `Host` value the desktop page uses.
+    pub fn loopback_host(&self) -> &str {
+        &self.host
+    }
+    /// True when `origin` is `https://<authority>` and `<authority>` is `host`.
+    pub fn origin_matches_host(&self, origin: &str, host: &str) -> bool {
+        same_https_origin(origin, host)
     }
     fn matches(&self, secret: &[u8]) -> bool {
         let expected = self.token.as_bytes();
@@ -56,15 +76,22 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let loopback_host = headers.get_all(header::HOST).iter().count() == 1
-        && headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(auth.host.as_str());
+    // Exactly one Host header, or none is trusted: a duplicated or missing Host
+    // cannot prove which origin the browser reached.
+    let host = if headers.get_all(header::HOST).iter().count() == 1 {
+        headers.get(header::HOST).and_then(|v| v.to_str().ok())
+    } else {
+        None
+    };
+    let loopback_host = host == Some(auth.host.as_str());
     if !loopback_host && (peer_identity.is_none() || auth.store.is_none()) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let origin = match headers.get(header::ORIGIN) {
         Some(v)
             if headers.get_all(header::ORIGIN).iter().count() == 1
-                && v.to_str().is_ok_and(|s| auth.allowed_origin(s)) =>
+                && v.to_str()
+                    .is_ok_and(|s| auth.allowed_origin(s, host, peer_identity.as_deref())) =>
         {
             Some(v.clone())
         }
@@ -136,6 +163,18 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// `origin` is `https://<authority>` and `<authority>` is exactly `host`
+/// (case-insensitively, as host names are). Anything carrying userinfo, a path,
+/// a query or a fragment is not an origin a browser sends, so it is refused.
+fn same_https_origin(origin: &str, host: &str) -> bool {
+    let Some(authority) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    !authority.is_empty()
+        && !authority.contains(['/', '@', '?', '#', '\\'])
+        && authority.eq_ignore_ascii_case(host)
 }
 
 fn cors(response: &mut Response, origin: Option<HeaderValue>) {

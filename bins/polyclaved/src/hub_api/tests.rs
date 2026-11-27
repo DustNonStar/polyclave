@@ -2984,3 +2984,182 @@ async fn dispatch_remote_at_the_receiver_limit_is_retryable_and_charged_once() {
     p.remote.close().await;
     p.primary.close().await;
 }
+
+/// Pairs over the tailnet host and keeps both pieces of evidence in one place.
+async fn paired_over_tailnet(app: &axum::Router, store: &Store) -> (String, String) {
+    use axum::body::to_bytes;
+    use axum::http::header;
+
+    let (_, secret) = store
+        .create_pairing_ticket(
+            polyclave_proto::ClientKind::Ios,
+            "Dust iPhone".to_owned(),
+            600,
+        )
+        .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "https://polyclave.tailnet.ts.net")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "secret": secret }).to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    let device = body["device"]["id"].as_str().unwrap().to_owned();
+    let token = body["token"].as_str().unwrap().to_owned();
+    assert_eq!(body["device"]["peer_identity"], json!("dust@tailnet"));
+    (device, token)
+}
+
+#[tokio::test]
+async fn phone_page_origin_is_accepted_and_a_cross_site_origin_is_refused() {
+    use axum::http::header;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+    let (_device, token) = paired_over_tailnet(&app, &store).await;
+
+    // The phone approves from the page it loaded: https://<tailnet host>.
+    // Before the fix this was a 403 and the phone could not approve at all.
+    let phone = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "https://polyclave.tailnet.ts.net")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(phone).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("https://polyclave.tailnet.ts.net")
+    );
+
+    // A page on another site is refused even if it somehow has the device token.
+    let cross_site = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "https://evil.example")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(cross_site).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // Same host but plain http is not the page Tailscale serves; refuse it.
+    let http_origin = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "http://polyclave.tailnet.ts.net")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(http_origin).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // The exchange makes the device usable for the phone's own page: a second
+    // exchange from a foreign origin is refused too.
+    let (_, secret2) = store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "Second".to_owned(), 600)
+        .unwrap();
+    let foreign_exchange = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "https://evil.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "secret": secret2 }).to_string()))
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(foreign_exchange)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn pairing_never_trusts_a_peer_identity_from_the_request_body() {
+    use axum::body::to_bytes;
+    use axum::http::header;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+
+    // A body field naming an identity is not part of the contract any more:
+    // otherwise any client could claim someone else's tailnet login.
+    let (_, secret) = store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "X".to_owned(), 600)
+        .unwrap();
+    let forged = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"secret": secret, "peer_identity": "dust@tailnet"}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(forged).await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // Paired from the daemon's own machine, the device stays unbound to any
+    // peer identity: nothing in the request can set one.
+    let (_, secret2) = store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "Local".to_owned(), 600)
+        .unwrap();
+    let local = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "secret": secret2 }).to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(local).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(body["device"]["peer_identity"], Value::Null);
+}
