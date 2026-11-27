@@ -724,3 +724,92 @@ fn stage3_pairing_revocation_mesh_and_notifications_are_durable() {
     assert!(!serialized.contains(&secret));
     assert!(!serialized.contains(&raw_token));
 }
+
+#[test]
+fn stage4_cua_mutex_hybrid_memory_evolution_and_skills_work() {
+    use polyclave_proto::{EvolutionKind, EvolutionStatus};
+    use polyclave_store::stage4::{NewEvolutionSuggestion, NewLocalSkill};
+
+    let (_dir, store) = fixture();
+
+    // CUA mutex: rejects when user active, acquires when idle, blocks 2nd caller, 1-click reclaim unlocks.
+    assert!(matches!(
+        store.cua_acquire("r1", "Polyclave", 5),
+        Err(Error::BusyError)
+    ));
+    let lock = store.cua_acquire("r1", "Polyclave", 45).unwrap();
+    assert!(lock.locked);
+    assert!(matches!(
+        store.cua_acquire("r2", "Polyclave", 60),
+        Err(Error::BusyError)
+    ));
+    let reclaimed = store.cua_reclaim().unwrap();
+    assert!(!reclaimed.locked);
+    assert!(reclaimed.reclaimed_at.is_some());
+
+    // Hybrid semantic search on verified memory_items.embedding_blob.
+    store
+        .write(|db| {
+            worker(db, 0)?;
+            Store::record_run_memory(db, "run", "repo", "Use Rustls without OpenSSL", None)
+        })
+        .unwrap();
+    let m1 = store
+        .find_memory(MemoryFilter::default())
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .store_memory_embedding(&m1.id, &[1.0, 0.0, 0.0])
+        .unwrap();
+    let hits = store.hybrid_search_memory(&[1.0, 0.0, 0.0], 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0.id, m1.id);
+
+    // Evolution suggestion lifecycle + rollback.
+    let sug = store
+        .create_evolution_suggestion(NewEvolutionSuggestion {
+            kind: EvolutionKind::Routing,
+            title: "Prefer Flash".into(),
+            rationale: "Lower latency on simple triage".into(),
+            payload_json: json!({"default": "deepseek-flash"}),
+            supersedes_id: None,
+        })
+        .unwrap();
+    let applied = store
+        .set_evolution_status(&sug.id, EvolutionStatus::Applied)
+        .unwrap();
+    assert_eq!(applied.status, EvolutionStatus::Applied);
+    let rolled = store
+        .set_evolution_status(&sug.id, EvolutionStatus::RolledBack)
+        .unwrap();
+    assert_eq!(rolled.status, EvolutionStatus::RolledBack);
+
+    // Teach-Once versioned local skills & rollback.
+    let v1 = store
+        .save_local_skill(NewLocalSkill {
+            name: "verify-rust".into(),
+            description: "Run fmt, clippy, test".into(),
+            body_md: "# Verify\nRun cargo test".into(),
+            synced_vendors: vec![Vendor::Codex, Vendor::Claude],
+        })
+        .unwrap();
+    assert_eq!(v1.version, 1);
+    let v2 = store
+        .save_local_skill(NewLocalSkill {
+            name: "verify-rust".into(),
+            description: "Run fmt, clippy, test v2".into(),
+            body_md: "# Verify v2\nRun cargo clippy && cargo test".into(),
+            synced_vendors: vec![Vendor::Codex, Vendor::Claude, Vendor::Agy],
+        })
+        .unwrap();
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.supersedes_id.as_deref(), Some(v1.id.as_str()));
+    let back = store.rollback_local_skill(&v2.id).unwrap();
+    assert_eq!(back.id, v1.id);
+    assert!(back.enabled);
+
+    // Community opt-in defaults to false.
+    assert!(!store.community_opt_in().unwrap());
+    assert!(store.set_community_opt_in(true).unwrap());
+}

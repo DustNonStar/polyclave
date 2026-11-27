@@ -103,7 +103,12 @@ impl Store {
             // Stage 3: additive and idempotent.
             migration.execute_batch(crate::stage3::SCHEMA)?;
             migration.pragma_update(None, "user_version", 7)?;
-        } else if version != 7 {
+        }
+        if version <= 7 {
+            // Stage 4: additive and idempotent.
+            migration.execute_batch(crate::stage4::SCHEMA)?;
+            migration.pragma_update(None, "user_version", 8)?;
+        } else if version != 8 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;
