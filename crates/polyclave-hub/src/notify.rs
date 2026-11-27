@@ -150,6 +150,20 @@ pub fn classify_attention_change(
     entity_id: &str,
     payload: &serde_json::Value,
 ) -> Option<NotificationMetadata> {
+    // A `pr_gate` observation carries `kind`, not `status`: the SCM observer
+    // records what it saw on GitHub, and those kinds are exactly what needs a
+    // look. Only the kind is used, never the summary text.
+    if topic == "pr_gate" {
+        if let Some(kind) = payload.get("kind").and_then(|v| v.as_str()) {
+            let title = match kind {
+                "ci_failure" => "A PR check failed",
+                "merge_conflict" => "A PR has merge conflicts",
+                "human_review" => "A reviewer left a pull-request review",
+                _ => return None,
+            };
+            return Some(NotificationMetadata::sanitized(topic, entity_id, title, 1));
+        }
+    }
     let status = payload.get("status").and_then(|v| v.as_str())?;
     let title = match (topic, status) {
         ("run", "needs_review") => "Run needs review",
@@ -222,6 +236,38 @@ mod tests {
     use axum::{routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn observed_pr_gate_kinds_wake_the_phone_without_any_payload_text() {
+        let summary = "PR #42 (org/repo) check 'ci/test' failed (Some(\"failure\")) at abc";
+        for (kind, expected) in [
+            ("ci_failure", "A PR check failed"),
+            ("merge_conflict", "A PR has merge conflicts"),
+            ("human_review", "A reviewer left a pull-request review"),
+        ] {
+            let payload = serde_json::json!({"kind": kind, "summary": summary});
+            let meta = classify_attention_change("pr_gate", "gate-1", &payload).unwrap();
+            assert_eq!(meta.title, expected);
+            assert_eq!(meta.topic, "pr_gate");
+            assert_eq!(meta.entity_id, "gate-1");
+            assert!(!meta.title.contains("PR #42"), "no event text leaks out");
+        }
+        // A plain comment is not an attention event, and neither is an unknown kind.
+        for payload in [
+            serde_json::json!({"kind": "comment"}),
+            serde_json::json!({"kind": "merged"}),
+            serde_json::json!({}),
+        ] {
+            assert!(classify_attention_change("pr_gate", "gate-1", &payload).is_none());
+        }
+        // The status-based paths keep working.
+        assert_eq!(
+            classify_attention_change("run", "r1", &serde_json::json!({"status": "needs_review"}))
+                .unwrap()
+                .title,
+            "Run needs review"
+        );
+    }
 
     #[test]
     fn rejects_public_endpoints_and_allows_private_tailscale() {
