@@ -969,3 +969,24 @@ Branch `claude/approval-card-evidence-a09726` (`35aece8`, `b117cc4`) was fast-fo
 - **修复是否到位**：生产代码里已经没有 `observed_sha` 兜底，也没有 `runs/<id>/final` 和 `push_mirror_branch` 的残留。152 个测试通过（见上一节）。
 - **修复引出的新问题（未修）**：A 和 C 叠加之后，主控在发送**之前**就扣了工单额度（`tools.rs` 中的 `charge_remote_dispatch`），而接收端以 429 拒绝（已达并发上限）时，这次扣费不会退回。用同一个 `request_id` 重试不会再扣，但 Hub 如果放弃这次派发或换了 id，这个额度就白白浪费了。建议：对 429、400、403 这类接收端明确表示"没有受理"的回应予以退款，保留 dispatch 记录，同一 id 重发时重新扣费；传输错误仍然不退。这是 `detail` 级问题。
 - **文档**：README 的验证状态表还停在旧状态（dsh 一行写着"仍会传 `--model`"、mesh 一行写着"预算问题未决"、本地合并清单不全），NEXT.md 还写着 A + C "正在实现"，这次都已更正。v5 设计规范本身没有写入今天的三项所有者决定（按 origin 发布、A + C、里程碑收窄），这些决定目前只记在 `PLAN-ISSUES.md`。下次修订规范时应把它们并进去。
+
+## 2026-11-27 详细复查（合并审查者）
+
+**检查结果（`0a5123b`，macOS）**：fmt、Clippy（`-D warnings`）干净；`cargo test --workspace` 全部通过；UI `npm ci`、`tsc --noEmit`、`npm run build` 通过；`npm run test:browser` 通过，包括 1440×900 和 375×812 下零溢出、无外部请求，二维码在版本 3、4、5、10 下往返解码都正确，审批卡在双主题、双尺寸下都正确；`proto.ts` 无差异。
+
+**确认原有修复到位**：PR 门禁只推送经 R1 核验的 SHA，带租约，推完核对远端；返工没有核验 SHA 就转人工；评审看到完整的 `base..head`；推送前检查 Reviewer 可用；按 `origin` 快照发布；dsh 不再传 `--model`；审批卡三行证据分开显示，测试一行没有数据时如实说"无记录"。
+
+**新发现的问题（都还没修）**
+
+1. **[重要] 首次推送会覆盖同名的远端分支**。`push_verified_sha(..., None)` 先读远端当前的分支顶端，再用 `--force-with-lease=<dest>:<当前顶端>` 推送（`pr_gate.rs`，首次推送在 `run_pr_gate` 中调用）。如果 GitHub 上已经有一个同名的分支（人建的，或者另一个 Run 留下的），它会被强制覆盖。建议：首次推送只在远端没有这个分支、或者顶端已经等于这个 SHA 时才推送；否则转人工。
+2. **[重要] 跨机 `request_id` 在接收端没有按来源区分**。接收端的幂等键是（按仓库划分的 mesh 会话，`request_id`），里面不含发送节点，也不含发送方的 Hub 会话（`http.rs` 中的 `mesh_worker_run`）。主控上两个不同的 Hub 会话，或者两个不同的发送节点，只要用了同一个 `request_id`（比如模型都起名 "fix-1"），第二个请求就会拿到第一个请求的 Run：主控照样扣了额度，但实际上什么都没启动，而且结果会被当成自己的。建议：接收端把 `request_id` 加上发送节点做命名空间，主控发送时再加上 Hub 会话前缀。
+3. **[次要] diff 大小检查在推送之后**。超过 24 KB 的 PR 会先推送、开 PR，之后才转人工（`run_pr_gate` 评审循环开头）。第一次检查应该挪到推送之前。
+4. **[次要] 返工后路径越界直接转人工，但没有 Hub 通知**（`run_pr_gate` 中 `revise_scope` 那一支），和其他转人工的分支不一致。
+5. **[次要] 并发上限触发的 429 不退还工单额度**（上一节已记录）。
+6. **[次要] 审批卡的 "Worker's claim" 取的是该 Attempt 最后一条 progress 事件**，未必是最终总结。标注是对的，但内容可能是中途的进度。
+
+**文档仍然过时**
+- `REVIEWER.md` 还是 v4 的内容：`pnpm check`、Node.js 26、"Phase 1 is built and accepted"、冻结会话、409 解锁。
+- `AGENTS.md` 和 `GEMINI.md` 第 1、3 条还写着"Keep the Node tests unchanged…""For archived Node-only work, use the legacy check"，但 Node 测试已经随 `legacy-node` 一起删除了。
+- v5 设计规范里还没写入今天的三项所有者决定（按 origin 发布、A + C、里程碑收窄）。
+- 这三个都是规则或设计文档，需要所有者确认后再改。
