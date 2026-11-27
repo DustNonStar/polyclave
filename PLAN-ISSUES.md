@@ -236,3 +236,57 @@ So the card's "Tests for this exact SHA" row always says "No test result recorde
 
 **What recording them would need (not built):** a `test_results` table keyed by `(run_id, sha, source)` with `source` in {`worker_claim`, `host_run`, `ci`}, status (`passed`/`failed`/`pending`), a summary and the time; for CI, the SCM observer writes one row per check-run conclusion for `head_sha` when it equals a Run's `result_sha`/`observed_sha`; optionally an extended `submit_result` with `tests` and `not_done` fields stored as the Worker's claim and shown labelled as such. `RunEvidenceDto` would then gain a list filtered by the exact SHA, so a result from an older SHA can never show. A host-run test (the host itself running the project's tests on the mirror SHA) is the only source that is not a claim and would need a direction decision.
 
+
+## [detail, resolved] 2026-11-27 audit fix round changed two existing assertions
+
+Two existing tests encode the protocol behaviour that `beed1ad` deliberately changes, so they cannot stay as written. Neither change weakens what the test proves:
+
+1. `bins/polyclaved/src/hub_api/tests.rs:2000`, `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote`: `assert_eq!(run.request_id, "req-mesh-1")` becomes `assert_eq!(run.request_id, "hub/req-mesh-1")`. The wire `request_id` now carries the calling Hub session as a namespace; the receiver stores the wire value verbatim.
+2. The same file at `:2741`, `dispatch_remote_resend_after_a_crash_is_not_charged_twice_and_exhaustion_blocks`: the hand-built crash fixture sets `direct.request_id = Some("req-lost")`. It must use `"hub/req-lost"`, because that is the exact value `dispatch_remote` puts on the wire for `req-lost`; otherwise the fixture simulates a request the primary never sends and the resend correctly admits a second Run. Every assertion in that test is unchanged.
+
+**Resolved (lead, 2026-11-27):** both edits applied in `beed1ad`. They are fixture/protocol expectations, not guarantees: index `idx_runs_idempotent_req` on `(hub_session_id, request_id)`, the ledger key `(hub_session_id, request_id)` and every resend invariant stay exactly as before.
+
+## [direction] A dispatch the receiver refuses with 429/400/403 still spends a Ticket run
+
+Raised by the 2026-11-27 review (merge reviewer #5) and confirmed in `bins/polyclaved/src/hub_api/tools.rs`: `dispatch_remote` charges the primary Ticket with `charge_remote_dispatch` **before** the HTTP call, and `crates/polyclave-store/src/remote_dispatch.rs` never refunds. A 429 from the receiver's per-node concurrency limit therefore burns one `runs_used` although nothing was started. A resend with the same `request_id` is free, but a Hub that gives up or renames the call loses that run.
+
+What a refund needs, measured against the code:
+
+- **A new column, not a new `outcome` value.** `remote_dispatches.outcome` has a `CHECK`, and `ALTER TABLE` cannot change it; `user_version` cannot be bumped either (`crates/polyclave-store/tests/store.rs:883-888` asserts 10). The live-schema step in `remote_dispatch::upgrade` can add a nullable `refunded_at` the same way `mesh_limits` adds its column.
+- **`runs_used` can only go up today.** `reserve_ticket` (`crates/polyclave-store/src/lib.rs:94-113`) is the only writer and only increments; there is no decrement helper anywhere.
+- **`blocked_on_user` has no way back.** `ticket_close` only allows `active → done|cancelled|blocked_on_user`, so a Ticket that a 429 pushed into `blocked_on_user` can never be reused even after a refund. Restoring it needs a rule; the only available signature is "`status='blocked_on_user' AND runs_used = max_runs`", which would wrongly revive a Ticket the user closed by hand after using it up.
+- **400 cannot be treated as "not admitted" without a receiver change.** `mesh_worker_run` can still answer 400 *after* the Run row exists: `hub.runner.schedule(...)` errors are mapped through `MeshAdmission::Refused(HttpError::from(..))` (`bins/polyclaved/src/hub_api/http.rs:1265-1268`), and `Error::Invalid` maps to 400. Refunding on 400 as things stand would return a run that the receiver really did admit.
+- **The resend must pay again** (owner's stated rule), which means `charge_remote_dispatch` has to branch on `refunded_at` and re-reserve, and `dispatch_remote`'s `first` flag (`hub_api/tools.rs:244-248`) has to treat a refunded row as a first dispatch.
+- **One existing assertion changes:** `bins/polyclaved/src/hub_api/tests.rs:2943-2946` (`dispatch_remote_at_the_receiver_limit_is_retryable_and_charged_once`) asserts `(2, "active")` while the comment says "The reservation is kept"; under the refund rule the dispatch is `(1, "active")` plus `refunded_at` set. The later assertion after the resend stays `(2, "active")`, but its comment ("without a new charge") must be rewritten.
+
+Options for the owner:
+
+- **A (recommended):** refund only the states that provably admitted nothing — 429 and 403 (both are returned before `accept_guarded` for the paths that matter), keep the row with `outcome` intact plus `refunded_at`, re-charge a resend, and **also** fix `mesh_worker_run` so a post-admission `schedule`/`get` failure returns the admitted Run (or an `admitted: true` body) instead of 400. Leave transport errors unrefunded: "never arrived" and "arrived, reply lost" stay indistinguishable.
+- **B:** refund on 429 only, and leave 400/403 alone. Smallest change, still fixes the case the audit found, and needs no receiver change; the ticket-state restore problem remains.
+- **C:** keep "never refund" and change the receiver to queue a dispatch over the limit instead of refusing it. Contradicts the recorded owner decision that an over-limit dispatch is refused with a clear retryable status and never silently queued.
+
+Nothing is implemented on any branch. This is `direction` because A needs the receiver behaviour changed and because the `blocked_on_user` restore rule can override an explicit user decision.
+
+## [direction] What recording a test result per SHA still needs
+
+The 2026-11-27 fix round measured the existing `detail` item above against the code. The conclusion is that the approval card's tests row cannot be fixed by a query: **no final summary text exists in the ledger at all**. `results.payload_json` holds only `{run_id, branch, sha}`; `turns` has no text column; Worker turns never write `messages`; the vendor CLI's stdout is parsed into `AgentEvent` values that only reach the SSE stream and are never persisted. The card's "Worker's claim" already reads the last `progress` event of the Attempt — there is nothing later to read.
+
+The cheapest visible slice (one commit, no new table) is to put the claim into the receipt: optional `tests` and `not_done` fields on `submit_result` (`crates/polyclave-adapters/src/mcp.rs:417-423`, `inputSchema` at `:467-473`), stored automatically because the whole `Submit` is serialised into `results.payload_json`, then surfaced by extending `RunEvidenceDto` and `apps/polyclave-app/ui/src/views/evidence.ts` (`tests(sha)` at `:53-61` needs the evidence argument). It touches six existing assertions, which is why it is not in this round:
+
+- `crates/polyclave-proto/src/lib.rs:128-139`: the test name says `..._has_no_test_field` and asserts exact JSON equality.
+- `crates/polyclave-core/tests/recovery.rs:405-412` and `:421-428`: two `RunEvidenceDto` struct literals.
+- `apps/polyclave-app/ui/tests/approval-card.mjs:30-33`, `:113-117`, `:148-150`: the fixtures, the tests-row state and the assertion that the tests-row pill has **no** `data-tone`.
+
+Decisions the owner must make before that work starts:
+
+1. May the tests row ever go green, and only for `source in {host_run, ci}` that equals the exact SHA?
+2. Is a host-run test (the host runs the project's tests on the mirror SHA) in scope? That is a new execution engine with its own timeouts and resource limits.
+3. Which check runs count: only those whose `head_sha` equals the Run's `result_sha`?
+4. What shows when a `worker_claim` says passed and a `ci` row says failed for the same SHA?
+5. Do `tests`/`not_done` take part in the `Submit` equality check, so the same SHA with different text is refused as a different result?
+6. Is renaming the proto test allowed?
+7. Is the additive live-schema upgrade (no `user_version` bump) acceptable for a new `test_results` table?
+
+## [detail] `dsh` still gets no `mcp_url`, and choosing its model still needs a real run
+
+Sections 9–10 of `docs/LESSONS.md` and the existing `dsh` item above stand. Two facts from the 2026-11-27 round: `crates/polyclave-adapters/src/dsh.rs` still sets only `DSH_HOME` and `POLYCLAVE_MCP_TOKEN`, so a real `dsh` Worker cannot call `submit_result`; and the model key cannot be established from `--help` or `--dump-config-schema` alone. Both need one real `dsh` run under an isolated `DSH_HOME`, which no job has authorised yet. Not attempted this round.

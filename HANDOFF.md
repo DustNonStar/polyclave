@@ -1037,3 +1037,37 @@ Branch `claude/approval-card-evidence-a09726` (`35aece8`, `b117cc4`) was fast-fo
   5. Mesh `request_id` 按发送节点与 Hub 会话做命名空间隔离，429/400/403 退还主控 Ticket 额度（合并审查者 #2/#5）。
   6. 审批卡 `Worker's claim` 取值优化（合并审查者 #6）。
   7. `dsh` 注入 `mcp_url` 与模型选择（Gemini #5 及 `PLAN-ISSUES.md` detail 条目）。
+
+## 2026-11-27 审计修复（`fix/audit-2026-11-27`，由接手本项目的 DeepSeek 实机执行）
+
+分支 `fix/audit-2026-11-27`，基点 `main@5fdc9e1`。修的是上一节"独立安全与运行链路审查（Gemini）"和"详细复查（合并审查者）"里列出的问题。**没有推送，也没有合并**：所有者此前要求暂缓推送，这一轮沿用。
+
+Commits（每项一个提交，每项后都跑过 fmt / Clippy `-D warnings` / workspace 测试）：
+
+- `03bc09c fix(pr-gate): refuse a first push that would overwrite someone else's branch` — 合并审查者 #1。原因确认：`push_verified_sha(..., None)` 先用 `ls-remote` 读出远端顶端，再拿这个顶端做 `--force-with-lease`，租约**必然自我满足**，所以同名远端分支会被强制覆盖。现在首次推送只允许"分支不存在"或"顶端已经等于该 SHA"，其余返回 `Error::Policy`，由 `run_pr_gate` 转成 `Escalated` 并给 Hub 发通知，不推送、不开 PR。trait 文档同步改写（原文写的就是这个有洞的语义）。测试：`git_pusher_never_overwrites_a_branch_it_did_not_create`、`refused_first_push_escalates_with_a_hub_notice_and_no_pr`。
+- `19576d3 fix(pr-gate): decide that the PR range is reviewable before pushing it` — 合并审查者 #3。24 KB 检查从评审循环开头挪到**每次推送之前**（首次推送前、以及返工推送新 SHA 之前），超限直接转人工，不再"先推送、先开 PR、再转人工"。测试：`oversized_pr_range_escalates_before_the_push_and_opens_no_pr`。
+- `4631418 fix(pr-gate): tell the Hub when a revise leaves the Run's paths` — 合并审查者 #4。返工后路径越界分支原来只改状态、不通知；现在走同一套 `escalate`，并在文案里写明新 SHA 没有被推送。测试：`out_of_scope_revise_escalates_with_a_hub_notice_and_pushes_nothing`。
+- `03b33bc fix(auth): let the phone's own origin approve, and stop trusting a declared identity` — Gemini #2，**这一项是手机端真正的阻断**。`allowed_origin` 只放行 `http://127.0.0.1:<port>` 和 tauri 源，手机从 `https://<host>.ts.net` 发批准必然 403。现在：存在受信任身份头、`Host` 唯一、且 `Origin` 是同一主机的 `https://` 同源时放行；跨站 Origin 仍然拒绝。`POST /api/pairing/exchange` 不再读 `body.peer_identity`（该字段已从请求体删除，带它会被 422 拒绝），改为只认代理头，并补 `Host`/`Origin` 校验（Loopback 主机或带身份头才可配对）。测试：`phone_page_origin_is_accepted_and_a_cross_site_origin_is_refused`、`pairing_never_trusts_a_peer_identity_from_the_request_body`；原有 `stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notifications` 未改动、仍通过。
+- `3720020 fix(observer): external SCM events are host input, and bots are never admitted` — Gemini #1。存储层新增 `hub_enqueue_external`（强制 `source='host'`）与 `run_repo_cwd`；`ScmObserver` 一律用它入队，因此外部 PR 评论/评审**不可能**再以 `source='user'` 落库，也就不可能满足 `hub_ticket` 的 basis（该 SQL 只接受 `source='user'`）。同时按该仓库的 admission policy 过滤：`off` 全部静默，`<name>[bot]` 或 `bot_actors_json` 里的账号一律不进入 Hub、也不进 Hub 会读的 change log。`Triage` 的判定抽成 `inference_verdict` 供两处共用，避免两份规则漂移。测试：`external_comments_are_host_input_never_user_input`、`a_bot_comment_never_wakes_the_hub`。
+- `4470a0a fix(observer): keep review and comment cursors apart so neither hides the other` — Gemini #3。GitHub 的 review 与 issue comment 是两套自增序列，原来共用一个 `last_comment_id`，id 较小的一侧会被永久跳过。新增 `scm_review_cursors`（沿用 live-schema 加表，`user_version` 仍是 10，`store.rs` 那条 `== 10` 断言未受影响），review 用自己的游标。测试：`a_large_review_id_does_not_hide_later_comments_with_smaller_ids`（review id 900 之后 id 6 的新评论必须被发现）。
+- `26af096 fix(notify): wake on an observed check failure, conflict or human review` — Gemini #4。`classify_attention_change` 只认 `payload.status`，而 observer 写的是 `kind`（`ci_failure` / `merge_conflict` / `human_review`），所以 CI 失败、合并冲突、人工评审永远不会推送。现在两条都认，仍然只发元数据标题，不带事件正文。测试：`observed_pr_gate_kinds_wake_the_phone_without_any_payload_text`。
+- `beed1ad fix(mesh): namespace the wire request_id with the calling Hub session` — 合并审查者 #2。查证结果与审计原文有出入：接收端的 `node_id` 是**接收方自己**的 mesh id（`authorize` 强制 `scope.node_id == node.id`，token 里也没有发送方身份），所以"接收端加发送节点前缀"在现有协议里做不到。实际能做且已做的是主控侧命名空间：wire 上发 `"<hub_session>/<request_id>"`，账本键仍是 Hub 的原始 `request_id`（否则 `record_remote_dispatch_outcome` 会找不到行、并被静默吞掉），原始值上限收紧到 200 字节给前缀留预算。测试：`two_hub_sessions_with_the_same_request_id_get_two_remote_runs`。
+
+Tests: 每个提交都在本机 macOS 跑过 `cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`。分支顶端 `beed1ad`：**163 passed, 0 failed**（基线 `5fdc9e1` 为 152）。新增 11 个测试，全部是净新增；改了两处既有断言，理由见下条 Issues。**Windows CI 没有跑**，UI 的 `tsc`/浏览器检查本轮未跑（没有改动任何 UI 文件或 DTO，`proto.ts` 因此无需重生成，CI 的漂移门不受影响）。
+
+Hand check: 本轮没有 UI 改动，所以没有 1440/375 截图，也没有 `handcheck/<job>/`。所有验证都是 Rust 侧的命令输出，逐条写在上面的提交说明里。
+
+Issues（已写入 `PLAN-ISSUES.md`）:
+
+- **改了两处既有断言**，都是"协议/行为被有意改变"所必需，不是放宽：
+  - `bins/polyclaved/src/hub_api/tests.rs:2000`：`run.request_id` 由 `"req-mesh-1"` 改为 `"hub/req-mesh-1"`（wire 上现在带会话前缀）。
+  - 同一文件 `:2741`：崩溃重发夹具里手工构造的 wire `request_id` 由 `"req-lost"` 改为 `"hub/req-lost"`，让"崩溃前主控发出去的那条请求"与真实前缀一致；该测试的所有断言原样保留。
+- 新增 `direction` 条目：429/400/403 退还工单额度（含设计、以及为什么 400 需要先改接收端语义）。
+- 原 `detail` 条目（按 SHA 记录测试结果）补上了落地清单与 7 个需要所有者决定的问题。
+- `dsh` 注入 `mcp_url` 仍未做：需要一次真实 `dsh` 运行才能确定配置方式，本轮不允许起真实 vendor。
+
+Cleanup: 没有起任何 host、fake codex 或浏览器；测试用的临时目录与假 HTTP 服务都由 `tempfile` / `abort()` 收掉。
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`。
+
+Not done: Windows CI；真实环境验收（本轮一项都没跑）；按 SHA 记录测试结果；`dsh` 的 `mcp_url` 与模型选择；`REVIEWER.md`、`AGENTS.md` 和 v5 规范里过时的内容（属于所有者确认后才能改的规则/设计文档）。
