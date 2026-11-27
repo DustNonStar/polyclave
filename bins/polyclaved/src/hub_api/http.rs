@@ -141,6 +141,7 @@ pub fn router(hub: Hub) -> Router {
         .route("/skills/{id}/rollback", post(rollback_local_skill))
         .route("/community/draft", axum::routing::get(community_draft))
         .route("/community/opt-in", post(community_opt_in))
+        .route("/community/submit", post(community_submit))
         .with_state(hub)
 }
 
@@ -1004,6 +1005,58 @@ async fn community_opt_in(State(hub): State<Hub>, Json(body): Json<CommunityOptI
     })
     .await?;
     Ok(Json(json!({ "opt_in": opt_in })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunitySubmitBody {
+    repo_slug: Option<String>,
+    title: String,
+    body: String,
+    confirmed: bool,
+}
+
+async fn community_submit(State(hub): State<Hub>, Json(body): Json<CommunitySubmitBody>) -> Reply {
+    let opted_in = run_blocking({
+        let store = hub.store.clone();
+        move || store.community_opt_in().map_err(HttpError::from)
+    })
+    .await?;
+    if !opted_in || !body.confirmed {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "policy",
+            "Community opt-in and explicit confirmation are required",
+        ));
+    }
+    let token = run_blocking(|| {
+        polyclave_os::read_provider_credential("Polyclave.GitHub", "bot_token").map_err(|_| {
+            HttpError(
+                StatusCode::CONFLICT,
+                "credential_missing",
+                "GitHub credential is not configured",
+            )
+        })
+    })
+    .await?;
+    let api_base = std::env::var("POLYCLAVE_COMMUNITY_API_BASE")
+        .unwrap_or_else(|_| "https://api.github.com".to_owned());
+    let result = polyclave_hub::evolution::submit_redacted_community_draft(
+        &hub.store,
+        &api_base,
+        &token,
+        polyclave_hub::evolution::CommunitySubmitRequest {
+            repo_slug: body
+                .repo_slug
+                .unwrap_or_else(|| "DustNonStar/polyclave".to_owned()),
+            title: body.title,
+            body: body.body,
+            confirmed: body.confirmed,
+        },
+    )
+    .await
+    .map_err(map_hub_err)?;
+    Ok(Json(json!(result)))
 }
 
 pub fn mesh_router(hub: Hub) -> Router {

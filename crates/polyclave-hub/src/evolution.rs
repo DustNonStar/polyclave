@@ -5,12 +5,16 @@
 use crate::{Error, Result};
 use polyclave_os::{create_private_dir, write_private_file};
 use polyclave_proto::{
-    CommunityDraftDto, EvolutionKind, EvolutionSuggestionDto, LocalSkillDto, Vendor,
+    CommunityDraftDto, EvolutionKind, EvolutionStatus, EvolutionSuggestionDto, LocalSkillDto,
+    Vendor,
 };
 use polyclave_store::stage4::NewEvolutionSuggestion;
 use polyclave_store::{MemoryFilter, Store};
+use reqwest::redirect::Policy;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
+use std::time::Duration;
 
 /// Deterministic 128-dim unit-normalized hashed trigram embedding (zero external APIs).
 pub fn local_embedding(text: &str) -> Vec<f32> {
@@ -201,6 +205,135 @@ pub fn build_redacted_community_draft(store: &Store) -> Result<CommunityDraftDto
     })
 }
 
+/// Formats `Applied` evolution suggestions into a bounded Hub system prompt section.
+/// Suggestions transition back out immediately when rolled back.
+pub fn format_applied_evolution_guidance(store: &Store) -> Result<String> {
+    let all = store
+        .list_evolution_suggestions()
+        .map_err(|_| Error::Store)?;
+    let applied: Vec<_> = all
+        .into_iter()
+        .filter(|s| s.status == EvolutionStatus::Applied)
+        .take(12)
+        .collect();
+    if applied.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::from("<applied_evolution_guidance>\n");
+    for s in applied {
+        let kind = match s.kind {
+            EvolutionKind::Routing => "routing",
+            EvolutionKind::MemoryRule => "memory_rule",
+            EvolutionKind::RoleBrief => "role_brief",
+        };
+        out.push_str(&format!("- [{}] {}: {}\n", kind, s.title, s.rationale));
+    }
+    out.push_str("</applied_evolution_guidance>");
+    Ok(out)
+}
+
+/// Distills new suggestions only if no `Proposed` suggestions are currently pending review.
+pub fn distill_if_due(store: &Store) -> Result<Vec<EvolutionSuggestionDto>> {
+    let existing = store
+        .list_evolution_suggestions()
+        .map_err(|_| Error::Store)?;
+    if existing
+        .iter()
+        .any(|s| s.status == EvolutionStatus::Proposed)
+    {
+        return Ok(Vec::new());
+    }
+    distill_local_suggestions(store)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommunitySubmitRequest {
+    pub repo_slug: String,
+    pub title: String,
+    pub body: String,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommunitySubmitResult {
+    pub issue_url: String,
+    pub issue_number: u64,
+}
+
+fn valid_repo_slug(slug: &str) -> bool {
+    let Some((owner, repo)) = slug.split_once('/') else {
+        return false;
+    };
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return false;
+    }
+    let valid_part = |p: &str| {
+        !p.contains("..")
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    valid_part(owner) && valid_part(repo)
+}
+
+/// Explicitly submits a user-confirmed, redacted community draft to GitHub Issues.
+/// Enforces opt-in, explicit confirmation, valid repo slug, and secondary redaction.
+pub async fn submit_redacted_community_draft(
+    store: &Store,
+    api_base: &str,
+    token: &str,
+    req: CommunitySubmitRequest,
+) -> Result<CommunitySubmitResult> {
+    if !store.community_opt_in().map_err(|_| Error::Store)? || !req.confirmed {
+        return Err(Error::Policy);
+    }
+    if req.title.trim().is_empty()
+        || req.body.trim().is_empty()
+        || token.trim().is_empty()
+        || !valid_repo_slug(&req.repo_slug)
+    {
+        return Err(Error::Policy);
+    }
+    let (_, s1) = redact_text(&req.title);
+    let (_, s2) = redact_text(&req.body);
+    if s1 > 0 || s2 > 0 {
+        return Err(Error::Policy);
+    }
+    let base = api_base.trim_end_matches('/');
+    let url = format!("{base}/repos/{}/issues", req.repo_slug);
+    let http = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| Error::Transport)?;
+    let resp = http
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("User-Agent", "polyclave-v5")
+        .header("Accept", "application/vnd.github+json")
+        .json(&json!({
+            "title": req.title,
+            "body": req.body,
+            "labels": ["community-learning"]
+        }))
+        .send()
+        .await
+        .map_err(|_| Error::Transport)?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(Error::Http {
+            status: status.as_u16(),
+            detail: "community issue submission failed".into(),
+        });
+    }
+    let val: serde_json::Value = resp.json().await.map_err(|_| Error::Transport)?;
+    let issue_url = val["html_url"].as_str().ok_or(Error::Transport)?.to_owned();
+    let issue_number = val["number"].as_u64().ok_or(Error::Transport)?;
+    Ok(CommunitySubmitResult {
+        issue_url,
+        issue_number,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +395,98 @@ mod tests {
         assert_eq!(a, b);
         let norm: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn applied_evolution_guidance_reflects_apply_and_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("evo.sqlite")).unwrap();
+        assert!(format_applied_evolution_guidance(&store)
+            .unwrap()
+            .is_empty());
+
+        let first = distill_if_due(&store).unwrap();
+        assert!(!first.is_empty());
+        // Does not flood while a Proposed suggestion is pending.
+        assert!(distill_if_due(&store).unwrap().is_empty());
+
+        let id = first[0].id.clone();
+        store
+            .set_evolution_status(&id, EvolutionStatus::Applied)
+            .unwrap();
+        let guidance = format_applied_evolution_guidance(&store).unwrap();
+        assert!(guidance.contains("<applied_evolution_guidance>"));
+        assert!(guidance.contains(&first[0].title));
+
+        store
+            .set_evolution_status(&id, EvolutionStatus::RolledBack)
+            .unwrap();
+        assert!(format_applied_evolution_guidance(&store)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn community_submit_enforces_opt_in_confirmation_and_secondary_redaction() {
+        use axum::{routing::post, Json, Router};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("comm.sqlite")).unwrap();
+
+        let req = CommunitySubmitRequest {
+            repo_slug: "DustNonStar/polyclave".into(),
+            title: "Use rustls without openssl".into(),
+            body: "Verified workflow learning".into(),
+            confirmed: true,
+        };
+        assert!(matches!(
+            submit_redacted_community_draft(&store, "http://127.0.0.1:1", "tok", req.clone()).await,
+            Err(Error::Policy)
+        ));
+
+        store.set_community_opt_in(true).unwrap();
+        assert!(matches!(
+            submit_redacted_community_draft(
+                &store,
+                "http://127.0.0.1:1",
+                "tok",
+                CommunitySubmitRequest {
+                    confirmed: false,
+                    ..req.clone()
+                }
+            )
+            .await,
+            Err(Error::Policy)
+        ));
+
+        // Secondary redaction rejects unredacted paths/secrets.
+        let leaky_body = format!("Check {}", ["/U", "sers/alice/secret"].concat());
+        assert!(matches!(
+            submit_redacted_community_draft(
+                &store,
+                "http://127.0.0.1:1",
+                "tok",
+                CommunitySubmitRequest {
+                    body: leaky_body,
+                    ..req.clone()
+                }
+            )
+            .await,
+            Err(Error::Policy)
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/repos/DustNonStar/polyclave/issues",
+            post(|| async {
+                Json(json!({"html_url": "https://github.com/DustNonStar/polyclave/issues/42", "number": 42}))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let res = submit_redacted_community_draft(&store, &format!("http://{addr}"), "tok", req)
+            .await
+            .unwrap();
+        assert_eq!(res.issue_number, 42);
     }
 }

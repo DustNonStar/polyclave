@@ -123,6 +123,7 @@ struct Lifecycle {
     observer: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     notifier: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     mesh_probe: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    evolution_sched: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 struct HostReviewerExecutor;
@@ -476,6 +477,37 @@ impl Hub {
         });
         *slot = Some((tx, handle));
     }
+    pub async fn start_evolution_scheduler(&self) {
+        let mut slot = self.lifecycle.evolution_sched.lock().await;
+        if let Some((prev_tx, prev_handle)) = slot.take() {
+            let _ = prev_tx.send(true);
+            let _ = prev_handle.await;
+        }
+        if self.is_closed() {
+            return;
+        }
+        let store = self.store.clone();
+        let (tx, mut rx) = watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(6 * 3600));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        let s = store.clone();
+                        let _ = spawn_blocking(move || polyclave_hub::evolution::distill_if_due(&s)).await;
+                    }
+                }
+            }
+        });
+        *slot = Some((tx, handle));
+    }
     pub(crate) fn pr_gate_deps(&self) -> HubResult<PrGateDeps> {
         let scm = self.scm().ok_or(Error::Credential)?;
         let reviewer = self.stage2.reviewer.lock().unwrap().clone();
@@ -706,6 +738,10 @@ impl Hub {
             let _ = tx.send(true);
             let _ = handle.await;
         }
+        if let Some((tx, handle)) = self.lifecycle.evolution_sched.lock().await.take() {
+            let _ = tx.send(true);
+            let _ = handle.await;
+        }
         let _ = self.stream.send((String::new(), StreamEvent::Shutdown));
         {
             let active = self.lifecycle.sessions.lock().unwrap();
@@ -873,8 +909,13 @@ impl Hub {
                     manager: role == "manager",
                     stop: flag,
                 };
-                CliHubProvider::new(hub.store, Arc::new(transport))
-                    .reply(claim, SYSTEM, &memory, events)?;
+                let system_prompt = build_system_prompt(&hub.store);
+                CliHubProvider::new(hub.store, Arc::new(transport)).reply(
+                    claim,
+                    &system_prompt,
+                    &memory,
+                    events,
+                )?;
                 Ok(())
             })
             .await;
@@ -885,7 +926,8 @@ impl Hub {
             let provider = ApiHubProvider::from_registered(&store, &claim.profile)?;
             let saved = store.hub_api_history(&claim.session, &claim.profile, claim.input.id).map_err(|_| Error::Store)?;
             let history = restore_api_history(saved, provider.is_official_deepseek())?;
-            let messages = assemble(SYSTEM, &memory, &claim.summary, &history,
+            let system_prompt = build_system_prompt(&store);
+            let messages = assemble(&system_prompt, &memory, &claim.summary, &history,
                 &json!({"hub_session_id":claim.session,"repo_cwd":claim.repo,"current_event":claim.input.metadata}),
                 ChatMessage::text(Role::User, &claim.input.text))?;
             store.hub_authorize(claim.id, None).map_err(|_|Error::Store)?;
@@ -1101,6 +1143,13 @@ fn infer_vendor(vendor_col: Option<&str>, profile_id: &str, base_url: &str) -> V
         Vendor::Agy
     } else {
         Vendor::Codex
+    }
+}
+
+pub(crate) fn build_system_prompt(store: &Store) -> String {
+    match polyclave_hub::evolution::format_applied_evolution_guidance(store) {
+        Ok(guidance) if !guidance.is_empty() => format!("{SYSTEM}\n\n{guidance}"),
+        _ => SYSTEM.to_owned(),
     }
 }
 

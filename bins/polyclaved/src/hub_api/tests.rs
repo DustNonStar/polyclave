@@ -1560,3 +1560,58 @@ async fn mesh_heartbeat_probe_and_attenuated_remote_dispatch_work_end_to_end() {
     remote.close().await;
     primary.close().await;
 }
+
+#[tokio::test]
+async fn community_submit_route_and_applied_evolution_system_prompt_work() {
+    use axum::http::{header, Request, StatusCode};
+    use polyclave_proto::EvolutionStatus;
+    use tower::ServiceExt;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+
+    // Community submit rejects when opt_in=false or confirmed=false.
+    let submit_req = Request::builder()
+        .method("POST")
+        .uri("/api/community/submit")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({"title":"Learning","body":"Body","confirmed":true}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(submit_req).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+
+    // Applied evolution guidance is injected into Hub system prompt and removed on rollback.
+    let created = polyclave_hub::evolution::distill_local_suggestions(&store).unwrap();
+    assert!(!created.is_empty());
+    let id = created[0].id.clone();
+    store
+        .set_evolution_status(&id, EvolutionStatus::Applied)
+        .unwrap();
+    let prompt_with_evo = crate::hub_api::build_system_prompt(&store);
+    assert!(prompt_with_evo.contains("<applied_evolution_guidance>"));
+    assert!(prompt_with_evo.contains(&created[0].title));
+
+    store
+        .set_evolution_status(&id, EvolutionStatus::RolledBack)
+        .unwrap();
+    let prompt_rolled = crate::hub_api::build_system_prompt(&store);
+    assert!(!prompt_rolled.contains("<applied_evolution_guidance>"));
+
+    hub.close().await;
+}
