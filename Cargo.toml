@@ -6,6 +6,7 @@ members = [
   "crates/polyclave-adapters",
   "crates/polyclave-core",
   "crates/polyclave-hub",
+  "crates/polyclave-mesh",
   "bins/polyclaved",
   "apps/polyclave-app/src-tauri",
 ]
