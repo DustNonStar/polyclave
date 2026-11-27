@@ -176,6 +176,16 @@ impl Hub {
                     action: String,
                     #[serde(default)]
                     instructions: String,
+                    #[serde(default)]
+                    vendor: Option<String>,
+                    #[serde(default)]
+                    model: Option<String>,
+                    #[serde(default)]
+                    base_branch: Option<String>,
+                    #[serde(default)]
+                    request_id: Option<String>,
+                    #[serde(default)]
+                    run_id: Option<String>,
                 }
                 let input: DispatchRemoteArgs =
                     serde_json::from_value(args).map_err(|_| Error::Policy)?;
@@ -203,15 +213,18 @@ impl Hub {
                         expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
                     };
                     let token = hub.mesh_policy().issue(scope).map_err(|_| Error::Policy)?;
-                    Ok((
-                        node.endpoint,
-                        polyclave_mesh::RemoteDispatchRequest::new(
-                            caller_repo,
-                            action,
-                            input.instructions,
-                            token,
-                        ),
-                    ))
+                    let mut req = polyclave_mesh::RemoteDispatchRequest::new(
+                        caller_repo,
+                        action,
+                        input.instructions,
+                        token,
+                    );
+                    req.vendor = input.vendor;
+                    req.model = input.model;
+                    req.base_branch = input.base_branch;
+                    req.request_id = input.request_id;
+                    req.run_id = input.run_id;
+                    Ok((node.endpoint, req))
                 })
                 .await?;
                 let client = polyclave_mesh::MeshClient::new().map_err(|_| Error::Transport)?;
@@ -547,11 +560,16 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
             ),
             tool(
                 "dispatch_remote",
-                "Dispatch an allowlisted read/probe action to an online federated mesh node using an attenuated capability token.",
+                "Dispatch an allowlisted action to an online federated mesh node using an attenuated capability token. Use action worker_run (with instructions and an optional request_id for idempotency, vendor, model, base_branch) to start a Worker Run on that node, and run_status (with run_id) to read its result.",
                 json!({
                     "node_id": string,
                     "action": string,
-                    "instructions": string
+                    "instructions": string,
+                    "vendor": string,
+                    "model": string,
+                    "base_branch": string,
+                    "request_id": string,
+                    "run_id": string
                 }),
                 &["node_id", "action"],
             ),
