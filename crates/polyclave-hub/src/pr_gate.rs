@@ -2,7 +2,10 @@
 //! heterogeneous review, crash-safe auto-merge, and global Pause revocation.
 use crate::{
     publish_origin::{resolve_publish_target, PublishTarget},
-    scm::{BoxFuture, OpenPrRequest, ReviewEvent, ScmClient, ScmError, SubmitReviewRequest},
+    scm::{
+        BoxFuture, OpenPrRequest, ReviewEvent, ScmClient, ScmError, SecretToken,
+        SubmitReviewRequest,
+    },
     Error, Result,
 };
 use polyclave_core::{scope::check_touched_paths, worktree::WorktreeManager, GitError};
@@ -139,17 +142,43 @@ pub trait MirrorPusher: Send + Sync {
 
 const GITHUB_BASE_URL: &str = "https://github.com/";
 
+/// Keychain item holding the bot token the daemon already uses for GitHub.
+const GITHUB_CREDENTIAL_SERVICE: &str = "Polyclave.GitHub";
+const GITHUB_CREDENTIAL_ACCOUNT: &str = "bot_token";
+
+/// Environment variable that carries the token to the one-shot credential
+/// helper of a single git command. It is set only on that command.
+const PUBLISH_TOKEN_ENV: &str = "POLYCLAVE_PUBLISH_TOKEN";
+
+/// A credential helper that answers `get` with the token from
+/// [`PUBLISH_TOKEN_ENV`]. Only the variable's name is in argv, never its value.
+const PUBLISH_CREDENTIAL_HELPER: &str = "credential.helper=!f() { test \"$1\" = get || exit 0; echo username=x-access-token; printf 'password=%s\\n' \"$POLYCLAVE_PUBLISH_TOKEN\"; }; f";
+
+type TokenSource = Arc<dyn Fn() -> Result<SecretToken> + Send + Sync>;
+
+fn keychain_bot_token() -> Result<SecretToken> {
+    polyclave_os::read_provider_credential(GITHUB_CREDENTIAL_SERVICE, GITHUB_CREDENTIAL_ACCOUNT)
+        .map(SecretToken::new)
+        .map_err(|_| Error::Credential)
+}
+
 /// Pushes from the host mirror to `https://github.com/<repo_slug>.git`, given
 /// to git as an explicit URL. The mirror has no remote, and none is added.
+/// The bot token reaches git only through a credential helper scoped to each
+/// remote command (see [`remote_git`]).
 #[derive(Clone)]
 pub struct GitMirrorPusher {
     base_url: String,
+    token: TokenSource,
+    git: Option<PathBuf>,
 }
 
 impl Default for GitMirrorPusher {
     fn default() -> Self {
         Self {
             base_url: GITHUB_BASE_URL.to_owned(),
+            token: Arc::new(keychain_bot_token),
+            git: None,
         }
     }
 }
@@ -163,7 +192,25 @@ impl GitMirrorPusher {
         if !base_url.ends_with('/') {
             base_url.push('/');
         }
-        Self { base_url }
+        Self {
+            base_url,
+            token: Arc::new(|| Ok(SecretToken::new("test-only-token"))),
+            git: None,
+        }
+    }
+
+    /// Replaces the token source. Tests only.
+    #[cfg(test)]
+    pub(crate) fn with_token(mut self, token: &'static str) -> Self {
+        self.token = Arc::new(move || Ok(SecretToken::new(token)));
+        self
+    }
+
+    /// Runs git through `git` instead of the one on PATH. Tests only.
+    #[cfg(test)]
+    pub(crate) fn with_git_binary(mut self, git: PathBuf) -> Self {
+        self.git = Some(git);
+        self
     }
 
     /// The URL git is given for `target`.
@@ -206,10 +253,15 @@ fn clean_git(git: &Path, mirror: &Path) -> Command {
     cmd
 }
 
-/// A git command that talks to the publish URL: only `protocol` is allowed.
-fn remote_git(git: &Path, mirror: &Path, protocol: &str) -> Command {
+/// A git command that talks to the publish URL: only `protocol` is allowed,
+/// every configured credential helper is dropped, and a one-shot helper hands
+/// git the token from this command's own environment. The token is never in
+/// argv or the URL, and git's stderr is never logged or returned.
+fn remote_git(git: &Path, mirror: &Path, protocol: &str, token: &SecretToken) -> Command {
     let mut cmd = clean_git(git, mirror);
-    cmd.env("GIT_ALLOW_PROTOCOL", protocol);
+    cmd.env("GIT_ALLOW_PROTOCOL", protocol)
+        .env(PUBLISH_TOKEN_ENV, token.expose())
+        .args(["-c", "credential.helper=", "-c", PUBLISH_CREDENTIAL_HELPER]);
     cmd
 }
 
@@ -218,10 +270,11 @@ fn remote_tip(
     git: &Path,
     mirror: &Path,
     protocol: &str,
+    token: &SecretToken,
     url: &str,
     dest: &str,
 ) -> Result<Option<String>> {
-    let out = remote_git(git, mirror, protocol)
+    let out = remote_git(git, mirror, protocol, token)
         .args(["ls-remote", "--refs", url, dest])
         .output()
         .map_err(|_| Error::Transport)?;
@@ -256,7 +309,11 @@ impl MirrorPusher for GitMirrorPusher {
             if !is_full_oid(sha) || expected_remote_tip.is_some_and(|t| !is_full_oid(t)) {
                 return Err(Error::Policy);
             }
-            let git = resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?;
+            let git = match &self.git {
+                Some(git) => git.clone(),
+                None => resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?,
+            };
+            let token_source = self.token.clone();
             let url = self.remote_url(target);
             let protocol = self.allowed_protocol();
             let dest = format!("refs/heads/{branch}");
@@ -264,6 +321,7 @@ impl MirrorPusher for GitMirrorPusher {
             let sha = sha.to_owned();
             let expected = expected_remote_tip.map(str::to_owned);
             tokio::task::spawn_blocking(move || {
+                let token = token_source()?;
                 let fmt = clean_git(&git, &mirror)
                     .args(["check-ref-format", &dest])
                     .output()
@@ -279,7 +337,7 @@ impl MirrorPusher for GitMirrorPusher {
                 if !commit.status.success() {
                     return Err(Error::Policy);
                 }
-                let observed = remote_tip(&git, &mirror, protocol, &url, &dest)?;
+                let observed = remote_tip(&git, &mirror, protocol, &token, &url, &dest)?;
                 if let Some(expected) = &expected {
                     if observed.as_deref() != Some(expected.as_str())
                         && observed.as_deref() != Some(sha.as_str())
@@ -292,7 +350,7 @@ impl MirrorPusher for GitMirrorPusher {
                         "--force-with-lease={dest}:{}",
                         observed.as_deref().unwrap_or("")
                     );
-                    let out = remote_git(&git, &mirror, protocol)
+                    let out = remote_git(&git, &mirror, protocol, &token)
                         .args([
                             "push",
                             "--porcelain",
@@ -307,7 +365,7 @@ impl MirrorPusher for GitMirrorPusher {
                     }
                 }
                 // Confirm what the remote now serves is exactly the verified SHA.
-                if remote_tip(&git, &mirror, protocol, &url, &dest)?.as_deref()
+                if remote_tip(&git, &mirror, protocol, &token, &url, &dest)?.as_deref()
                     != Some(sha.as_str())
                 {
                     return Err(Error::Policy);
@@ -2166,6 +2224,213 @@ mod tests {
             gh.enable_auto_merge_calls.lock().unwrap()[0].1,
             fix.good_head_sha
         );
+        server.abort();
+    }
+
+    const SENTINEL_TOKEN: &str = "SENTINEL-publish-token-7f3a9c";
+
+    #[test]
+    fn publish_credential_helper_answers_with_the_token_and_drops_other_helpers() {
+        let fix = setup_git_and_store();
+        // A helper already configured on the mirror must never be consulted.
+        git(
+            &fix.mirror,
+            &[
+                "config",
+                "credential.helper",
+                "!f() { echo username=u; echo password=LEAKED-LOCAL; }; f",
+            ],
+        );
+        let git_bin = resolve_cli_binary(Path::new("git")).unwrap();
+        let token = SecretToken::new(SENTINEL_TOKEN);
+        let mut cmd = remote_git(&git_bin, &fix.mirror, "https", &token);
+        cmd.args(["credential", "fill"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert!(
+            cmd.get_args()
+                .all(|a| !a.to_string_lossy().contains(SENTINEL_TOKEN)),
+            "the token must not be in argv"
+        );
+        assert!(PUBLISH_CREDENTIAL_HELPER.contains(&format!("${PUBLISH_TOKEN_ENV}")));
+        let mut child = cmd.spawn().unwrap();
+        {
+            use std::io::Write as _;
+            let mut stdin = child.stdin.take().unwrap();
+            stdin
+                .write_all(b"protocol=https\nhost=github.com\npath=org/repo.git\n\n")
+                .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("username=x-access-token"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("password={SENTINEL_TOKEN}")),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("LEAKED-LOCAL"), "{stdout}");
+    }
+
+    /// Every text value in every table of the ledger.
+    fn dump_database(store: &Store) -> String {
+        store
+            .read(|db| {
+                let mut tables = Vec::new();
+                let mut stmt = db.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    tables.push(row.get::<_, String>(0)?);
+                }
+                let mut dump = String::new();
+                for table in tables {
+                    let mut stmt = db.prepare(&format!("SELECT * FROM \"{table}\""))?;
+                    let columns = stmt.column_count();
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        for i in 0..columns {
+                            if let Ok(Some(text)) = row.get::<_, Option<String>>(i) {
+                                dump.push_str(&text);
+                                dump.push('\n');
+                            }
+                        }
+                    }
+                }
+                Ok(dump)
+            })
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publish_token_never_reaches_argv_stderr_errors_events_or_the_database() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fix = setup_git_and_store();
+        let github = fix._dir.path().join("github");
+        let remote = github.join("org/repo.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "--bare", "--template="]);
+
+        // A git wrapper that records argv, whether the token variable was set,
+        // and git's stderr, then runs the real git.
+        let real_git = resolve_cli_binary(Path::new("git")).unwrap();
+        let argv_log = fix._dir.path().join("argv.log");
+        let stderr_log = fix._dir.path().join("stderr.log");
+        let wrapper = fix._dir.path().join("git-wrapper");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf 'ARGV:' >> '{argv}'\nfor a in \"$@\"; do printf ' [%s]' \"$a\" >> '{argv}'; done\nprintf '\\nTOKEN:%s\\n' \"${{{env}:+set}}\" >> '{argv}'\n'{git}' \"$@\" 2>> '{stderr}'\n",
+                argv = argv_log.display(),
+                env = PUBLISH_TOKEN_ENV,
+                git = real_git.display(),
+                stderr = stderr_log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pusher = Arc::new(
+            GitMirrorPusher::with_local_base(&github)
+                .with_token(SENTINEL_TOKEN)
+                .with_git_binary(wrapper),
+        );
+
+        let (base_url, _gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/token");
+        request.hub_session_id = Some("hub".into());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+        assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/feat/token"]),
+            fix.good_head_sha
+        );
+
+        // A refused push (stale lease) and a failing remote also keep it out
+        // of the returned error.
+        let target = PublishTarget::for_tests("org/repo");
+        let stale = pusher
+            .push_verified_sha(
+                &target,
+                &fix.mirror,
+                &fix.bad_head_sha_2,
+                "feat/token",
+                Some(fix.bad_head_sha_1.as_str()),
+            )
+            .await
+            .unwrap_err();
+        let missing = pusher
+            .push_verified_sha(
+                &PublishTarget::for_tests("org/absent"),
+                &fix.mirror,
+                &fix.good_head_sha,
+                "feat/token",
+                None,
+            )
+            .await
+            .unwrap_err();
+        for err in [stale, missing] {
+            assert!(!format!("{err} {err:?}").contains(SENTINEL_TOKEN));
+        }
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(!argv.contains(SENTINEL_TOKEN), "{argv}");
+        let canonical = format!("[{}]", github.join("org/repo.git").display());
+        let mut remote_commands = 0;
+        let mut lines = argv.lines();
+        while let (Some(call), Some(token)) = (lines.next(), lines.next()) {
+            let talks_to_remote = call.contains("[ls-remote]") || call.contains("[push]");
+            if talks_to_remote {
+                remote_commands += 1;
+                assert!(call.contains("[credential.helper=]"), "{call}");
+                assert!(!call.contains("[origin]"), "{call}");
+                if !call.contains("org/absent") {
+                    assert!(call.contains(&canonical), "{call}");
+                }
+            }
+            // The token variable is set only on commands that talk to the remote.
+            assert_eq!(token == "TOKEN:set", talks_to_remote, "{call} {token}");
+        }
+        // ls-remote, push, ls-remote; then the stale lease's ls-remote, and the
+        // missing repository's ls-remote.
+        assert_eq!(remote_commands, 5, "{argv}");
+        let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+        assert!(!stderr.contains(SENTINEL_TOKEN), "{stderr}");
+
+        let notices: Vec<String> = fix
+            .store
+            .hub_messages("hub")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert!(!notices.concat().contains(SENTINEL_TOKEN));
+        let dump = dump_database(&fix.store);
+        // The dump does see the gate's own rows.
+        assert!(dump.contains("feat/token") && dump.contains("github.com/org/repo"));
+        assert!(!dump.contains(SENTINEL_TOKEN));
         server.abort();
     }
 }
