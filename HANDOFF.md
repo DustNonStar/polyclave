@@ -716,3 +716,28 @@ Branch `dot/node26-only` (`379ba0f`, `8372486`, `e904273`) fast-forwarded into `
 - Restored `docs/superpowers/plans/2026-11-25-polyclave-phase1-gemini-review.md` and `docs/superpowers/plans/2026-11-26-page-review-3.md` to their earlier text. They are historical records (they kept the Node 22 observations made at the time). Only documents that set current rules (AGENTS.md, REVIEWER.md, README.md, the phase 1 plan) say Node 26.
 
 Verified on Node 26: `pnpm install --frozen-lockfile` passes with the default release-age policy, and `pnpm check` gives 133 passed, 1 skipped. Rule for later jobs: never add release-age or other policy exceptions without asking the user.
+
+## v5 Phase 1A Rust host and native checks
+
+Commits:
+- `b359566` chore: archive legacy-node and initialize rust workspace
+- `1c44f47` feat(proto): add pure data contracts and ts-rs exports
+- `70b0c3a` feat(os): implement macOS/Windows process isolation, boot epoch, and path primitives
+- `b5a7ca9` feat(store): add single-writer SQLite WAL store, FTS5 memory, and change_log
+- `e379a1b` feat(adapters): implement Codex/Claude worker adapters and host HTTP MCP server
+- `ae157e5` feat(core): add MirrorManager, WorktreeManager, check_run_branch, and classify_run
+- `5345d73` feat(core): implement TurnRunner, RunManager, and startup Recovery
+- `9348cc5` feat(daemon): implement polyclaved HTTP/SSE server and loopback auth
+- `c545d7e` test: migrate phase1 invariants to Rust and enable macOS/Windows CI
+
+Tests: Linux format and locked Clippy passed; locked workspace tests: 43 passed, 0 failed. Native matrix: the [check run for the Task 9 code commit](https://github.com/DustNonStar/polyclave/actions/runs/45926582054) passed on both macos-latest and windows-latest. The matrix runs the committed TypeScript export check and the full-history privacy scan on both operating systems. No existing Node test was edited, deleted, or relabeled as a passed Rust test. The [migration table](docs/superpowers/plans/2026-11-27-polyclave-v5-test-migration.md) identifies approved replacements, direct Rust evidence, and unchanged Phase 1B assertions.
+
+Hand check: none for this backend job. For local Task 10, explicitly opt in to the real Codex and Claude probes respectively (`POLYCLAVE_REAL_CODEX=1` and `POLYCLAVE_REAL_CLAUDE=1`). In a disposable project on each supported native setup, verify normal initial/resume streams, commits with Run-Id trailers, publication to staging only, host import and receipt against the immutable baseline, and exact final SHA after local pullback. Verify isolated vendor history survives multiple turns and restart, and the per-turn MCP config is absent after normal completion, cancellation and recovery. On a system without independently verified Claude confinement, verify the explicit refusal; this is not a successful real Claude Worker probe. The enabled real-Claude path still requires a verified external isolation backend; never bypass that gate for a probe. Phase 1B owns the separate real CLI Hub continuation and fake-LLM integration.
+
+Issues: project-owner decisions recorded as resolved in PLAN-ISSUES.md cover durable release evidence, bundled FTS5, the approved legacy semantic replacements, mandatory Claude confinement, staging-to-mirror isolation, and Phase 1B test ownership.
+
+Cleanup: test Workers and supervisors are complete or reaped; disposable servers closed. No real vendor CLI was run.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
+
+Not done: local real-CLI Task 10; the Phase 1B tests in the migration table. Leave `legacy-node/` intact until the transferred tests pass and deletion is explicitly approved. No merge was performed.
