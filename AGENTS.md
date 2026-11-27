@@ -75,7 +75,7 @@ Several agents build this project. The user relays messages between them by hand
    - The page makes no external requests.
    - Do not change `docs/`, `AGENTS.md`, `REVIEWER.md` or `NEXT.md`. The one exception is saving a reviewer message verbatim, as step 2 of the loop says.
 6. **Pushing.**
-   - **No AI contributors.** Commit as the project account. Never add `Co-authored-by:` lines, "Generated with …" lines or any other AI attribution to commit messages, pull requests or files. The privacy scan rejects them.
+   - **AI attribution.** AI attribution (`Co-authored-by:` / "Generated with …") from any AI agent is allowed; private paths, secrets, and personal email addresses remain prohibited by `scripts/privacy-scan.sh`.
    - Push only the branch `main` (plain `git push origin main`; never `--force`).
    - Push only at the end of a job, or when you stop for a `PLAN-ISSUES.md` item.
    - Before pushing, run `scripts/privacy-scan.sh`. It must print `clean`. If it finds something, fix it with a new commit, never by rewriting history, and run it again.

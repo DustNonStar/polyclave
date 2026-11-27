@@ -10,5 +10,6 @@ node_modules/
 /target/
 /legacy-node/node_modules/
 /apps/polyclave-app/src-tauri/icons/
+/apps/polyclave-app/src-tauri/gen/
 /apps/polyclave-app/ui/node_modules/
 /apps/polyclave-app/ui/dist/
