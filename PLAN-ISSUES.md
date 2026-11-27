@@ -123,7 +123,7 @@ Checkpoint: Tasks 5–8 are individually committed and Linux format, Clippy and 
 
 **Resolved (project owner, 2026-11-27):** Phase 1A Task 9 covers Worker and shared-layer invariants and the native Rust checks. Transfer each Hub provider, Hub conversation continuation, and persistent chat queue assertion to its specific Phase 1B task without rewriting the assertion or claiming a Worker test replaces it. Run the model-provider fake and real integration checks in Phase 1B; keep the full Node archive unchanged until the transferred assertions pass and deletion is approved. Phase 1A Task 10 remains the separate local Worker CLI probe.
 
-## [direction, open] Phase 1B startup versus the deferred real Worker probes
+## [direction, resolved] Phase 1B startup versus the deferred real Worker probes
 
 At `main` `5c101f8`, the Phase 1B plan (`docs/superpowers/plans/2026-11-26-polyclave-v5-phase1b.md:3`) requires Phase 1A and its real CLI gate to pass before Phase 1B starts. The v5 design also lists real Worker probes in §4.6 (line 477). But the merged review (`HANDOFF.md:745–751`) reports only the offline/native CI and local Rust checks; its final bullet explicitly leaves the opt-in real Codex and Claude Worker Task 10 probes separate. `PLAN-ISSUES.md:124` moved the real Hub integration into Phase 1B, not the real Worker probes. No real Worker pass is recorded at this base. The latest work order starts Phase 1B and retains the archive until local acceptance, so applying the literal start gate and starting Task 1 now are inconsistent unless the owner clarifies the gate.
 
@@ -133,3 +133,5 @@ Evidence: `git rev-parse --short origin/main` returned `5c101f8`; compare the Ph
 - **B:** hold Phase 1B before Task 1 until the owner records both real Worker probe verdicts from an approved local setup; then start the branch work.
 
 Stopped before Task 1. This branch adds only this checkpoint; no runtime, UI, tests, or archive files changed.
+
+**Resolved (project owner, 2026-11-27):** implement all Phase 1B tasks, transferred Hub tests, and native offline CI now. Real Codex and Claude Worker probes, the real CLI Hub probe, and local 1440px/375px review remain final local acceptance, not passed. Preserve the complete legacy archive and Claude's fail-closed behavior. Do not merge or remove the archive from this branch.
