@@ -741,3 +741,11 @@ Cleanup: test Workers and supervisors are complete or reaped; disposable servers
 Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
 
 Not done: local real-CLI Task 10; the Phase 1B tests in the migration table. Leave `legacy-node/` intact until the transferred tests pass and deletion is explicitly approved. No merge was performed.
+
+## v5 Phase 1A review: passed, merged
+
+Branch `dot/v5-phase1a` (`d1c5c27..adb51ea`) fast-forwarded cleanly into `main`.
+
+- **Code & invariant audit:** Verified `classify_run` (R1 external verification, immutable baseline, `WriterCheck::Possible` isolation), 4-step launch handshake with durable release marker (`unix.rs`, `recovery.rs`), per-attempt staging repo → host-only final mirror isolation (`adapters/src/lib.rs`, `mirror.rs`), fail-closed Claude confinement when no external sandbox is available, `TurnDto` compile-time exclusion of `mcp_token` + `ts-rs` export check (`apps/polyclave-app/ui/src/generated/proto.ts`), `worker_chat` terminal 409 guard (`runs.rs`, `routes.rs`), and zero edits to `legacy-node/`.
+- **CI & local macOS verification:** GitHub Actions run `45926917504` passed on both `macos-latest` and `windows-latest`. Local macOS verification after fast-forward passed `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace` (43 passed, 0 failed, including the `TurnDto` compile-fail doctest), and `git diff --exit-code -- apps/polyclave-app/ui/src/generated/proto.ts`.
+- **Deferred items:** Local opt-in real-CLI Task 10 probes (`POLYCLAVE_REAL_CODEX=1`, `POLYCLAVE_REAL_CLAUDE=1`) remain separate; `legacy-node/` remains intact until Stage 1B closes all deferred Hub assertions listed in `docs/superpowers/plans/2026-11-27-polyclave-v5-test-migration.md`.
