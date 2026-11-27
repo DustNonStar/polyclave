@@ -474,3 +474,60 @@ fn prepare_isolated_home_links_only_credentials_and_skills_for_agy_and_dsh() {
     assert!(dsh_iso.join("skills").is_dir());
     assert!(!dsh_iso.join("config.toml").exists());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_isolation_allows_worktree_writes_and_blocks_outside_writes() {
+    use polyclave_adapters::{ClaudeIsolation, MacosSeatbeltIsolation};
+    use std::ffi::OsString;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = polyclave_os::canonical_real_path(dir.path()).unwrap();
+    let state = root.join("state");
+    let worktree = root.join("worktree");
+    let staging = root.join("staging");
+    let outside = root.join("outside");
+    for d in [&state, &worktree, &staging, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    let iso = MacosSeatbeltIsolation::detect(&state).expect("sandbox-exec on macOS");
+    let bad_path = root.join("bad\"quote");
+    assert!(iso.build_profile(&[bad_path]).is_err());
+
+    let allowed_target = worktree.join("ok.txt");
+    let (exe, args) = iso
+        .verified_command(
+            Path::new("/bin/sh"),
+            &[
+                OsString::from("-c"),
+                OsString::from(format!("echo ok > {}", allowed_target.display())),
+            ],
+            &[worktree.clone(), staging.clone()],
+        )
+        .unwrap();
+    let status = std::process::Command::new(&exe)
+        .args(&args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "allowed write inside worktree failed");
+    assert!(allowed_target.is_file());
+
+    let blocked_target = outside.join("bad.txt");
+    let (exe, args) = iso
+        .verified_command(
+            Path::new("/bin/sh"),
+            &[
+                OsString::from("-c"),
+                OsString::from(format!("echo bad > {}", blocked_target.display())),
+            ],
+            &[worktree, staging],
+        )
+        .unwrap();
+    let status = std::process::Command::new(&exe)
+        .args(&args)
+        .status()
+        .unwrap();
+    assert!(!status.success(), "write outside worktree must be denied");
+    assert!(!blocked_target.exists());
+}

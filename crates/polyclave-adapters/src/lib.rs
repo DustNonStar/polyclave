@@ -6,7 +6,9 @@ mod dsh;
 pub mod mcp;
 
 pub use agy::{agy_args, agy_worker, parse_agy};
-pub use claude::{claude_args, claude_worker, parse_claude};
+#[cfg(target_os = "macos")]
+pub use claude::MacosSeatbeltIsolation;
+pub use claude::{claude_args, claude_worker, default_claude_isolation, parse_claude};
 pub use codex::{codex_args, codex_worker, parse_codex};
 pub use dsh::{dsh_args, dsh_worker, parse_dsh};
 
