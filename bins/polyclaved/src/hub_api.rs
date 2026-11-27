@@ -13,7 +13,10 @@ use polyclave_hub::{
     api_provider::ApiHubProvider,
     cli_provider::{ClaimedCliProvider, CliHubProvider, SupervisedCli},
     curation::MemoryCurator,
-    provider::{assemble, ChatMessage, HubModelProvider, HubRequest, ProviderEvent, Role},
+    provider::{
+        assemble, restore_api_history, ChatMessage, HubModelProvider, HubRequest, ProviderEvent,
+        Role,
+    },
     repo_tools::RepoScope,
     triage::{Mandate, Triage},
 };
@@ -242,22 +245,10 @@ impl Hub {
             let provider = ApiHubProvider::from_registered(&self.store, &claim.profile)?;
             let saved = self
                 .store
-                .hub_messages(&claim.session)
+                .hub_api_history(&claim.session, &claim.profile, claim.input.id)
                 .map_err(|_| Error::Store)?;
-            let history = saved
-                .into_iter()
-                .filter(|m| m.id != claim.input.id && !m.queued)
-                .map(|m| {
-                    ChatMessage::text(
-                        if m.source == "agent" {
-                            Role::Assistant
-                        } else {
-                            Role::User
-                        },
-                        m.text,
-                    )
-                })
-                .collect::<Vec<_>>();
+            let deepseek = provider.is_official_deepseek();
+            let history = restore_api_history(saved, deepseek)?;
             let mut messages = assemble(
                 SYSTEM,
                 &memory,
@@ -276,6 +267,7 @@ impl Hub {
             self.store
                 .hub_authorize(claim.id, None)
                 .map_err(|_| Error::Store)?;
+            let replay_start = messages.len();
             let mut tool_log = vec![];
             let mut final_reply = None;
             for _ in 0..8 {
@@ -294,7 +286,7 @@ impl Hub {
                 }
                 let mut response = ChatMessage::text(Role::Assistant, reply.text);
                 response.reasoning_content =
-                    (!reply.reasoning.is_empty()).then_some(reply.reasoning);
+                    (deepseek || !reply.reasoning.is_empty()).then_some(reply.reasoning);
                 response.tool_calls = reply.calls.clone();
                 messages.push(response);
                 for tool in reply.calls {
@@ -313,8 +305,13 @@ impl Hub {
                 }
             }
             let reply = final_reply.ok_or(Error::Limit)?;
+            let mut final_message = ChatMessage::text(Role::Assistant, reply.text.clone());
+            final_message.reasoning_content =
+                (deepseek || !reply.reasoning.is_empty()).then(|| reply.reasoning.clone());
+            messages.push(final_message);
+            let replay = json!(&messages[replay_start..]);
             self.store
-                .hub_finish(
+                .hub_finish_api(
                     claim,
                     HubCompletion {
                         text: reply.text,
@@ -322,6 +319,7 @@ impl Hub {
                         metadata: Some(json!({"tool_calls":tool_log,"usage":reply.usage})),
                         ..Default::default()
                     },
+                    replay,
                 )
                 .map_err(|_| Error::Store)?;
             drop(events);

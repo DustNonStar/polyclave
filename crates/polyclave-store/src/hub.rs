@@ -16,6 +16,13 @@ pub struct HubMessage {
     pub queued: bool,
 }
 
+/// Read only by the host when building a request to the same registered provider.
+pub struct ApiHistoryRow {
+    pub message: HubMessage,
+    pub same_profile: bool,
+    pub replay: Option<Value>,
+}
+
 pub struct HubTurn {
     pub id: i64,
     pub session: String,
@@ -106,6 +113,41 @@ impl Store {
             db.execute("INSERT INTO hub_input_requests(session_id,request_id,message_id) VALUES(?1,?2,?3)",params![session,intent,id])?;
             publish(db,id)?;
             message(db,id)
+        })
+    }
+
+    pub fn hub_api_history(
+        &self,
+        session: &str,
+        profile: &str,
+        exclude: i64,
+    ) -> Result<Vec<ApiHistoryRow>> {
+        self.read(|db| {
+            let mut q = db.prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS},
+                COALESCE(m.provider_label=?2,0),
+                CASE WHEN m.provider_label=?2 THEN a.transcript_json ELSE NULL END
+                FROM messages m LEFT JOIN hub_api_replay a ON a.message_id=m.id
+                WHERE m.session_id=?1 AND m.id!=?3 AND m.queued=0 ORDER BY m.id"
+            ))?;
+            let rows = q
+                .query_map(params![session, profile, exclude], |r| {
+                    let mut message = row(r)?;
+                    let same_profile: bool = r.get(7)?;
+                    if !same_profile {
+                        message.reasoning = None;
+                    }
+                    Ok(ApiHistoryRow {
+                        message,
+                        same_profile,
+                        replay: r
+                            .get::<_, Option<String>>(8)?
+                            .map(|s| crate::parse_json(s, 8))
+                            .transpose()?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
         })
     }
 
@@ -223,6 +265,25 @@ impl Store {
     }
 
     pub fn hub_finish(&self, claim: HubTurn, reply: HubCompletion) -> Result<HubMessage> {
+        self.finish_hub(claim, reply, None)
+    }
+    pub fn hub_finish_api(
+        &self,
+        claim: HubTurn,
+        reply: HubCompletion,
+        replay: Value,
+    ) -> Result<HubMessage> {
+        if !replay.is_array() || replay.to_string().len() > 8 * 1024 * 1024 {
+            return Err(Error::Invalid("invalid API replay transcript"));
+        }
+        self.finish_hub(claim, reply, Some(replay))
+    }
+    fn finish_hub(
+        &self,
+        claim: HubTurn,
+        reply: HubCompletion,
+        replay: Option<Value>,
+    ) -> Result<HubMessage> {
         self.write(move|db|{
             if db.execute("UPDATE turns SET status='completed',end_reason='exit',writer_check='excluded',mcp_revoked=1,ended_at=?2
                 WHERE id=?1 AND status='running' AND phase='authorized'",params![claim.id,now(db)?])?!=1{
@@ -232,6 +293,9 @@ impl Store {
                 VALUES(?1,?2,'agent',?3,?4,?5,?6,?7)",params![claim.session,claim.id,claim.profile,reply.text,
                 reply.reasoning,reply.metadata.map(|v|v.to_string()),now(db)?])?;
             let id=db.last_insert_rowid();
+            if let Some(replay)=replay{
+                db.execute("INSERT INTO hub_api_replay(message_id,transcript_json) VALUES(?1,?2)",params![id,replay.to_string()])?;
+            }
             if let Some(thread)=reply.native_thread {
                 if reply.rebuilt {
                     db.execute("DELETE FROM hub_thread_ack WHERE session_id=?1 AND profile_id=?2",params![claim.session,claim.profile])?;

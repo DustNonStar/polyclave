@@ -85,7 +85,15 @@ impl Store {
                     PRIMARY KEY(run_id,status));
                 ALTER TABLE admission_policies ADD COLUMN human_actors_json TEXT NOT NULL DEFAULT '[]';")?;
             migration.pragma_update(None, "user_version", 4)?;
-        } else if version != 4 {
+        }
+        if version <= 4 {
+            migration.execute_batch(
+                "CREATE TABLE hub_api_replay(
+                message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+                transcript_json TEXT NOT NULL);",
+            )?;
+            migration.pragma_update(None, "user_version", 5)?;
+        } else if version != 5 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;

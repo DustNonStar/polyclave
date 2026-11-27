@@ -779,3 +779,11 @@ Cleanup: workspace and UI fixtures shut down their listeners and stop their subp
 Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
 
 Not done: installed desktop/browser walkthrough and real provider probes remain pending local review. No merge or archive removal; keep `legacy-node/` unchanged until the owner approves removal after acceptance.
+
+### Final DeepSeek follow-up: durable tool-enabled replay
+
+The official [thinking mode contract](https://api-docs.deepseek.com/guides/thinking_mode/#tool-calls) requires earlier assistant reasoning and tool exchanges when the next request carries tools, including when an earlier turn made no tool call. The API Hub now stores the replay frames transactionally with its canonical reply in a host-only table and restores them only for the same registered profile. Public message and SSE shapes are unchanged. Older same-profile text replies still recover saved reasoning; a different provider does not receive the private replay frames.
+
+Verification: a local fake Flash endpoint accepted the first turn, the SQLite store was reopened, and the endpoint required and received the first answer's reasoning on the second tool-enabled request. Linux workspace checks now report **56 passed, 0 failed**. The final native check applies to the branch head containing this follow-up.
+
+Local addendum: with tools enabled, run two Flash prompts in the same Hub session, restarting the daemon between them. Verify the second request succeeds; repeat once with a tool call in the first turn. Keep real vendor response records local and separate from the Worker and CLI Hub probes above.

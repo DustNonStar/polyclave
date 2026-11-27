@@ -138,3 +138,39 @@ pub fn assemble(
     messages.push(input);
     Ok(messages)
 }
+
+/// Protocol-only frames are replayed to the same selected profile, not exposed
+/// to the renderer, and not automatically transferred between vendors.
+pub fn restore_api_history(
+    rows: Vec<polyclave_store::ApiHistoryRow>,
+    deepseek: bool,
+) -> Result<Vec<ChatMessage>> {
+    let mut out = Vec::new();
+    for row in rows {
+        if let Some(replay) = row.replay {
+            let saved: Vec<ChatMessage> =
+                serde_json::from_value(replay).map_err(|_| Error::Protocol)?;
+            out.extend(saved);
+            continue;
+        }
+        let mut item = ChatMessage::text(
+            if row.message.source == "agent" {
+                Role::Assistant
+            } else {
+                Role::User
+            },
+            row.message.text,
+        );
+        if item.role == Role::Assistant {
+            item.reasoning_content = if deepseek {
+                Some(row.message.reasoning.unwrap_or_default())
+            } else if row.same_profile {
+                row.message.reasoning.filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+        }
+        out.push(item);
+    }
+    Ok(out)
+}

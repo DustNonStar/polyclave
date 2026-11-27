@@ -71,6 +71,11 @@ impl ApiHubProvider {
             false,
         )
     }
+    pub fn is_official_deepseek(&self) -> bool {
+        self.endpoint.scheme() == "https"
+            && self.endpoint.host_str() == Some("api.deepseek.com")
+            && self.endpoint.port().is_none()
+    }
     pub fn credential_binding(&self) -> &CredentialBinding {
         &self.binding
     }
@@ -539,5 +544,123 @@ mod tests {
             key("https://one.example.invalid/v1"),
             key("https://one.example.invalid/v2")
         );
+    }
+    #[tokio::test]
+    async fn later_flash_call_replays_reasoning_from_the_durable_first_turn() {
+        use crate::provider::restore_api_history;
+        use polyclave_store::HubCompletion;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flash.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .write(|db| {
+                db.execute_batch(
+                    "
+                INSERT INTO provider_profiles(id,display_name,kind,models_json,created_at)
+                    VALUES('flash','Flash','openai_compat','[]','now');
+                INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                    VALUES('hub','Hub','hub','repo','flash','deepseek-flash','now');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        async fn endpoint(Json(v): Json<Value>) -> impl IntoResponse {
+            let second = v["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"] == "continue");
+            assert!(v["tools"].is_array());
+            let prior = v["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "assistant"
+                    && m["content"] == "first answer"
+                    && m["reasoning_content"] == "recorded prior reasoning"
+            });
+            if second && !prior {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    String::new(),
+                );
+            }
+            let data = if second {
+                json!({"content":"second answer"})
+            } else {
+                json!({"content":"first answer","reasoning_content":"recorded prior reasoning"})
+            };
+            let frame = json!({"choices":[{"index":0,"delta":data,"finish_reason":"stop"}]});
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                format!("data: {frame}\n\ndata: [DONE]\n\n"),
+            )
+        }
+        let (url, server) =
+            fake_server(Router::new().route("/v1/chat/completions", post(endpoint))).await;
+        let p = ApiHubProvider::new(
+            "flash",
+            &url,
+            "test",
+            vec!["deepseek-flash".into()],
+            Arc::new(FakeCredential),
+            true,
+        )
+        .unwrap();
+        let (events, _) = broadcast::channel(8);
+        store.hub_enqueue("hub", "one", "begin").unwrap();
+        let turn = store.hub_claim("hub", "fixture", "boot").unwrap().unwrap();
+        store.hub_authorize(turn.id, None).unwrap();
+        let reply = p
+            .complete(request("deepseek-flash"), events.clone())
+            .await
+            .unwrap();
+        assert!(reply.calls.is_empty());
+        let mut message = ChatMessage::text(Role::Assistant, &reply.text);
+        message.reasoning_content = Some(reply.reasoning.clone());
+        store
+            .hub_finish_api(
+                turn,
+                HubCompletion {
+                    text: reply.text,
+                    reasoning: Some(reply.reasoning),
+                    ..Default::default()
+                },
+                json!([message]),
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(path).unwrap();
+        store.hub_enqueue("hub", "two", "continue").unwrap();
+        let turn = store.hub_claim("hub", "fixture", "boot").unwrap().unwrap();
+        let history = restore_api_history(
+            store
+                .hub_api_history("hub", "flash", turn.input.id)
+                .unwrap(),
+            true,
+        )
+        .unwrap();
+        let cross = restore_api_history(
+            store
+                .hub_api_history("hub", "other", turn.input.id)
+                .unwrap(),
+            false,
+        )
+        .unwrap();
+        assert!(cross.iter().all(|item| item.reasoning_content.is_none()));
+        let mut second = request("deepseek-flash");
+        second.messages = history;
+        second
+            .messages
+            .push(ChatMessage::text(Role::User, "continue"));
+        assert_eq!(
+            p.complete(second, events).await.unwrap().text,
+            "second answer"
+        );
+        assert!(store
+            .hub_messages("hub")
+            .unwrap()
+            .iter()
+            .all(|m| m.metadata.is_none()));
+        server.abort();
     }
 }
