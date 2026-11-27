@@ -128,8 +128,12 @@ pub trait MirrorPusher: Send + Sync {
     ///
     /// `expected_remote_tip` is the lease: `Some(tip)` requires the remote branch
     /// to be at `tip` before the push (a revise round leases on the SHA the gate
-    /// pushed last); `None` leases on the tip read from the remote just before
-    /// the push, or on the branch being absent.
+    /// pushed last); `None` means the branch must be absent or already be `sha`.
+    ///
+    /// A lease built from the tip read just before the push would always satisfy
+    /// itself, so `None` must never overwrite a branch this gate does not own: a
+    /// branch that another Run or a person created is refused, and a human
+    /// decides. That refusal is [`Error::Policy`], which the gate escalates.
     fn push_verified_sha<'a>(
         &'a self,
         target: &'a PublishTarget,
@@ -338,11 +342,21 @@ impl MirrorPusher for GitMirrorPusher {
                     return Err(Error::Policy);
                 }
                 let observed = remote_tip(&git, &mirror, protocol, &token, &url, &dest)?;
-                if let Some(expected) = &expected {
-                    if observed.as_deref() != Some(expected.as_str())
-                        && observed.as_deref() != Some(sha.as_str())
-                    {
-                        return Err(Error::Policy);
+                match &expected {
+                    Some(expected) => {
+                        if observed.as_deref() != Some(expected.as_str())
+                            && observed.as_deref() != Some(sha.as_str())
+                        {
+                            return Err(Error::Policy);
+                        }
+                    }
+                    // First push: only an absent branch, or one that already is
+                    // this SHA, may be published. Anything else belongs to
+                    // someone else and is left untouched.
+                    None => {
+                        if observed.is_some() && observed.as_deref() != Some(sha.as_str()) {
+                            return Err(Error::Policy);
+                        }
                     }
                 }
                 if observed.as_deref() != Some(sha.as_str()) {
@@ -698,9 +712,29 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
 
     // Push exactly the R1-verified SHA from the authoritative mirror, then
     // open/find the PR. The pusher confirms the remote tip equals that SHA.
-    deps.pusher
+    // A policy refusal means the destination branch is not this gate's to
+    // overwrite (or the SHA is not publishable): nothing was pushed, and a
+    // human decides rather than the gate forcing the branch.
+    match deps
+        .pusher
         .push_verified_sha(&target, &req.mirror_path, &current_head, &req.branch, None)
-        .await?;
+        .await
+    {
+        Ok(()) => {}
+        Err(Error::Policy) => {
+            return escalate(
+                deps,
+                &gate.id,
+                req.hub_session_id.as_deref(),
+                "push_refused",
+                &format!(
+                    "refusing to publish {current_head} to {} on branch {}: the branch is not absent and does not already hold that SHA, so pushing would overwrite work this gate did not create; nothing was pushed and no PR was opened",
+                    req.repo_slug, req.branch
+                ),
+            );
+        }
+        Err(err) => return Err(err),
+    }
 
     let pr = deps
         .scm
@@ -1242,6 +1276,24 @@ mod tests {
     struct MockPusher {
         pushed: Mutex<Vec<(String, String)>>,
     }
+
+    /// A pusher that refuses the way the real one does when the destination
+    /// branch is not the gate's to overwrite.
+    struct RefusingPusher;
+
+    impl MirrorPusher for RefusingPusher {
+        fn push_verified_sha<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _sha: &'a str,
+            _branch: &'a str,
+            _expected_remote_tip: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Err(Error::Policy) })
+        }
+    }
+
     impl MirrorPusher for MockPusher {
         fn push_verified_sha<'a>(
             &'a self,
@@ -1595,6 +1647,48 @@ mod tests {
             .await
             .is_err());
         assert!(git(&remote, &["for-each-ref", "--format=%(refname)"]) == "refs/heads/feat/x");
+    }
+
+    #[tokio::test]
+    async fn git_pusher_never_overwrites_a_branch_it_did_not_create() {
+        let fix = setup_git_and_store();
+        let github = fix._dir.path().join("github");
+        let remote = github.join("org/repo.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(
+            fix._dir.path(),
+            &["init", "--bare", "--template=", remote.to_str().unwrap()],
+        );
+        let pusher = GitMirrorPusher::with_local_base(&github);
+        let target = PublishTarget::for_tests("org/repo");
+        let tip = |branch: &str| git(&remote, &["rev-parse", &format!("refs/heads/{branch}")]);
+
+        // Another Run (or a person) already owns `feat/x` at a different commit.
+        pusher
+            .push_verified_sha(&target, &fix.mirror, &fix.bad_head_sha_1, "feat/x", None)
+            .await
+            .unwrap();
+        assert_eq!(tip("feat/x"), fix.bad_head_sha_1);
+
+        // A first push of a different SHA is refused, and the branch is untouched:
+        // a lease read from the remote just before the push would have allowed it.
+        let refused = pusher
+            .push_verified_sha(&target, &fix.mirror, &fix.good_head_sha, "feat/x", None)
+            .await;
+        assert!(matches!(refused, Err(Error::Policy)));
+        assert_eq!(tip("feat/x"), fix.bad_head_sha_1);
+
+        // The branch owner may still publish that exact SHA, so a rerun of the
+        // same gate after a crash is not blocked.
+        pusher
+            .push_verified_sha(&target, &fix.mirror, &fix.bad_head_sha_1, "feat/x", None)
+            .await
+            .unwrap();
+        assert_eq!(tip("feat/x"), fix.bad_head_sha_1);
+        assert_eq!(
+            git(&remote, &["for-each-ref", "--format=%(refname)"]),
+            "refs/heads/feat/x"
+        );
     }
 
     #[tokio::test]
@@ -2042,6 +2136,45 @@ mod tests {
         assert!(pusher.pushed.lock().unwrap().is_empty());
         assert!(gh.submitted_reviews.lock().unwrap().is_empty());
         assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refused_first_push_escalates_with_a_hub_notice_and_no_pr() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: Arc::new(RefusingPusher),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/not-ours");
+        request.hub_session_id = Some("hub".into());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert_eq!(gate.pr_number, None);
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        let notices = fix.store.hub_messages("hub").unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|m| m.text.contains("pushing would overwrite work")),
+            "escalation must reach the Hub: {notices:?}"
+        );
         server.abort();
     }
 
