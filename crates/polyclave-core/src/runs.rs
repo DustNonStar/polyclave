@@ -1,0 +1,481 @@
+use crate::{
+    classify::{classify_run, BranchCheck, Verdict},
+    mirror::{AttemptGit, MirrorManager, RunGit},
+    worktree::Workspace,
+};
+use polyclave_adapters::mcp::{AttemptScope, HostTools};
+use polyclave_os::canonical_real_path;
+use polyclave_proto::{AttemptDto, ChangeTopic, RunDto, RunStatus, TurnMode, Vendor, WriterCheck};
+use polyclave_store::{
+    decode_enum, enum_value, new_id, now, parse_json, reserve_ticket, Error, Store,
+};
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Clone)]
+pub struct RunManager {
+    pub store: Store,
+    pub git: Arc<MirrorManager>,
+    gate: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunRequest {
+    pub hub_session_id: String,
+    pub request_id: String,
+    pub vendor: Vendor,
+    pub model: Option<String>,
+    pub repo_cwd: PathBuf,
+    pub instructions: String,
+    pub base_branch: String,
+    pub ticket_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    Accept,
+    Fail,
+    AllowRetry,
+}
+
+#[derive(Clone)]
+pub struct RunWork {
+    pub run: RunDto,
+    pub attempt: AttemptDto,
+    pub id: AttemptGit,
+    pub workspace: Workspace,
+}
+
+impl RunManager {
+    pub fn new(store: Store, git: Arc<MirrorManager>) -> Self {
+        Self {
+            store,
+            git,
+            gate: Arc::new(Mutex::new(())),
+        }
+    }
+    pub fn get(&self, id: &str) -> Result<RunDto> {
+        self.store.read(|db| load_run(db, id))
+    }
+    pub fn list(&self) -> Result<Vec<RunDto>> {
+        self.store.read(|db| {
+            let mut s = db.prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs ORDER BY created_at,id"
+            ))?;
+            let rows = s.query_map([], row_run)?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Returns the original Run when a client repeats the same admission key.
+    pub fn accept(&self, request: RunRequest) -> Result<(RunDto, bool)> {
+        let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
+        if request.request_id.trim().is_empty()
+            || request.request_id.len() > 256
+            || request.instructions.trim().is_empty()
+            || request.instructions.len() > 1024 * 1024
+        {
+            return Err(Error::Invalid("missing or oversized admission fields"));
+        }
+        let existing = self.store.read(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT id FROM runs WHERE hub_session_id=?1 AND request_id=?2",
+                    [&request.hub_session_id, &request.request_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
+        })?;
+        if let Some(id) = existing {
+            return Ok((self.get(&id)?, false));
+        }
+        let repo = canonical_real_path(&request.repo_cwd)
+            .map_err(|_| Error::Invalid("repository is unavailable"))?;
+        let repo_text = path_text(&repo)?;
+        let id = new_id('r');
+        self.store.read(|db| {
+            let hub: Option<(String, String)> = db
+                .query_row(
+                    "SELECT role,repo_cwd FROM sessions WHERE id=?1",
+                    [&request.hub_session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if hub.as_ref().map(|(a, b)| (a.as_str(), b.as_str()))
+                != Some(("hub", repo_text.as_str()))
+            {
+                return Err(Error::ConflictError);
+            }
+            Ok(())
+        })?;
+        let run_git = self
+            .git
+            .admit(&repo, &id, &request.base_branch)
+            .map_err(|_| Error::Invalid("cannot initialize immutable repository baseline"))?;
+        self.store.write(move |db|{
+            let stamp=now(db)?;
+            let ticket=if let Some(ticket)=request.ticket_id {
+                let owner:Option<String>=db.query_row("SELECT hub_session_id FROM tickets WHERE id=?1",[&ticket],|r|r.get(0)).optional()?;
+                if owner.as_deref()!=Some(&request.hub_session_id) {return Err(Error::ConflictError);}
+                ticket
+            } else {
+                let ticket=new_id('t');
+                db.execute("INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,status,created_at,updated_at)
+                    VALUES(?1,?2,?3,'Direct request','{}','explicit_user',1,'active',?4,?4)",
+                    params![ticket,request.hub_session_id,repo_text,stamp])?;
+                ticket
+            };
+            reserve_ticket(db,&ticket,&repo_text)?;
+            let worker=new_id('s');
+            let vendor=enum_value(request.vendor)?;
+            let profile=format!("builtin-{vendor}");
+            db.execute("INSERT OR IGNORE INTO provider_profiles(id,display_name,kind,models_json,created_at)
+                VALUES(?1,?2,?3,'[]',?4)",params![profile,vendor,format!("{vendor}_cli"),stamp])?;
+            db.execute("INSERT INTO sessions(id,name,role,vendor,repo_cwd,profile_id,provider_model,created_at)
+                VALUES(?1,?2,'worker',?3,?4,?5,?6,?7)",
+                params![worker,format!("Worker {id}"),vendor,repo_text,profile,request.model.as_deref().unwrap_or("default"),stamp])?;
+            db.execute("INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,
+                mirror_remote,base_branch,base_sha,status,created_at,updated_at)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?13)",
+                params![id,ticket,request.hub_session_id,worker,request.request_id,repo_text,vendor,
+                        request.model,request.instructions,path_text(&run_git.mirror)?,request.base_branch,run_git.base,stamp])?;
+            change(db,ChangeTopic::Ticket,&ticket,&ticket_state(db,&ticket)?)?;
+            change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
+            Ok((load_run(db,&id)?,true))
+        })
+    }
+
+    pub fn begin(&self, id: &str, mode: TurnMode) -> Result<RunWork> {
+        let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
+        let run = self.get(id)?;
+        if matches!(run.status, RunStatus::Done | RunStatus::Failed) {
+            return Err(Error::ConflictError);
+        }
+        let occupied=self.store.read(|db|Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running' AND mode!='consult')",
+            [id],|r|r.get::<_,bool>(0))?))?;
+        if occupied {
+            return Err(Error::BusyError);
+        }
+        let previous = self.store.read(|db| current_attempt(db, &run))?;
+        let new = match mode {
+            TurnMode::Start if run.status == RunStatus::Pending && previous.is_none() => true,
+            TurnMode::Retry
+                if run.status == RunStatus::Interrupted
+                    || run.resolution.as_deref() == Some("allow_retry") =>
+            {
+                if run.resolution.as_deref() != Some("allow_retry") {
+                    if let Some(prev) = &previous {
+                        if self
+                            .git
+                            .reconcile(&self.attempt_git(&run, prev.attempt_no)?)
+                            != BranchCheck::Absent
+                        {
+                            return Err(Error::ConflictError);
+                        }
+                    }
+                }
+                true
+            }
+            TurnMode::WorkerChat
+                if matches!(
+                    run.status,
+                    RunStatus::Running | RunStatus::Interrupted | RunStatus::NeedsReview
+                ) =>
+            {
+                previous.as_ref().is_some_and(|a| {
+                    matches!(
+                        a.status,
+                        polyclave_proto::AttemptStatus::Cancelled
+                            | polyclave_proto::AttemptStatus::Superseded
+                    )
+                })
+            }
+            TurnMode::Correction if run.status == RunStatus::Running => false,
+            _ => return Err(Error::ConflictError),
+        };
+        if !new {
+            let attempt = previous.ok_or(Error::ConflictError)?;
+            let git = self.attempt_git(&run, attempt.attempt_no)?;
+            let workspace = Workspace {
+                cwd: PathBuf::from(&attempt.worktree_path),
+                staging: self.git.staging_path(&git),
+                branch: attempt.branch.clone(),
+            };
+            return Ok(RunWork {
+                run,
+                attempt,
+                id: git,
+                workspace,
+            });
+        }
+        let n = run
+            .current_attempt
+            .checked_add(1)
+            .filter(|n| *n <= run.max_attempts)
+            .ok_or(Error::BudgetExceededError)?;
+        let git = self.attempt_git(&run, n)?;
+        let workspace = self
+            .git
+            .prepare_attempt(&git)
+            .map_err(|_| Error::Invalid("cannot prepare isolated Attempt"))?;
+        let path = path_text(&workspace.cwd)?;
+        let branch = workspace.branch.clone();
+        let id = id.to_owned();
+        let attempt=self.store.write(move|db|{
+            let stamp=now(db)?;
+            if let Some(previous)=previous {
+                db.execute("UPDATE attempts SET status='superseded',ended_at=COALESCE(ended_at,?2) WHERE id=?1",params![previous.id,stamp])?;
+                change(db,ChangeTopic::Attempt,&previous.id.to_string(),&load_attempt(db,previous.id)?)?;
+            }
+            db.execute("INSERT INTO attempts(run_id,attempt_no,branch,worktree_path,status,created_at)
+                VALUES(?1,?2,?3,?4,'prepared',?5)",params![id,n,branch,path,stamp])?;
+            let attempt=load_attempt(db,db.last_insert_rowid())?;
+            db.execute("UPDATE runs SET current_attempt=?2,status='running',detail=NULL,resolution=NULL,updated_at=?3 WHERE id=?1",params![id,n,stamp])?;
+            change(db,ChangeTopic::Attempt,&attempt.id.to_string(),&attempt)?;
+            change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
+            Ok(attempt)
+        })?;
+        let run = self.get(&run.id)?;
+        Ok(RunWork {
+            run,
+            attempt,
+            id: git,
+            workspace,
+        })
+    }
+
+    pub(crate) fn attempt_git(&self, run: &RunDto, number: u32) -> Result<AttemptGit> {
+        let mirror = self.store.read(|db| {
+            Ok(db.query_row(
+                "SELECT mirror_remote FROM runs WHERE id=?1",
+                [&run.id],
+                |r| r.get::<_, String>(0),
+            )?)
+        })?;
+        Ok(AttemptGit {
+            run: RunGit {
+                repo: run.repo_cwd.clone().into(),
+                mirror: mirror.into(),
+                id: run.id.clone(),
+                base: run.base_sha.clone(),
+            },
+            number,
+        })
+    }
+
+    pub fn resolve(&self, id: &str, decision: Resolution, note: &str) -> Result<RunDto> {
+        if note.len() > 4096 || note.trim().is_empty() {
+            return Err(Error::Invalid("resolution requires a note"));
+        }
+        let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
+        let run = self.get(id)?;
+        if !matches!(run.status, RunStatus::NeedsReview | RunStatus::Interrupted) {
+            return Err(Error::ConflictError);
+        }
+        let a = self.attempt_git(&run, run.current_attempt)?;
+        let tip = match decision {
+            Resolution::Accept => match self.git.reconcile(&a) {
+                BranchCheck::Present { tip, .. } => Some(tip),
+                _ => return Err(Error::ConflictError),
+            },
+            _ => None,
+        };
+        let id = id.to_owned();
+        let note = note.to_owned();
+        let completed=self.store.write(move|db|{
+            let r=load_run(db,&id)?;
+            if !matches!(r.status,RunStatus::NeedsReview|RunStatus::Interrupted) {
+                return Err(Error::ConflictError);
+            }
+            let stamp=now(db)?;
+            let attempt=current_attempt(db,&r)?;
+            if db.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running')",[&id],|r|r.get::<_,bool>(0))? {
+                return Err(Error::BusyError);
+            }
+            let (status,resolution,source)=match decision {
+                Resolution::Accept=>("done","accept",Some("user")),
+                Resolution::Fail=>("failed","fail",None),
+                Resolution::AllowRetry=>{
+                    if r.current_attempt>=r.max_attempts{return Err(Error::BudgetExceededError);}
+                    if let Some(a)=&attempt {
+                        db.execute("UPDATE attempts SET status='superseded',ended_at=COALESCE(ended_at,?2) WHERE id=?1",params![a.id,stamp])?;
+                        change(db,ChangeTopic::Attempt,&a.id.to_string(),&load_attempt(db,a.id)?)?;
+                    }
+                    ("interrupted","allow_retry",None)
+                }
+            };
+            db.execute("UPDATE runs SET status=?2,result_sha=?3,result_source=?4,resolution=?5,detail=NULL,updated_at=?6 WHERE id=?1",
+                params![id,status,tip,source,resolution,stamp])?;
+            Store::record_run_memory(db,&id,&r.repo_cwd,&note,tip.as_deref())?;
+            let result=load_run(db,&id)?;
+            change(db,ChangeTopic::Run,&id,&result)?;
+            Ok(result)
+        })?;
+        if let Some(sha) = completed.result_sha.as_deref() {
+            self.sync_verified(&a, sha)?;
+        }
+        Ok(completed)
+    }
+
+    /// Terminal state is durable before any pullback. Failure only records a warning.
+    pub(crate) fn sync_verified(&self, a: &AttemptGit, sha: &str) -> Result<()> {
+        if self.git.sync_done(a, sha).is_err() {
+            let id = a.run.id.clone();
+            self.store.write(move |db| {
+                change(
+                    db,
+                    ChangeTopic::HubReceipt,
+                    &id,
+                    &json!({"warning":"verified result could not be pulled back; resync is safe"}),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verdict(&self, work: &RunWork, writer: WriterCheck) -> Result<Verdict> {
+        let current=self.store.read(|db|Ok(db.query_row(
+            "SELECT json_extract(payload_json,'$.sha') FROM results WHERE attempt_id=?1 AND accepted=1",[work.attempt.id],|r|r.get::<_,String>(0)).optional()?))?;
+        Ok(classify_run(
+            writer,
+            current.as_deref(),
+            self.git.reconcile(&work.id),
+        ))
+    }
+
+    pub(crate) fn old_work(&self, id: &str, attempt_id: i64) -> Result<RunWork> {
+        let run = self.get(id)?;
+        let attempt = self.store.read(|db| load_attempt(db, attempt_id))?;
+        if attempt.run_id != run.id {
+            return Err(Error::ConflictError);
+        }
+        let a = self.attempt_git(&run, attempt.attempt_no)?;
+        let workspace = Workspace {
+            cwd: attempt.worktree_path.clone().into(),
+            staging: self.git.staging_path(&a),
+            branch: attempt.branch.clone(),
+        };
+        Ok(RunWork {
+            run,
+            attempt,
+            id: a,
+            workspace,
+        })
+    }
+}
+
+impl HostTools for RunManager {
+    fn verified_tip(&self, scope: &AttemptScope, sha: &str) -> Result<bool> {
+        let work = self.old_work(&scope.run, scope.id)?;
+        if work.attempt.attempt_no != scope.number
+            || work.attempt.branch != scope.branch
+            || work.run.base_sha != scope.base
+        {
+            return Err(Error::ConflictError);
+        }
+        match self.git.reconcile(&work.id) {
+            BranchCheck::Unreadable => Err(Error::Invalid("mirror read failed")),
+            BranchCheck::Present { tip, problem: None } => Ok(tip == sha),
+            _ => Ok(false),
+        }
+    }
+    fn consult_read_only(&self, scope: &AttemptScope, _question: &str) -> Result<String> {
+        let work = self.old_work(&scope.run, scope.id)?;
+        // The phase 1A local advisor surface exposes only host-owned, read-only facts.
+        Ok(format!(
+            "Run {} uses base {} and Attempt {}.",
+            work.run.id, work.run.base_sha, work.attempt.attempt_no
+        ))
+    }
+}
+
+pub(crate) fn path_text(p: &Path) -> Result<String> {
+    p.to_str()
+        .map(str::to_owned)
+        .ok_or(Error::Invalid("host paths must be valid Unicode"))
+}
+pub(crate) fn change<T: Serialize>(
+    db: &Connection,
+    topic: ChangeTopic,
+    id: &str,
+    t: &T,
+) -> Result<()> {
+    Store::append_change(db, topic, id, &serde_json::to_value(t)?)?;
+    Ok(())
+}
+fn ticket_state(db: &Connection, id: &str) -> Result<serde_json::Value> {
+    Ok(db.query_row("SELECT status,max_runs,runs_used FROM tickets WHERE id=?1",[id],
+        |r|Ok(json!({"id":id,"status":r.get::<_,String>(0)?,"max_runs":r.get::<_,u32>(1)?,"runs_used":r.get::<_,u32>(2)?})))?)
+}
+
+const RUN_COLUMNS:&str="id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,context_refs_json,
+    base_branch,base_sha,status,current_attempt,max_attempts,accepted_attempt_id,detail,result_sha,observed_sha,result_source,resolution,created_at,updated_at";
+pub(crate) fn load_run(db: &Connection, id: &str) -> Result<RunDto> {
+    db.query_row(
+        &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id=?1"),
+        [id],
+        row_run,
+    )
+    .optional()?
+    .ok_or(Error::NotFound)
+}
+fn row_run(r: &Row<'_>) -> rusqlite::Result<RunDto> {
+    Ok(RunDto {
+        id: r.get(0)?,
+        ticket_id: r.get(1)?,
+        hub_session_id: r.get(2)?,
+        worker_session_id: r.get(3)?,
+        request_id: r.get(4)?,
+        repo_cwd: r.get(5)?,
+        vendor: decode_enum(&r.get::<_, String>(6)?)?,
+        model: r.get(7)?,
+        instructions: r.get(8)?,
+        context_refs_json: r
+            .get::<_, Option<String>>(9)?
+            .map(|s| parse_json(s, 9))
+            .transpose()?,
+        base_branch: r.get(10)?,
+        base_sha: r.get(11)?,
+        status: decode_enum(&r.get::<_, String>(12)?)?,
+        current_attempt: r.get(13)?,
+        max_attempts: r.get(14)?,
+        accepted_attempt_id: r.get(15)?,
+        detail: r.get(16)?,
+        result_sha: r.get(17)?,
+        observed_sha: r.get(18)?,
+        result_source: r
+            .get::<_, Option<String>>(19)?
+            .as_deref()
+            .map(decode_enum)
+            .transpose()?,
+        resolution: r.get(20)?,
+        created_at: r.get(21)?,
+        updated_at: r.get(22)?,
+    })
+}
+pub(crate) fn load_attempt(db: &Connection, id: i64) -> Result<AttemptDto> {
+    db.query_row("SELECT id,run_id,attempt_no,branch,worktree_path,agent_thread_id,corrections,status,created_at,ended_at FROM attempts WHERE id=?1",
+        [id],|r|Ok(AttemptDto{id:r.get(0)?,run_id:r.get(1)?,attempt_no:r.get(2)?,branch:r.get(3)?,worktree_path:r.get(4)?,
+            agent_thread_id:r.get(5)?,corrections:r.get(6)?,status:decode_enum(&r.get::<_,String>(7)?)?,created_at:r.get(8)?,ended_at:r.get(9)?}))
+        .optional()?.ok_or(Error::NotFound)
+}
+fn current_attempt(db: &Connection, r: &RunDto) -> Result<Option<AttemptDto>> {
+    let id = db
+        .query_row(
+            "SELECT id FROM attempts WHERE run_id=?1 AND attempt_no=?2",
+            params![r.id, r.current_attempt],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|a| load_attempt(db, a)).transpose()
+}

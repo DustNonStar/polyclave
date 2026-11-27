@@ -8,6 +8,12 @@ publish.workspace = true
 polyclave-os = { path = "../polyclave-os" }
 polyclave-proto = { path = "../polyclave-proto" }
 sha2 = "0.10"
+polyclave-adapters = { path = "../polyclave-adapters" }
+polyclave-store = { path = "../polyclave-store" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 
 [dev-dependencies]

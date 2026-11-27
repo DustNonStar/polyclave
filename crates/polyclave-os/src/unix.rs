@@ -2,7 +2,7 @@ use super::{wrapper_arguments, Pipes, ProcessIdentity, SpawnSpec};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -20,12 +20,20 @@ impl Process {
         Ok(())
     }
 
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing supervisor"))?
+            .try_wait()
+            .map(|s| s.map(exit_code))
+    }
+
     pub(crate) fn wait(&mut self) -> io::Result<i32> {
         self.child
             .as_mut()
             .ok_or_else(|| io::Error::other("missing supervisor"))?
             .wait()
-            .map(|s| s.code().unwrap_or(1))
+            .map(exit_code)
     }
 
     pub(crate) fn reap_on_drop(&mut self) {
@@ -39,11 +47,16 @@ impl Process {
     }
 }
 
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .unwrap_or_else(|| -status.signal().unwrap_or(1))
+}
+
 pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
     let mut child = Command::new(&spec.supervisor)
         .args(wrapper_arguments(spec))
         .current_dir(&spec.cwd)
-        .env_clear()
         .env_clear()
         .envs(spec.env.iter().cloned())
         .process_group(0)

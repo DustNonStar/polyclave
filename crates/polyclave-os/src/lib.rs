@@ -74,6 +74,10 @@ impl Supervised {
         self.process.cancel()
     }
 
+    pub fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        self.process.try_wait()
+    }
+
     pub fn wait(&mut self) -> io::Result<i32> {
         self.process.wait()
     }
@@ -199,4 +203,30 @@ pub fn supervisor_exec_entry(args: &[OsString]) -> io::Result<i32> {
 
 pub fn is_supervisor_argument(argument: &OsStr) -> bool {
     argument == "--supervisor-exec"
+}
+
+/// Unix process groups may not contain descendants which started a new session.
+pub fn hard_stop_excludes_writers() -> bool {
+    cfg!(windows)
+}
+
+pub fn exclude_old_supervisor(identity: &ProcessIdentity) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match kill_process_tree(identity) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+        if process_identity(identity.pid)?.as_ref() != Some(identity) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "old supervisor did not exit",
+            ));
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    }
 }

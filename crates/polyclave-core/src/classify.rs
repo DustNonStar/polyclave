@@ -18,6 +18,8 @@ pub struct Verdict {
     pub detail: Option<String>,
 }
 
+pub const RETRYABLE_DETAIL: &str = "retryable: no receipt and no mirror branch";
+
 pub fn classify_run(writer: WriterCheck, accepted: Option<&str>, branch: BranchCheck) -> Verdict {
     let mut v = Verdict {
         status: RunStatus::NeedsReview,
@@ -40,7 +42,7 @@ pub fn classify_run(writer: WriterCheck, accepted: Option<&str>, branch: BranchC
     match (accepted, branch) {
         (None, BranchCheck::Absent) => {
             v.status = RunStatus::Interrupted;
-            v.detail = Some("retryable: no receipt and no mirror branch".into());
+            v.detail = Some(RETRYABLE_DETAIL.into());
         }
         (Some(receipt), BranchCheck::Present { tip, problem: None }) if receipt == tip => {
             v.status = RunStatus::Done;

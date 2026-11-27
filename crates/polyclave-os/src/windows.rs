@@ -58,6 +58,14 @@ impl Process {
         Ok(())
     }
 
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        match unsafe { WaitForSingleObject(raw(&self.child), 0) } {
+            WAIT_SIGNALED => self.wait().map(Some),
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     pub(crate) fn wait(&mut self) -> io::Result<i32> {
         if unsafe { WaitForSingleObject(raw(&self.child), FOREVER) } != WAIT_SIGNALED {
             return Err(io::Error::last_os_error());

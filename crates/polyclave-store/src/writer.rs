@@ -61,7 +61,11 @@ impl Store {
         if version == 0 {
             migration.execute_batch(include_str!("schema.sql"))?;
             migration.pragma_update(None, "user_version", 1)?;
-        } else if version != 1 {
+        }
+        if version <= 1 {
+            migration.execute_batch("ALTER TABLE turns ADD COLUMN mcp_revoked INTEGER NOT NULL DEFAULT 0 CHECK (mcp_revoked IN (0, 1));")?;
+            migration.pragma_update(None, "user_version", 2)?;
+        } else if version != 2 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;

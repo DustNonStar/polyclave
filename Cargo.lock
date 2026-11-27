@@ -460,11 +460,17 @@ dependencies = [
 name = "polyclave-core"
 version = "0.1.0"
 dependencies = [
+ "polyclave-adapters",
  "polyclave-os",
  "polyclave-proto",
+ "polyclave-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

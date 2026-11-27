@@ -309,7 +309,7 @@ fn active(db: &Connection, token: &str, host: &str) -> Result<Option<ActiveTurn>
     Ok(db.query_row(
         "SELECT t.id,t.mode,a.id,r.id,r.repo_cwd,a.branch,r.mirror_remote,r.base_sha,a.attempt_no
          FROM turns t LEFT JOIN runs r ON r.id=t.run_id LEFT JOIN attempts a ON a.id=t.attempt_id AND a.run_id=r.id
-         WHERE t.mcp_token=?1 AND t.host_instance_id=?2 AND t.status='running' AND t.phase='authorized'
+         WHERE t.mcp_token=?1 AND t.host_instance_id=?2 AND t.status='running' AND t.phase='authorized' AND t.mcp_revoked=0
            AND (t.run_id IS NULL OR (a.attempt_no=r.current_attempt AND a.status NOT IN ('superseded','cancelled')
                                     AND r.status NOT IN ('done','failed')))",
         [token,host], |r| {

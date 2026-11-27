@@ -59,7 +59,7 @@ impl Store {
             use rusqlite::OptionalExtension;
             let source: Option<(String,String,String)> = db.query_row(
                "SELECT r.repo_cwd,r.id,r.vendor FROM turns t JOIN runs r ON r.id=t.run_id
-                WHERE t.id=?1 AND t.status='running' AND t.phase='authorized' AND t.attempt_id=
+                WHERE t.id=?1 AND t.status='running' AND t.phase='authorized' AND t.mcp_revoked=0 AND t.attempt_id=
                 (SELECT id FROM attempts WHERE run_id=r.id AND attempt_no=r.current_attempt)",
                [turn_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let Some((repo,run,author))=source else {return Err(Error::ConflictError)};
