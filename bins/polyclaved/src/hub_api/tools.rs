@@ -16,7 +16,10 @@ impl Hub {
         stop: Stop,
     ) -> HubResult<Value> {
         stop.check()?;
-        if matches!(name.as_str(), "start_council" | "run_pr_gate") {
+        if matches!(
+            name.as_str(),
+            "start_council" | "run_pr_gate" | "dispatch_remote"
+        ) {
             let value = tokio::select! {
                 biased;
                 _ = stop.wait() => return Err(Error::Cancelled),
@@ -164,6 +167,58 @@ impl Hub {
                 .await?;
                 let gate = execute_pr_gate(&deps, req).await?;
                 serde_json::to_value(gate).map_err(|_| Error::Store)
+            }
+            "dispatch_remote" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct DispatchRemoteArgs {
+                    node_id: String,
+                    action: String,
+                    #[serde(default)]
+                    instructions: String,
+                }
+                let input: DispatchRemoteArgs =
+                    serde_json::from_value(args).map_err(|_| Error::Policy)?;
+                let hub = self.clone();
+                let caller_repo = caller.repo.clone();
+                let action = input.action.clone();
+                let (endpoint, req) = blocking(move || {
+                    if hub.store.pause_state().map_err(|_| Error::Store)?.paused {
+                        return Err(Error::Policy);
+                    }
+                    let node = hub
+                        .store
+                        .get_mesh_node(&input.node_id)
+                        .map_err(|_| Error::Policy)?;
+                    if node.status != polyclave_proto::MeshNodeStatus::Online
+                        || !node.allowed_repos.iter().any(|r| r == &caller_repo)
+                        || !node.allowed_actions.iter().any(|a| a == &action)
+                    {
+                        return Err(Error::Policy);
+                    }
+                    let scope = polyclave_mesh::MeshScope {
+                        node_id: node.id.clone(),
+                        allowed_repos: vec![caller_repo.clone()],
+                        allowed_actions: vec![action.clone()],
+                        expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
+                    };
+                    let token = hub.mesh_policy().issue(scope).map_err(|_| Error::Policy)?;
+                    Ok((
+                        node.endpoint,
+                        polyclave_mesh::RemoteDispatchRequest {
+                            repo_cwd: caller_repo,
+                            action,
+                            instructions: input.instructions,
+                            token,
+                        },
+                    ))
+                })
+                .await?;
+                let client = polyclave_mesh::MeshClient::new().map_err(|_| Error::Transport)?;
+                client
+                    .dispatch(&endpoint, &req)
+                    .await
+                    .map_err(|_| Error::Policy)
             }
             _ => {
                 let hub = self.clone();
@@ -489,6 +544,16 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
                     "repo_cwd": string
                 }),
                 &["run_id", "repo_slug", "branch", "pr_title"],
+            ),
+            tool(
+                "dispatch_remote",
+                "Dispatch an allowlisted read/probe action to an online federated mesh node using an attenuated capability token.",
+                json!({
+                    "node_id": string,
+                    "action": string,
+                    "instructions": string
+                }),
+                &["node_id", "action"],
             ),
         ]);
     }

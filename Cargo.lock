@@ -3160,6 +3160,7 @@ dependencies = [
  "polyclave-adapters",
  "polyclave-core",
  "polyclave-hub",
+ "polyclave-mesh",
  "polyclave-os",
  "polyclave-proto",
  "polyclave-store",

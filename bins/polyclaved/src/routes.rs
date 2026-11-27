@@ -32,6 +32,7 @@ pub struct App {
 }
 
 pub fn router(app: App, auth: LocalAuth) -> Router {
+    let mesh_hub = app.hub.clone();
     let extension = app.hub.clone().map(crate::hub_api::router);
     let public_api = Router::new()
         .route("/pairing/exchange", post(exchange_pairing))
@@ -56,7 +57,13 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
         .layer(middleware::from_fn_with_state(auth, auth::require))
         .merge(public_api);
     let directory = resolve_ui_dir();
-    Router::new().nest("/api",api).fallback_service(tower_http::set_header::SetResponseHeader::overriding(
+    let root = Router::new().nest("/api", api);
+    let root = if let Some(hub) = mesh_hub {
+        root.nest("/mesh", crate::hub_api::mesh_router(hub))
+    } else {
+        root
+    };
+    root.fallback_service(tower_http::set_header::SetResponseHeader::overriding(
         tower_http::services::ServeDir::new(directory),axum::http::header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
     ))

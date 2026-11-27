@@ -1006,3 +1006,67 @@ async fn community_opt_in(State(hub): State<Hub>, Json(body): Json<CommunityOptI
     .await?;
     Ok(Json(json!({ "opt_in": opt_in })))
 }
+
+pub fn mesh_router(hub: Hub) -> Router {
+    Router::new()
+        .route("/health", axum::routing::get(mesh_health))
+        .route("/dispatch", axum::routing::post(mesh_dispatch))
+        .with_state(hub)
+}
+
+async fn mesh_health(State(hub): State<Hub>) -> Json<polyclave_mesh::RemoteHealth> {
+    Json(polyclave_mesh::RemoteHealth {
+        node_id: hub.host.clone(),
+        ok: true,
+    })
+}
+
+async fn mesh_dispatch(
+    State(hub): State<Hub>,
+    Json(req): Json<polyclave_mesh::RemoteDispatchRequest>,
+) -> Response {
+    let paused = hub.store.pause_state().map(|p| p.paused).unwrap_or(true);
+    if paused {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let Some(first_scope) = req.token.chain.first() else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Ok(node) = hub.store.get_mesh_node(&first_scope.node_id) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let policy = hub.mesh_policy();
+    if policy
+        .authorize(
+            &req.token,
+            &node,
+            &req.repo_cwd,
+            &req.action,
+            polyclave_mesh::current_epoch_secs(),
+        )
+        .is_err()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match req.action.as_str() {
+        "ping" => Json(json!({
+            "ok": true,
+            "node_id": node.id,
+            "action": "ping"
+        }))
+        .into_response(),
+        "list_repo_files" => match RepoScope::from_registered(FsPath::new(&req.repo_cwd))
+            .and_then(|scope| scope.list_repo_files(None, None))
+        {
+            Ok(files) => Json(json!({ "ok": true, "files": files })).into_response(),
+            Err(_) => StatusCode::FORBIDDEN.into_response(),
+        },
+        "search_repo" => match RepoScope::from_registered(FsPath::new(&req.repo_cwd))
+            .and_then(|scope| scope.search_repo(&req.instructions, None))
+        {
+            Ok(hits) => Json(json!({ "ok": true, "matches": hits })).into_response(),
+            Err(_) => StatusCode::FORBIDDEN.into_response(),
+        },
+        _ => StatusCode::FORBIDDEN.into_response(),
+    }
+}

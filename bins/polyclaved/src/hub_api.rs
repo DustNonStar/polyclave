@@ -54,7 +54,7 @@ use tokio::{
 
 mod http;
 mod tools;
-pub use http::router;
+pub use http::{mesh_router, router};
 use tools::tool_list;
 #[cfg(test)]
 mod tests;
@@ -122,6 +122,7 @@ struct Lifecycle {
     server: tokio::sync::Mutex<Option<JoinHandle<std::io::Result<()>>>>,
     observer: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     notifier: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    mesh_probe: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 struct HostReviewerExecutor;
@@ -220,11 +221,31 @@ pub struct Hub {
     lifecycle: Arc<Lifecycle>,
     stream: broadcast::Sender<(String, StreamEvent)>,
     stage2: Arc<Stage2Deps>,
+    mesh_policy: Arc<Mutex<Arc<polyclave_mesh::MeshPolicy>>>,
 }
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> HubResult<T> + Send + 'static,
 ) -> HubResult<T> {
     spawn_blocking(f).await.map_err(|_| Error::Store)?
+}
+
+fn load_or_create_mesh_key(state: &FsPath) -> std::io::Result<Vec<u8>> {
+    if let Ok(env_key) = std::env::var("POLYCLAVE_MESH_KEY") {
+        if env_key.len() >= 16 {
+            return Ok(env_key.into_bytes());
+        }
+    }
+    let key_path = state.join("mesh-root.key");
+    if let Ok(existing) = std::fs::read(&key_path) {
+        if existing.len() >= 16 {
+            return Ok(existing);
+        }
+    }
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    key.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    polyclave_os::write_private_file(&key_path, &key)?;
+    Ok(key)
 }
 
 impl Hub {
@@ -238,6 +259,9 @@ impl Hub {
     ) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
+        let mesh_key = load_or_create_mesh_key(&state)?;
+        let mesh_policy =
+            polyclave_mesh::MeshPolicy::new(mesh_key).map_err(std::io::Error::other)?;
         let hub = Self {
             triage: Triage::new(store.clone(), runs.clone()),
             store,
@@ -250,6 +274,7 @@ impl Hub {
             lifecycle: Default::default(),
             stream,
             stage2: Default::default(),
+            mesh_policy: Arc::new(Mutex::new(Arc::new(mesh_policy))),
         };
         let app = Router::new()
             .route("/mcp", post(http::mcp))
@@ -387,6 +412,64 @@ impl Hub {
                         {
                             cursor = next_seq;
                         }
+                    }
+                }
+            }
+        });
+        *slot = Some((tx, handle));
+    }
+    pub fn mesh_policy(&self) -> Arc<polyclave_mesh::MeshPolicy> {
+        self.mesh_policy.lock().unwrap().clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_mesh_key(&self, key: Vec<u8>) {
+        let policy = polyclave_mesh::MeshPolicy::new(key).expect("valid mesh key");
+        *self.mesh_policy.lock().unwrap() = Arc::new(policy);
+    }
+    pub async fn probe_mesh_nodes_once(&self) -> usize {
+        let Ok(nodes) = self.store.list_mesh_nodes() else {
+            return 0;
+        };
+        let Ok(client) = polyclave_mesh::MeshClient::new() else {
+            return 0;
+        };
+        let mut probed = 0usize;
+        for node in nodes {
+            if node.status == polyclave_proto::MeshNodeStatus::Revoked {
+                continue;
+            }
+            let next_status = match client.health(&node.endpoint).await {
+                Ok(h) if h.ok => polyclave_proto::MeshNodeStatus::Online,
+                _ => polyclave_proto::MeshNodeStatus::Offline,
+            };
+            let _ = self.store.update_mesh_node_status(&node.id, next_status);
+            probed += 1;
+        }
+        probed
+    }
+    pub async fn start_mesh_heartbeat(&self) {
+        let mut slot = self.lifecycle.mesh_probe.lock().await;
+        if let Some((prev_tx, prev_handle)) = slot.take() {
+            let _ = prev_tx.send(true);
+            let _ = prev_handle.await;
+        }
+        if self.is_closed() {
+            return;
+        }
+        let hub = self.clone();
+        let (tx, mut rx) = watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        let _ = hub.probe_mesh_nodes_once().await;
                     }
                 }
             }
@@ -616,6 +699,10 @@ impl Hub {
             let _ = handle.await;
         }
         if let Some((tx, handle)) = self.lifecycle.notifier.lock().await.take() {
+            let _ = tx.send(true);
+            let _ = handle.await;
+        }
+        if let Some((tx, handle)) = self.lifecycle.mesh_probe.lock().await.take() {
             let _ = tx.send(true);
             let _ = handle.await;
         }

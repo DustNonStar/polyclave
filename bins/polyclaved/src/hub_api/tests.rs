@@ -1476,3 +1476,87 @@ async fn notification_dispatcher_delivers_metadata_only_for_attention_changes() 
     srv.abort();
     hub.close().await;
 }
+
+#[tokio::test]
+async fn mesh_heartbeat_probe_and_attenuated_remote_dispatch_work_end_to_end() {
+    use polyclave_proto::MeshNodeStatus;
+    use polyclave_store::stage3::NewMeshNode;
+
+    let shared_key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (_p_dir, primary, _rx1) = test_hub().await;
+    primary.set_mesh_key(shared_key.clone());
+
+    let (_r_dir, remote, _rx2) = test_hub().await;
+    remote.set_mesh_key(shared_key);
+    remote
+        .store
+        .upsert_mesh_node(NewMeshNode {
+            id: "node-win".into(),
+            name: "Win Box".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            os_family: "windows".into(),
+            allowed_repos: vec!["repo".into()],
+            allowed_actions: vec!["ping".into()],
+            status: MeshNodeStatus::Online,
+        })
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let remote_app = axum::Router::new().nest("/mesh", crate::hub_api::mesh_router(remote.clone()));
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, remote_app).await.unwrap();
+    });
+
+    // Register remote node as initially offline on primary, then probe to Online.
+    primary
+        .store
+        .upsert_mesh_node(NewMeshNode {
+            id: "node-win".into(),
+            name: "Win Box".into(),
+            endpoint: format!("http://{addr}"),
+            os_family: "windows".into(),
+            allowed_repos: vec!["repo".into()],
+            allowed_actions: vec!["ping".into()],
+            status: MeshNodeStatus::Offline,
+        })
+        .unwrap();
+    assert_eq!(primary.probe_mesh_nodes_once().await, 1);
+    assert_eq!(
+        primary.store.get_mesh_node("node-win").unwrap().status,
+        MeshNodeStatus::Online
+    );
+
+    // Hub dispatch_remote succeeds for allowlisted action and rejects unpermitted action.
+    let scope = ToolScope::new(1, "s1", "hub", "repo");
+    let res = primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            json!({"node_id": "node-win", "action": "ping", "instructions": ""}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["node_id"], "node-win");
+
+    assert!(primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            json!({"node_id": "node-win", "action": "shell_exec", "instructions": "id"}),
+        )
+        .await
+        .is_err());
+
+    // Once remote peer stops, next heartbeat probe marks it Offline.
+    srv.abort();
+    let _ = primary.probe_mesh_nodes_once().await;
+    assert_eq!(
+        primary.store.get_mesh_node("node-win").unwrap().status,
+        MeshNodeStatus::Offline
+    );
+
+    remote.close().await;
+    primary.close().await;
+}
