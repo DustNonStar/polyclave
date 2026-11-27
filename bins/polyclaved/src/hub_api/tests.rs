@@ -1615,3 +1615,314 @@ async fn community_submit_route_and_applied_evolution_system_prompt_work() {
 
     hub.close().await;
 }
+
+/// Builds a Hub whose runner launches `codex` from a fake CLI fixture. The
+/// supervisor stays offline, so a scheduled Worker ends without any real agent.
+async fn mesh_worker_hub(dir: &FsPath) -> Hub {
+    let fake_codex = dir.join(if cfg!(windows) {
+        "fake-codex.cmd"
+    } else {
+        "fake-codex"
+    });
+    let script = if cfg!(windows) {
+        "@echo off\r\nexit /b 0\r\n"
+    } else {
+        "#!/bin/sh\nexit 0\n"
+    };
+    std::fs::write(&fake_codex, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let store = Store::open(dir.join("hub.db")).unwrap();
+    let runs = RunManager::new(store.clone(), Arc::new(MirrorManager::new(dir).unwrap()));
+    let runner = TurnRunner::new(
+        runs.clone(),
+        dir,
+        "mesh-remote-host".into(),
+        RunnerConfig {
+            supervisor: "offline".into(),
+            mcp_url: "http://127.0.0.1:1/mcp".into(),
+            codex: fake_codex,
+            claude: "offline".into(),
+            claude_isolation: None,
+        },
+        |_, _| {},
+    )
+    .unwrap();
+    let (stream, _) = broadcast::channel(64);
+    Hub::new(
+        store,
+        runs,
+        runner,
+        "mesh-remote-host".into(),
+        dir.to_path_buf(),
+        stream,
+    )
+    .await
+    .unwrap()
+}
+
+/// A committed `main` branch the mirror can admit as a Run baseline.
+fn mesh_git_repo(path: &FsPath) -> String {
+    std::fs::create_dir_all(path).unwrap();
+    let repo = polyclave_os::canonical_real_path(path).unwrap();
+    git_cmd(&repo, &["init", "-b", "main", "--template="]);
+    git_cmd(&repo, &["config", "user.name", "Fixture"]);
+    git_cmd(&repo, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(repo.join("README.md"), "mesh fixture\n").unwrap();
+    git_cmd(&repo, &["add", "."]);
+    git_cmd(&repo, &["commit", "-m", "initial"]);
+    repo.to_str().unwrap().to_owned()
+}
+
+fn mesh_node(id: &str, endpoint: String, repos: &[&str]) -> polyclave_store::stage3::NewMeshNode {
+    polyclave_store::stage3::NewMeshNode {
+        id: id.into(),
+        name: "Win Box".into(),
+        endpoint,
+        os_family: "windows".into(),
+        allowed_repos: repos.iter().map(|r| (*r).to_owned()).collect(),
+        allowed_actions: vec!["worker_run".into(), "run_status".into()],
+        status: polyclave_proto::MeshNodeStatus::Online,
+    }
+}
+
+async fn post_mesh_dispatch(hub: &Hub, body: Value) -> (StatusCode, Value) {
+    let res = crate::hub_api::mesh_router(hub.clone())
+        .oneshot(
+            Request::post("/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn mesh_worker_run_rejects_unauthorized_and_cross_repository_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = mesh_worker_hub(dir.path()).await;
+    remote.set_mesh_key(b"0123456789abcdef0123456789abcdef".to_vec());
+    let repo_a = mesh_git_repo(&dir.path().join("repo-a"));
+    let repo_b = mesh_git_repo(&dir.path().join("repo-b"));
+    remote
+        .store
+        .upsert_mesh_node(mesh_node(
+            "node-win",
+            "http://127.0.0.1:1".into(),
+            &[&repo_a, &repo_b],
+        ))
+        .unwrap();
+    let policy = remote.mesh_policy();
+    let scope = |repos: Vec<String>, actions: &[&str]| polyclave_mesh::MeshScope {
+        node_id: "node-win".into(),
+        allowed_repos: repos,
+        allowed_actions: actions.iter().map(|a| (*a).to_owned()).collect(),
+        expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
+    };
+    let request = |repo: &str, action: &str, token: &polyclave_mesh::AttenuatedToken| {
+        let mut req =
+            polyclave_mesh::RemoteDispatchRequest::new(repo, action, "do it", token.clone());
+        req.request_id = Some("req-denied".into());
+        json!(req)
+    };
+
+    // A token that only grants run_status cannot start a Worker.
+    let status_only = policy
+        .issue(scope(vec![repo_a.clone()], &["run_status"]))
+        .unwrap();
+    let (code, _) = post_mesh_dispatch(&remote, request(&repo_a, "worker_run", &status_only)).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+
+    // A token attenuated down to repo-b cannot start a Worker in repo-a, even though
+    // the node itself allows both repositories.
+    let parent = policy
+        .issue(scope(
+            vec![repo_a.clone(), repo_b.clone()],
+            &["worker_run", "run_status"],
+        ))
+        .unwrap();
+    let only_b = policy
+        .attenuate(
+            &parent,
+            scope(vec![repo_b.clone()], &["worker_run", "run_status"]),
+        )
+        .unwrap();
+    let (code, _) = post_mesh_dispatch(&remote, request(&repo_a, "worker_run", &only_b)).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+
+    // A token signed with another root key is rejected.
+    let foreign = polyclave_mesh::MeshPolicy::new(b"ffffffffffffffffffffffffffffffff".to_vec())
+        .unwrap()
+        .issue(scope(vec![repo_a.clone()], &["worker_run"]))
+        .unwrap();
+    let (code, _) = post_mesh_dispatch(&remote, request(&repo_a, "worker_run", &foreign)).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+
+    // Nothing was admitted by any rejected request.
+    assert!(remote.runs.list().unwrap().is_empty());
+
+    // Global Pause answers 409 before any admission.
+    remote.store.set_pause(true, None).unwrap();
+    let (code, _) = post_mesh_dispatch(&remote, request(&repo_a, "worker_run", &parent)).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(remote.runs.list().unwrap().is_empty());
+
+    remote.close().await;
+}
+
+#[tokio::test]
+async fn mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote() {
+    let shared_key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let (_p_dir, primary, _rx) = test_hub().await;
+    primary.set_mesh_key(shared_key.clone());
+
+    let r_dir = tempfile::tempdir().unwrap();
+    let remote = mesh_worker_hub(r_dir.path()).await;
+    remote.set_mesh_key(shared_key);
+    let repo = mesh_git_repo(&r_dir.path().join("repo"));
+    let other = mesh_git_repo(&r_dir.path().join("other"));
+    remote
+        .store
+        .upsert_mesh_node(mesh_node(
+            "node-win",
+            "http://127.0.0.1:1".into(),
+            &[&repo, &other],
+        ))
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let remote_app = axum::Router::new().nest("/mesh", crate::hub_api::mesh_router(remote.clone()));
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, remote_app).await.unwrap();
+    });
+    primary
+        .store
+        .upsert_mesh_node(mesh_node("node-win", format!("http://{addr}"), &[&repo]))
+        .unwrap();
+
+    let scope = ToolScope::new(1, "hub", "hub", &repo);
+    let worker_run = json!({
+        "node_id": "node-win",
+        "action": "worker_run",
+        "instructions": "Add a CHANGELOG entry.",
+        "vendor": "codex",
+        "model": "gpt-5",
+        "base_branch": "main",
+        "request_id": "req-mesh-1"
+    });
+    let started: polyclave_mesh::RemoteWorkerResult = serde_json::from_value(
+        primary
+            .call_tool(&scope, "dispatch_remote", worker_run.clone())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(started.node_id, "node-win");
+    assert!(started.run_id.starts_with('r'), "{started:?}");
+
+    // The Run landed in the remote ledger under a single-Run explicit ticket owned
+    // by the mesh Hub session; the primary ledger admitted nothing.
+    let run = remote.runs.get(&started.run_id).unwrap();
+    assert_eq!(run.repo_cwd, repo);
+    assert_eq!(run.vendor, Vendor::Codex);
+    assert_eq!(run.model.as_deref(), Some("gpt-5"));
+    assert_eq!(run.base_branch, "main");
+    assert_eq!(run.request_id, "req-mesh-1");
+    let (source, max_runs, session_name): (String, u32, String) = remote
+        .store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT t.source_kind,t.max_runs,s.name FROM runs r
+                 JOIN tickets t ON t.id=r.ticket_id JOIN sessions s ON s.id=r.hub_session_id
+                 WHERE r.id=?1",
+                [&started.run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(source, "explicit_user");
+    assert_eq!(max_runs, 1);
+    assert_eq!(session_name, "Mesh remote");
+    assert!(primary.runs.list().unwrap().is_empty());
+
+    // Repeating the request_id is idempotent: same Run, nothing new admitted.
+    let repeated: polyclave_mesh::RemoteWorkerResult = serde_json::from_value(
+        primary
+            .call_tool(&scope, "dispatch_remote", worker_run)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(repeated.run_id, started.run_id);
+    assert_eq!(remote.runs.list().unwrap().len(), 1);
+
+    // run_status reports what the remote ledger holds for that Run.
+    let status: polyclave_mesh::RemoteWorkerResult = serde_json::from_value(
+        primary
+            .call_tool(
+                &scope,
+                "dispatch_remote",
+                json!({"node_id": "node-win", "action": "run_status", "run_id": started.run_id}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status.node_id, "node-win");
+    assert_eq!(status.run_id, started.run_id);
+    let current = remote.runs.get(&started.run_id).unwrap();
+    assert_eq!(
+        json!(status.status),
+        serde_json::to_value(current.status).unwrap()
+    );
+    assert_eq!(status.result_sha, current.result_sha);
+
+    // Unknown Runs and missing run_id are refused.
+    assert!(primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            json!({"node_id": "node-win", "action": "run_status", "run_id": "r-missing"}),
+        )
+        .await
+        .is_err());
+    assert!(primary
+        .call_tool(
+            &scope,
+            "dispatch_remote",
+            json!({"node_id": "node-win", "action": "run_status"}),
+        )
+        .await
+        .is_err());
+
+    // A run_status token for another repository cannot read this Run.
+    let other_token = remote
+        .mesh_policy()
+        .issue(polyclave_mesh::MeshScope {
+            node_id: "node-win".into(),
+            allowed_repos: vec![other.clone()],
+            allowed_actions: vec!["run_status".into()],
+            expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
+        })
+        .unwrap();
+    let mut probe =
+        polyclave_mesh::RemoteDispatchRequest::new(&other, "run_status", "", other_token);
+    probe.run_id = Some(started.run_id.clone());
+    let (code, _) = post_mesh_dispatch(&remote, json!(probe)).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+
+    srv.abort();
+    remote.close().await;
+    primary.close().await;
+}
