@@ -501,3 +501,65 @@ pub struct NotificationChannelDto {
     pub enabled: bool,
     pub created_at: String,
 }
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct CuaLockDto {
+    pub locked: bool,
+    pub holder_run_id: Option<String>,
+    pub target_window: Option<String>,
+    pub idle_threshold_secs: u32,
+    pub acquired_at: Option<String>,
+    pub reclaimed_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionKind {
+    Routing,
+    MemoryRule,
+    RoleBrief,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum EvolutionStatus {
+    Proposed,
+    Applied,
+    RolledBack,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct EvolutionSuggestionDto {
+    pub id: String,
+    pub kind: EvolutionKind,
+    pub title: String,
+    pub rationale: String,
+    pub payload_json: Value,
+    pub status: EvolutionStatus,
+    pub supersedes_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct LocalSkillDto {
+    pub id: String,
+    pub name: String,
+    pub version: u32,
+    pub supersedes_id: Option<String>,
+    pub description: String,
+    pub body_md: String,
+    pub enabled: bool,
+    pub synced_vendors: Vec<Vendor>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct CommunityDraftDto {
+    pub opt_in: bool,
+    pub title: String,
+    pub redacted_markdown: String,
+    pub stripped_items: u32,
+    pub generated_at: String,
+}

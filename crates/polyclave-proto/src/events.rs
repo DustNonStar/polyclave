@@ -19,6 +19,9 @@ pub enum ChangeTopic {
     Device,
     MeshNode,
     Notification,
+    Cua,
+    Evolution,
+    Skill,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]

@@ -87,7 +87,19 @@ export type NotificationChannelKind = "ntfy" | "unified_push";
 
 export type NotificationChannelDto = { id: string, kind: NotificationChannelKind, label: string, endpoint: string, topic: string, enabled: boolean, created_at: string, };
 
-export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox" | "council" | "pr_gate" | "pause" | "device" | "mesh_node" | "notification";
+export type CuaLockDto = { locked: boolean, holder_run_id: string | null, target_window: string | null, idle_threshold_secs: number, acquired_at: string | null, reclaimed_at: string | null, };
+
+export type EvolutionKind = "routing" | "memory_rule" | "role_brief";
+
+export type EvolutionStatus = "proposed" | "applied" | "rolled_back" | "rejected";
+
+export type EvolutionSuggestionDto = { id: string, kind: EvolutionKind, title: string, rationale: string, payload_json: JsonValue, status: EvolutionStatus, supersedes_id: string | null, created_at: string, updated_at: string, };
+
+export type LocalSkillDto = { id: string, name: string, version: number, supersedes_id: string | null, description: string, body_md: string, enabled: boolean, synced_vendors: Array<Vendor>, created_at: string, };
+
+export type CommunityDraftDto = { opt_in: boolean, title: string, redacted_markdown: string, stripped_items: number, generated_at: string, };
+
+export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox" | "council" | "pr_gate" | "pause" | "device" | "mesh_node" | "notification" | "cua" | "evolution" | "skill";
 
 export type SseEnvelope = { seq: number, topic: ChangeTopic, entity_id: string, payload: JsonValue, created_at: string, };
 
