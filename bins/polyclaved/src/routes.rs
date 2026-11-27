@@ -33,6 +33,9 @@ pub struct App {
 
 pub fn router(app: App, auth: LocalAuth) -> Router {
     let extension = app.hub.clone().map(crate::hub_api::router);
+    let public_api = Router::new()
+        .route("/pairing/exchange", post(exchange_pairing))
+        .with_state(app.clone());
     let api = Router::new()
         .route("/sessions", get(sessions).post(register))
         .route("/runs", get(runs).post(accept))
@@ -49,7 +52,9 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
     } else {
         api
     };
-    let api = api.layer(middleware::from_fn_with_state(auth, auth::require));
+    let api = api
+        .layer(middleware::from_fn_with_state(auth, auth::require))
+        .merge(public_api);
     let directory = resolve_ui_dir();
     Router::new().nest("/api",api).fallback_service(tower_http::set_header::SetResponseHeader::overriding(
         tower_http::services::ServeDir::new(directory),axum::http::header::CONTENT_SECURITY_POLICY,
@@ -277,6 +282,31 @@ async fn register(State(app): State<App>, Json(input): Json<Register>) -> Reply 
         })
     }).await?))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExchangePairingBody {
+    secret: String,
+    peer_identity: Option<String>,
+}
+
+async fn exchange_pairing(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<ExchangePairingBody>,
+) -> Reply {
+    let header_peer = headers
+        .get("tailscale-user-login")
+        .or_else(|| headers.get("x-agentmesh-node"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let peer = header_peer.or(body.peer_identity);
+    let (device, token) =
+        blocking(move || app.store.exchange_pairing_ticket(&body.secret, peer)).await?;
+    Ok(Json(json!({ "device": device, "token": token })))
+}
+
 async fn sessions(State(app): State<App>) -> Reply {
     Ok(Json(json!(blocking(move||app.store.read(|db|{
         let mut q=db.prepare("SELECT id,name,role,repo_cwd,profile_id,provider_model,vendor,rolling_summary,agent_thread_id,created_at FROM sessions ORDER BY id")?;

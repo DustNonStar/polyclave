@@ -2,9 +2,15 @@ use super::*;
 use crate::routes::{HttpError, Reply};
 use polyclave_hub::{
     council::{start_council as run_start_council, StartCouncilRequest},
+    notify::{
+        validate_private_endpoint, HttpPrivateNotifier, NotificationMetadata, PrivateNotifier,
+    },
     pr_gate::{resume_all as pr_gate_resume_all, run_pr_gate as execute_pr_gate, ReviewerSpec},
 };
-use polyclave_proto::{CouncilLevel, PlanningPreference};
+use polyclave_proto::{
+    ClientKind, CouncilLevel, MeshNodeStatus, NotificationChannelKind, PlanningPreference,
+};
+use polyclave_store::stage3::{NewMeshNode, NewNotificationChannel};
 
 pub(super) async fn mcp(
     State(hub): State<Hub>,
@@ -89,6 +95,26 @@ pub fn router(hub: Hub) -> Router {
         .route("/pr-gates/{id}/run", post(run_pr_gate))
         .route("/pause", axum::routing::get(pause_state).post(pause))
         .route("/resume", post(resume))
+        .route(
+            "/pairing/tickets",
+            axum::routing::get(pairing_tickets).post(create_pairing_ticket),
+        )
+        .route("/devices", axum::routing::get(devices))
+        .route("/devices/{id}/revoke", post(revoke_device))
+        .route(
+            "/mesh/nodes",
+            axum::routing::get(mesh_nodes).post(upsert_mesh_node),
+        )
+        .route("/mesh/nodes/{id}/revoke", post(revoke_mesh_node))
+        .route(
+            "/notifications/channels",
+            axum::routing::get(notification_channels).post(upsert_notification_channel),
+        )
+        .route(
+            "/notifications/channels/{id}",
+            axum::routing::delete(delete_notification_channel),
+        )
+        .route("/notifications/test", post(test_notifications))
         .with_state(hub)
 }
 
@@ -632,4 +658,170 @@ async fn pause(State(hub): State<Hub>, body: Option<Json<PauseBody>>) -> Reply {
 async fn resume(State(hub): State<Hub>) -> Reply {
     let state = run_blocking(move || pr_gate_resume_all(&hub.store).map_err(map_hub_err)).await?;
     Ok(Json(json!(state)))
+}
+
+async fn pairing_tickets(State(hub): State<Hub>) -> Reply {
+    let list =
+        run_blocking(move || hub.store.list_pairing_tickets().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatePairingTicketBody {
+    client_kind: ClientKind,
+    device_label: String,
+    ttl_secs: Option<i64>,
+}
+
+async fn create_pairing_ticket(
+    State(hub): State<Hub>,
+    Json(body): Json<CreatePairingTicketBody>,
+) -> Reply {
+    let ttl = body.ttl_secs.unwrap_or(600);
+    let (ticket, secret) = run_blocking(move || {
+        hub.store
+            .create_pairing_ticket(body.client_kind, body.device_label, ttl)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    let qr_uri = format!("polyclave://pair?ticket={}&id={}", secret, ticket.id);
+    Ok(Json(
+        json!({ "ticket": ticket, "secret": secret, "qr_uri": qr_uri }),
+    ))
+}
+
+async fn devices(State(hub): State<Hub>) -> Reply {
+    let list =
+        run_blocking(move || hub.store.list_paired_devices().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+async fn revoke_device(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let device =
+        run_blocking(move || hub.store.revoke_paired_device(&id).map_err(HttpError::from)).await?;
+    Ok(Json(json!(device)))
+}
+
+async fn mesh_nodes(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || hub.store.list_mesh_nodes().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpsertMeshNodeBody {
+    id: String,
+    name: String,
+    endpoint: String,
+    os_family: String,
+    allowed_repos: Vec<String>,
+    allowed_actions: Vec<String>,
+    status: Option<MeshNodeStatus>,
+}
+
+async fn upsert_mesh_node(State(hub): State<Hub>, Json(body): Json<UpsertMeshNodeBody>) -> Reply {
+    if validate_private_endpoint(&body.endpoint).is_err() {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "policy_violation",
+            "Mesh node endpoint must be loopback, private RFC1918, or Tailscale",
+        ));
+    }
+    let node = run_blocking(move || {
+        hub.store
+            .upsert_mesh_node(NewMeshNode {
+                id: body.id,
+                name: body.name,
+                endpoint: body.endpoint,
+                os_family: body.os_family,
+                allowed_repos: body.allowed_repos,
+                allowed_actions: body.allowed_actions,
+                status: body.status.unwrap_or(MeshNodeStatus::Online),
+            })
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(node)))
+}
+
+async fn revoke_mesh_node(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let node =
+        run_blocking(move || hub.store.revoke_mesh_node(&id).map_err(HttpError::from)).await?;
+    Ok(Json(json!(node)))
+}
+
+async fn notification_channels(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || {
+        hub.store
+            .list_notification_channels()
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpsertNotificationChannelBody {
+    id: Option<String>,
+    kind: NotificationChannelKind,
+    label: String,
+    endpoint: String,
+    topic: String,
+    enabled: Option<bool>,
+}
+
+async fn upsert_notification_channel(
+    State(hub): State<Hub>,
+    Json(body): Json<UpsertNotificationChannelBody>,
+) -> Reply {
+    if validate_private_endpoint(&body.endpoint).is_err() {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "policy_violation",
+            "Notification endpoint must be private, loopback, or Tailscale",
+        ));
+    }
+    let ch = run_blocking(move || {
+        hub.store
+            .upsert_notification_channel(NewNotificationChannel {
+                id: body.id,
+                kind: body.kind,
+                label: body.label,
+                endpoint: body.endpoint,
+                topic: body.topic,
+                enabled: body.enabled.unwrap_or(true),
+            })
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(ch)))
+}
+
+async fn delete_notification_channel(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    run_blocking(move || {
+        hub.store
+            .delete_notification_channel(&id)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn test_notifications(State(hub): State<Hub>) -> Reply {
+    let channels = run_blocking(move || {
+        hub.store
+            .list_notification_channels()
+            .map_err(HttpError::from)
+    })
+    .await?;
+    let notifier = HttpPrivateNotifier::new().map_err(map_hub_err)?;
+    let meta = NotificationMetadata::sanitized("test", "host", "Polyclave wakeup test", 0);
+    let mut delivered = 0usize;
+    for ch in channels.into_iter().filter(|c| c.enabled) {
+        notifier.notify(&ch, &meta).await.map_err(map_hub_err)?;
+        delivered += 1;
+    }
+    Ok(Json(json!({ "delivered": delivered })))
 }

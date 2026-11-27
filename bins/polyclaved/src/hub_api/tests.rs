@@ -1101,3 +1101,180 @@ async fn scm_observer_starts_polls_and_stops_cleanly_on_hub_close() {
         .expect("hub.close() should gracefully cancel SCM Observer without hanging");
     assert!(hub.lifecycle.observer.lock().await.is_none());
 }
+
+#[tokio::test]
+async fn stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notifications() {
+    use axum::body::to_bytes;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+
+    // 1. Create a 10-minute one-time pairing ticket with loopback capability token.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/tickets")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({"client_kind":"ios","device_label":"Dust iPhone"}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    let secret = body["secret"].as_str().unwrap().to_owned();
+    assert!(body["qr_uri"]
+        .as_str()
+        .unwrap()
+        .starts_with("polyclave://pair?ticket="));
+
+    // 2. Exchange the ticket for a device bearer token bound to a Tailscale identity.
+    let ex_req = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({"secret": secret}).to_string(),
+        ))
+        .unwrap();
+    let ex_resp = app.clone().oneshot(ex_req).await.unwrap();
+    assert_eq!(ex_resp.status(), StatusCode::OK);
+    let ex_body: Value =
+        serde_json::from_slice(&to_bytes(ex_resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    let device_id = ex_body["device"]["id"].as_str().unwrap().to_owned();
+    let device_token = ex_body["token"].as_str().unwrap().to_owned();
+
+    // 3. Dual-identity remote request succeeds with matching Tailscale-User-Login,
+    //    and fails with mismatched identity.
+    let ok_remote = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(ok_remote).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let bad_remote = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "attacker@tailnet")
+        .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(bad_remote).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 4. Revoke device and confirm immediate 401.
+    let rev_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/devices/{device_id}/revoke"))
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(rev_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let post_rev = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(post_rev).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 5. Reject public notification endpoint; accept local mock ntfy + test delivery.
+    let pub_ch = Request::builder()
+        .method("POST")
+        .uri("/api/notifications/channels")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({
+                "kind":"ntfy","label":"Public","endpoint":"https://ntfy.sh","topic":"poly"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(pub_ch).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+
+    let ntfy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ntfy_addr = ntfy_listener.local_addr().unwrap();
+    let ntfy_srv = tokio::spawn(async move {
+        axum::serve(
+            ntfy_listener,
+            axum::Router::new().route("/poly", axum::routing::post(|| async { "ok" })),
+        )
+        .await
+        .unwrap();
+    });
+
+    let priv_ch = Request::builder()
+        .method("POST")
+        .uri("/api/notifications/channels")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({
+                "kind":"ntfy","label":"Local ntfy","endpoint":format!("http://{ntfy_addr}"),"topic":"poly"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(priv_ch).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let test_req = Request::builder()
+        .method("POST")
+        .uri("/api/notifications/test")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let test_resp = app.clone().oneshot(test_req).await.unwrap();
+    assert_eq!(test_resp.status(), StatusCode::OK);
+    let test_body: Value =
+        serde_json::from_slice(&to_bytes(test_resp.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(test_body["delivered"], 1);
+    ntfy_srv.abort();
+    hub.close().await;
+}

@@ -99,13 +99,13 @@ async fn serve() -> io::Result<()> {
     write_private_file(&token_file, token.as_bytes())?;
     let app = routes::router(
         routes::App {
-            store,
+            store: store.clone(),
             runs,
             runner,
             stream,
             hub: Some(hub),
         },
-        auth::LocalAuth::new(token.clone(), port),
+        auth::LocalAuth::with_store(token.clone(), port, Some(store)),
     );
     println!("http://127.0.0.1:{port}/#token={token}");
     let result = axum::serve(api, app)

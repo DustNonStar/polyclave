@@ -4,6 +4,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use polyclave_store::Store;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -11,14 +12,21 @@ pub struct LocalAuth {
     token: Arc<str>,
     host: String,
     web_origin: String,
+    store: Option<Store>,
 }
 
 impl LocalAuth {
+    #[cfg(test)]
     pub fn new(token: String, port: u16) -> Self {
+        Self::with_store(token, port, None)
+    }
+
+    pub fn with_store(token: String, port: u16, store: Option<Store>) -> Self {
         Self {
             token: token.into(),
             host: format!("127.0.0.1:{port}"),
             web_origin: format!("http://127.0.0.1:{port}"),
+            store,
         }
     }
     fn allowed_origin(&self, origin: &str) -> bool {
@@ -41,9 +49,16 @@ impl LocalAuth {
 
 pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next) -> Response {
     let headers = request.headers();
-    if headers.get_all(header::HOST).iter().count() != 1
-        || headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(auth.host.as_str())
-    {
+    let peer_identity = headers
+        .get("tailscale-user-login")
+        .or_else(|| headers.get("x-agentmesh-node"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let loopback_host = headers.get_all(header::HOST).iter().count() == 1
+        && headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(auth.host.as_str());
+    if !loopback_host && (peer_identity.is_none() || auth.store.is_none()) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let origin = match headers.get(header::ORIGIN) {
@@ -61,14 +76,51 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
         && headers
             .get("access-control-request-method")
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|m| matches!(m, "GET" | "POST"));
+            .is_some_and(|m| matches!(m, "GET" | "POST" | "DELETE"));
     if !preflight {
         let key = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.as_bytes().strip_prefix(b"Bearer "));
-        if headers.get_all(header::AUTHORIZATION).iter().count() != 1
-            || !key.is_some_and(|k| auth.matches(k))
-        {
+        let single_auth = headers.get_all(header::AUTHORIZATION).iter().count() == 1;
+        let mut authorized = false;
+        if single_auth {
+            if let Some(k) = key {
+                if let Some(peer) = peer_identity.as_deref() {
+                    // Non-loopback / peer-tagged requests require BOTH valid device token AND matching peer identity.
+                    if let (Some(store), Ok(token_str)) =
+                        (auth.store.clone(), std::str::from_utf8(k))
+                    {
+                        let token_owned = token_str.to_owned();
+                        let peer_owned = peer.to_owned();
+                        authorized = tokio::task::spawn_blocking(move || {
+                            store
+                                .verify_device_token(&token_owned, Some(&peer_owned))
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        })
+                        .await
+                        .unwrap_or(false);
+                    }
+                } else if auth.matches(k) {
+                    authorized = true;
+                } else if let (Some(store), Ok(token_str)) =
+                    (auth.store.clone(), std::str::from_utf8(k))
+                {
+                    let token_owned = token_str.to_owned();
+                    authorized = tokio::task::spawn_blocking(move || {
+                        store
+                            .verify_device_token(&token_owned, None)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+                    .await
+                    .unwrap_or(false);
+                }
+            }
+        }
+        if !authorized {
             let mut r = StatusCode::UNAUTHORIZED.into_response();
             cors(&mut r, origin);
             return r;
@@ -93,7 +145,7 @@ fn cors(response: &mut Response, origin: Option<HeaderValue>) {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, POST"),
+            HeaderValue::from_static("GET, POST, DELETE"),
         );
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_HEADERS,
