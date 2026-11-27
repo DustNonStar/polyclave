@@ -89,6 +89,43 @@ fn publish(db: &Connection, id: i64) -> Result<()> {
 
 impl Store {
     pub fn hub_enqueue(&self, session: &str, intent: &str, text: &str) -> Result<HubMessage> {
+        self.enqueue_hub_message("user", session, intent, text)
+    }
+
+    /// Queues something the host observed — an external PR comment, a review, a
+    /// CI failure — rather than something the person wrote. It is stored with
+    /// `source='host'`, so the Hub still reads it but it can never pass for the
+    /// user's own words, and it can never stand as a Ticket's basis message
+    /// (`hub_ticket` accepts only `source='user'`).
+    pub fn hub_enqueue_external(
+        &self,
+        session: &str,
+        intent: &str,
+        text: &str,
+    ) -> Result<HubMessage> {
+        self.enqueue_hub_message("host", session, intent, text)
+    }
+
+    /// The checkout a Run works in. It is also the key of that repository's
+    /// admission policy.
+    pub fn run_repo_cwd(&self, run: &str) -> Result<Option<String>> {
+        let run = run.to_owned();
+        self.read(move |db| {
+            Ok(db
+                .query_row("SELECT repo_cwd FROM runs WHERE id=?1", [&run], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        })
+    }
+
+    fn enqueue_hub_message(
+        &self,
+        source: &str,
+        session: &str,
+        intent: &str,
+        text: &str,
+    ) -> Result<HubMessage> {
         if intent.is_empty()
             || intent.len() > 256
             || text.trim().is_empty()
@@ -97,6 +134,7 @@ impl Store {
             return Err(Error::Invalid("invalid Hub input"));
         }
         let (session, intent, text) = (session.to_owned(), intent.to_owned(), text.to_owned());
+        let source = source.to_owned();
         self.write(move|db|{
             let role:Option<String>=db.query_row("SELECT role FROM sessions WHERE id=?1",[&session],|r|r.get(0)).optional()?;
             if !matches!(role.as_deref(),Some("hub"|"manager")){return Err(Error::NotFound);}
@@ -107,8 +145,8 @@ impl Store {
                 if item.text!=text{return Err(Error::ConflictError);}
                 return Ok(item);
             }
-            db.execute("INSERT INTO messages(session_id,source,text,queued,created_at) VALUES(?1,'user',?2,1,?3)",
-                params![session,text,now(db)?])?;
+            db.execute("INSERT INTO messages(session_id,source,text,queued,created_at) VALUES(?1,?2,?3,1,?4)",
+                params![session,source,text,now(db)?])?;
             let id=db.last_insert_rowid();
             db.execute("INSERT INTO hub_input_requests(session_id,request_id,message_id) VALUES(?1,?2,?3)",params![session,intent,id])?;
             publish(db,id)?;

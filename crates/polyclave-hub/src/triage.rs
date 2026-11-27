@@ -32,6 +32,28 @@ impl Mandate {
             })
     }
 }
+/// The admission rule for an actor the host observed, given the policy row for
+/// that repository: `(mode, bot_actors, human_actors)`.
+///
+/// Identity comes from a trusted observer, never from message text. A bot, a
+/// configured bot actor, or an `off` policy is ignored; an `auto` policy that
+/// names this verified human is eligible; anything else is a proposal.
+pub fn inference_verdict(
+    policy: &(String, Vec<String>, Vec<String>),
+    actor: &str,
+    verified_human: bool,
+    is_bot: bool,
+) -> InferredAdmission {
+    let (mode, bots, humans) = policy;
+    if mode == "off" || is_bot || bots.iter().any(|a| a.eq_ignore_ascii_case(actor)) {
+        return InferredAdmission::Ignored;
+    }
+    if mode == "auto" && verified_human && humans.iter().any(|a| a.eq_ignore_ascii_case(actor)) {
+        return InferredAdmission::Eligible;
+    }
+    InferredAdmission::Proposal
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InferredAdmission {
@@ -69,18 +91,11 @@ impl Triage {
         verified_human: bool,
         is_bot: bool,
     ) -> Result<InferredAdmission> {
-        let (mode, bots, humans) = self
+        let policy = self
             .store
             .hub_inference_policy(repo)
             .map_err(|_| Error::Store)?;
-        if mode == "off" || is_bot || bots.iter().any(|a| a.eq_ignore_ascii_case(actor)) {
-            return Ok(InferredAdmission::Ignored);
-        }
-        if mode == "auto" && verified_human && humans.iter().any(|a| a.eq_ignore_ascii_case(actor))
-        {
-            return Ok(InferredAdmission::Eligible);
-        }
-        Ok(InferredAdmission::Proposal)
+        Ok(inference_verdict(&policy, actor, verified_human, is_bot))
     }
     /// Checks `ticket` for a mesh `worker_run` the way [`Triage::dispatch`]
     /// checks it for a local Run: owned by `hub`, a valid mandate, the same
