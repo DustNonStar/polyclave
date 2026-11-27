@@ -263,7 +263,8 @@ pub struct RemoteDispatchRequest {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
-    /// Idempotency key for `worker_run`: repeating it returns the original Run.
+    /// Idempotency key for `worker_run`, required by the receiver (400 when
+    /// missing or blank): repeating it returns the original Run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// Run to look up for `run_status`.

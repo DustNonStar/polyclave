@@ -2083,3 +2083,99 @@ async fn mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote(
     remote.close().await;
     primary.close().await;
 }
+
+#[tokio::test]
+async fn mesh_worker_run_requires_request_id_and_admits_one_run_per_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = mesh_worker_hub(dir.path()).await;
+    remote.set_mesh_key(b"0123456789abcdef0123456789abcdef".to_vec());
+    let repo = mesh_git_repo(&dir.path().join("repo"));
+    remote
+        .store
+        .upsert_mesh_node(mesh_node("node-win", "http://127.0.0.1:1".into(), &[&repo]))
+        .unwrap();
+    let token = remote
+        .mesh_policy()
+        .issue(polyclave_mesh::MeshScope {
+            node_id: "node-win".into(),
+            allowed_repos: vec![repo.clone()],
+            allowed_actions: vec!["worker_run".into()],
+            expires_at_epoch: polyclave_mesh::current_epoch_secs() + 120,
+        })
+        .unwrap();
+    let request = |request_id: Option<&str>| {
+        let mut req = polyclave_mesh::RemoteDispatchRequest::new(
+            &repo,
+            "worker_run",
+            "Add a CHANGELOG entry.",
+            token.clone(),
+        );
+        req.request_id = request_id.map(str::to_owned);
+        json!(req)
+    };
+
+    // A missing or blank request_id is refused before anything is admitted.
+    let (code, _) = post_mesh_dispatch(&remote, request(None)).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = post_mesh_dispatch(&remote, request(Some("   "))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(remote.runs.list().unwrap().is_empty());
+
+    // The same request_id sent twice, as a retry after a lost reply would be,
+    // yields one Run.
+    let (code, first) = post_mesh_dispatch(&remote, request(Some("req-retry-1"))).await;
+    assert_eq!(code, StatusCode::OK, "{first}");
+    let (code, second) = post_mesh_dispatch(&remote, request(Some("req-retry-1"))).await;
+    assert_eq!(code, StatusCode::OK, "{second}");
+    assert_eq!(first["run_id"], second["run_id"]);
+    let runs = remote.runs.list().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].request_id, "req-retry-1");
+
+    remote.close().await;
+}
+
+#[tokio::test]
+async fn dispatch_remote_worker_run_without_request_id_is_refused_before_sending() {
+    let (_dir, primary, _rx) = test_hub().await;
+    primary.set_mesh_key(b"0123456789abcdef0123456789abcdef".to_vec());
+    // Accept connections but record whether anything was sent.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    let app = axum::Router::new().fallback(move || {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            StatusCode::OK
+        }
+    });
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let repo = "/repo/mesh-primary";
+    primary
+        .store
+        .upsert_mesh_node(mesh_node("node-win", format!("http://{addr}"), &[repo]))
+        .unwrap();
+    let scope = ToolScope::new(1, "hub", "hub", repo);
+    for request_id in [None, Some(""), Some("  ")] {
+        let mut args = json!({
+            "node_id": "node-win",
+            "action": "worker_run",
+            "instructions": "Add a CHANGELOG entry."
+        });
+        if let Some(id) = request_id {
+            args["request_id"] = json!(id);
+        }
+        assert!(primary
+            .call_tool(&scope, "dispatch_remote", args)
+            .await
+            .is_err());
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    srv.abort();
+    primary.close().await;
+}

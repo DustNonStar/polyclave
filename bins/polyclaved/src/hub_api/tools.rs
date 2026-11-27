@@ -189,6 +189,17 @@ impl Hub {
                 }
                 let input: DispatchRemoteArgs =
                     serde_json::from_value(args).map_err(|_| Error::Policy)?;
+                // worker_run is idempotent only through request_id, so it must come from
+                // the Hub's own request (as for dispatch_task), never be made up here: a
+                // resend of the same call then reaches the Run already admitted remotely.
+                if input.action == "worker_run"
+                    && input
+                        .request_id
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty())
+                {
+                    return Err(Error::Policy);
+                }
                 let hub = self.clone();
                 let caller_repo = caller.repo.clone();
                 let action = input.action.clone();
@@ -560,7 +571,7 @@ pub(super) fn tool_list(hub: bool) -> Vec<Value> {
             ),
             tool(
                 "dispatch_remote",
-                "Dispatch an allowlisted action to an online federated mesh node using an attenuated capability token. Use action worker_run (with instructions and an optional request_id for idempotency, vendor, model, base_branch) to start a Worker Run on that node, and run_status (with run_id) to read its result.",
+                "Dispatch an allowlisted action to an online federated mesh node using an attenuated capability token. Use action worker_run (with instructions, a required request_id that you reuse unchanged when retrying the same dispatch, and optional vendor, model, base_branch) to start a Worker Run on that node, and run_status (with run_id) to read its result.",
                 json!({
                     "node_id": string,
                     "action": string,

@@ -1189,6 +1189,12 @@ async fn mesh_worker_run(
     if hub.is_closed() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    // The sender's request_id is the only idempotency key: a retried dispatch
+    // must map to the Run it already admitted, so a missing one is refused
+    // rather than replaced by a fresh random id that would admit a second Run.
+    let Some(request_id) = req.request_id.clone().filter(|id| !id.trim().is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let Ok(vendor) = serde_json::from_value::<Vendor>(json!(req.vendor_or_default())) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -1198,11 +1204,6 @@ async fn mesh_worker_run(
     let Some(repo_text) = repo.to_str().map(str::to_owned) else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    let request_id = req
-        .request_id
-        .clone()
-        .filter(|id| !id.trim().is_empty())
-        .unwrap_or_else(|| format!("mesh-{}", uuid::Uuid::new_v4().simple()));
     let model = req.model.clone().filter(|m| !m.trim().is_empty());
     let base_branch = req.base_branch_or_default().to_owned();
     let admitted = run_blocking(move || {
