@@ -118,7 +118,12 @@ impl Store {
                  END;",
             )?;
             migration.pragma_update(None, "user_version", 9)?;
-        } else if version != 9 {
+        }
+        if version <= 9 {
+            // Origin snapshot for the PR gate publish step: additive.
+            migration.execute_batch(crate::publish::SCHEMA)?;
+            migration.pragma_update(None, "user_version", 10)?;
+        } else if version != 10 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;

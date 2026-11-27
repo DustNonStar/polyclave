@@ -1,7 +1,9 @@
 //! SQLite is owned by this crate; mutation jobs are serialized on one writer.
 mod hub;
 mod memory;
+mod publish;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
+pub use publish::{insert_run_origin_snapshot, OriginSnapshot};
 mod stage2;
 pub mod stage3;
 pub mod stage4;

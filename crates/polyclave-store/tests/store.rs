@@ -4,7 +4,7 @@ use polyclave_proto::{
 };
 use polyclave_store::{
     reserve_ticket, CandidateMemory, Changes, Error, MemoryFilter, NewCouncil, NewPrGate,
-    NewPrReview, NewProposal, ScmCursor, Store,
+    NewPrReview, NewProposal, OriginSnapshot, ScmCursor, Store,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -866,4 +866,51 @@ fn memory_auto_embeds_and_fuses_fts_with_semantic_search() {
         })
         .unwrap();
     assert!(miss.is_empty());
+}
+
+#[test]
+fn run_origin_snapshot_migrates_from_v9_keeps_the_first_snapshot_and_survives_reopen() {
+    let (dir, store) = fixture();
+    let path = dir.path().join("state.sqlite");
+    drop(store);
+    // Turn the database back into a version-9 ledger, as an existing install has.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("DROP TABLE run_publish_origins; PRAGMA user_version=9;")
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?))
+            .unwrap(),
+        10
+    );
+    // A Run admitted before snapshots existed has none.
+    assert_eq!(store.run_origin_snapshot("run").unwrap(), None);
+
+    let first = OriginSnapshot {
+        urls: vec!["https://github.com/org/repo.git".into()],
+        push_urls: vec![],
+    };
+    store
+        .record_run_origin_snapshot("run", first.clone())
+        .unwrap();
+    // A later change of origin never replaces the admission snapshot.
+    store
+        .record_run_origin_snapshot(
+            "run",
+            OriginSnapshot {
+                urls: vec!["https://github.com/evil/repo.git".into()],
+                push_urls: vec![],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.run_origin_snapshot("run").unwrap(),
+        Some(first.clone())
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.run_origin_snapshot("run").unwrap(), Some(first));
 }

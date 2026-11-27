@@ -7,7 +7,8 @@ use polyclave_adapters::mcp::{AttemptScope, HostTools};
 use polyclave_os::canonical_real_path;
 use polyclave_proto::{AttemptDto, ChangeTopic, RunDto, RunStatus, TurnMode, Vendor, WriterCheck};
 use polyclave_store::{
-    decode_enum, enum_value, new_id, now, parse_json, reserve_ticket, Error, Store,
+    decode_enum, enum_value, insert_run_origin_snapshot, new_id, now, parse_json, reserve_ticket,
+    Error, Store,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -137,6 +138,9 @@ impl RunManager {
             .git
             .admit(&repo, &id, &request.base_branch)
             .map_err(|_| Error::Invalid("cannot initialize immutable repository baseline"))?;
+        // Snapshot origin for the post-R1 publish step only; it never affects
+        // admission, dispatch or verification.
+        let origin = self.git.origin_snapshot(&repo);
         self.store.write(move |db|{
             let stamp=now(db)?;
             let ticket=if let Some(ticket)=request.ticket_id {
@@ -164,6 +168,7 @@ impl RunManager {
                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'pending',?13,?13)",
                 params![id,ticket,request.hub_session_id,worker,request.request_id,repo_text,vendor,
                         request.model,request.instructions,path_text(&run_git.mirror)?,request.base_branch,run_git.base,stamp])?;
+            insert_run_origin_snapshot(db,&id,&origin)?;
             change(db,ChangeTopic::Ticket,&ticket,&ticket_state(db,&ticket)?)?;
             change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
             Ok((load_run(db,&id)?,true))

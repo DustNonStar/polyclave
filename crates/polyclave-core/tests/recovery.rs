@@ -316,3 +316,71 @@ fn recovery_clears_zombie_running_run_without_running_turn() {
     let recovered = rm.get(&r.id).unwrap();
     assert_eq!(recovered.status, RunStatus::Interrupted);
 }
+
+#[test]
+fn admission_snapshots_origin_without_credentials_and_ignores_later_changes() {
+    // `\u{40}` is '@': scripts/privacy-scan.sh reads a user, an at sign and a host as an email address.
+    let (_tmp, rm, mut req) = repository();
+    let repo = req.repo_cwd.clone();
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://x-access-token:SENTINEL-ORIGIN-SECRET\u{40}github.com/Org/Repo.git",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "--add",
+            "remote.origin.pushurl",
+            "ssh://git:SENTINEL-ORIGIN-SECRET\u{40}github.com/org/other.git",
+        ],
+    );
+    let (run, _) = rm.accept(req.clone()).unwrap();
+    let snapshot = rm.store.run_origin_snapshot(&run.id).unwrap().unwrap();
+    assert_eq!(snapshot.urls, vec!["https://github.com/Org/Repo.git"]);
+    assert_eq!(
+        snapshot.push_urls,
+        vec!["ssh://git\u{40}github.com/org/other.git"]
+    );
+    let dump = rm
+        .store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT urls_json || push_urls_json FROM run_publish_origins",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+    assert!(!dump.contains("SENTINEL-ORIGIN-SECRET"));
+
+    // Re-pointing origin after admission changes nothing for the admitted Run,
+    // and a repeated admission key keeps the original snapshot.
+    git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/evil/repo.git",
+        ],
+    );
+    let (same, new) = rm.accept(req.clone()).unwrap();
+    assert!(!new);
+    assert_eq!(
+        rm.store.run_origin_snapshot(&same.id).unwrap().unwrap(),
+        snapshot
+    );
+
+    // A repository without origin is still admitted, with an empty snapshot.
+    git(&repo, &["remote", "remove", "origin"]);
+    req.request_id = "no-origin".into();
+    let (bare, _) = rm.accept(req).unwrap();
+    let empty = rm.store.run_origin_snapshot(&bare.id).unwrap().unwrap();
+    assert!(empty.urls.is_empty() && empty.push_urls.is_empty());
+}

@@ -132,6 +132,29 @@ impl MirrorManager {
             .join(format!("{}.git", &key[..16]))
     }
 
+    /// Reads the repository's `origin` once, for the PR gate's post-R1 publish
+    /// step only. Admission, the mirror and R1 never use it, and a missing or
+    /// unreadable origin never blocks admission: it yields an empty snapshot,
+    /// which the gate later refuses to publish from. Credentials embedded in a
+    /// URL are removed before the snapshot leaves this function.
+    pub fn origin_snapshot(&self, repo: &Path) -> polyclave_store::OriginSnapshot {
+        let read = |key: &str| -> Vec<String> {
+            match self.git(repo, ["config", "--local", "--get-all", key]) {
+                Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(strip_url_credentials)
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        polyclave_store::OriginSnapshot {
+            urls: read("remote.origin.url"),
+            push_urls: read("remote.origin.pushurl"),
+        }
+    }
+
     pub fn admit(&self, repo: &Path, id: &str, base_branch: &str) -> Result<RunGit> {
         validate_id(id)?;
         self.with_repo(repo, |repo| {
@@ -537,5 +560,63 @@ impl MirrorManager {
             }
             Ok((files, diff))
         })
+    }
+}
+
+/// Removes credentials from a remote URL: all userinfo of an `http(s)://` URL
+/// (a token may sit in the user name), and any `:password` part elsewhere.
+/// scp-like `user@host:path` addresses carry no password and stay as they are.
+pub fn strip_url_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return url.to_owned();
+    };
+    let lower = scheme.to_ascii_lowercase();
+    if lower == "http" || lower == "https" {
+        return format!("{scheme}://{host}{path}");
+    }
+    let user = userinfo.split(':').next().unwrap_or_default();
+    if user.is_empty() {
+        format!("{scheme}://{host}{path}")
+    } else {
+        format!("{scheme}://{user}@{host}{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_url_credentials;
+
+    #[test]
+    fn strips_credentials_from_remote_urls() {
+        for (raw, clean) in [
+            (
+                "https://tok@example.com/o/r.git",
+                "https://example.com/o/r.git",
+            ),
+            (
+                "HTTPS://u:p@example.com/o/r.git",
+                "HTTPS://example.com/o/r.git",
+            ),
+            ("https://example.com/o/r", "https://example.com/o/r"),
+            (
+                "ssh://git:pw@example.com/o/r.git",
+                "ssh://git@example.com/o/r.git",
+            ),
+            (
+                "ssh://git@example.com/o/r.git",
+                "ssh://git@example.com/o/r.git",
+            ),
+            ("git@example.com:o/r.git", "git@example.com:o/r.git"),
+            ("/local/path", "/local/path"),
+        ] {
+            assert_eq!(strip_url_credentials(raw), clean, "{raw}");
+        }
     }
 }
