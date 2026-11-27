@@ -1,13 +1,10 @@
-# Next job: page review 3
+# Next job: none assigned
 
-**Branch:** `main` (since 2026-11-26 all work goes to `main`; `feat/phase1` is retired). **Job title for the report:** `Page review 3`.
+There is no assigned local-implementer job right now. The last job here, the Node "page review 3", is retired: its files (`src/http.ts`, `public/app.js`) left the tree with `legacy-node/` in `01c8645`.
 
-Read `AGENTS.md` first: since 2026-11-26 the reviewer works only from GitHub, hand-check screenshots are committed to `handcheck/<job>/`, and you push `main` at the end after `scripts/privacy-scan.sh` passes.
+Since 2026-11-26, Dot writes code on `dot/<job>` branches and the merge reviewer merges them (see `AGENTS.md`). Wait for the reviewer to write a new job here.
 
-Do `docs/superpowers/plans/2026-11-26-page-review-3.md`, items 0 to 7 in order, one commit each with the message it gives.
+Open before new work:
 
-Item 1 is the only host change: `src/git-effect.ts`, `src/http.ts`, and the two new tests it names in `tests/http.spec.ts`. Item 0 is the one allowed change to an existing test (a wait in `tests/milestone.spec.ts`). No other file in `src/` or `tests/` changes, and no other existing test changes. Items 2 to 7 change only `public/index.html`, `public/app.js` and `DESIGN.md`.
-
-Then do the hand checks the work list names (fixtures under `/tmp/polyclave-hc/page-review-3/`, screenshots and `measurements.md` in `handcheck/page-review-3/`), append the report to `HANDOFF.md` in the format `AGENTS.md` gives, commit the report and `handcheck/page-review-3/` as `chore: page review 3`, run `scripts/privacy-scan.sh`, push `main`, and stop.
-
-If anything conflicts with a test or rule, stop: write it in `PLAN-ISSUES.md` (mark it `detail` or `direction`), commit, push, and stop.
+- The open `direction` items in `PLAN-ISSUES.md`. Today that is "Where a mesh `worker_run` Run is charged against a Ticket budget". Only the user decides these.
+- The pending real-environment acceptance at the end of `HANDOFF.md`: real vendor CLI Worker and CLI Hub probes, live DeepSeek API calls, the installed desktop WebView, a real GitHub push and PR, and a real phone pairing scan. The same list is the verification table in `README.md`.
