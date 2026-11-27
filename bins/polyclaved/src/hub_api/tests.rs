@@ -1404,3 +1404,75 @@ async fn stage4_cua_reclaim_evolution_skills_and_opt_in_community_routes() {
         .is_file());
     hub.close().await;
 }
+
+#[tokio::test]
+async fn notification_dispatcher_delivers_metadata_only_for_attention_changes() {
+    use axum::{routing::post, Json, Router};
+    use polyclave_hub::notify::{
+        dispatch_pending_notifications, HttpPrivateNotifier, NotificationMetadata,
+    };
+    use polyclave_proto::{ChangeTopic, NotificationChannelKind};
+    use std::sync::{Arc, Mutex};
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let seen = Arc::new(Mutex::new(Vec::<NotificationMetadata>::new()));
+    let seen_c = seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/poly",
+                post(move |Json(m): Json<NotificationMetadata>| {
+                    let s = seen_c.clone();
+                    async move {
+                        s.lock().unwrap().push(m);
+                        "ok"
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    store
+        .upsert_notification_channel(polyclave_store::stage3::NewNotificationChannel {
+            id: None,
+            kind: NotificationChannelKind::Ntfy,
+            label: "Local ntfy".into(),
+            endpoint: format!("http://{addr}"),
+            topic: "poly".into(),
+            enabled: true,
+        })
+        .unwrap();
+
+    store
+        .write(|db| {
+            Store::append_change(
+                db,
+                ChangeTopic::Council,
+                "c123",
+                &json!({"status": "awaiting_user", "prompt": "sensitive code"}),
+            )
+        })
+        .unwrap();
+
+    let notifier = HttpPrivateNotifier::new().unwrap();
+    let (_cursor, delivered) = dispatch_pending_notifications(&store, &notifier, 0)
+        .await
+        .unwrap();
+    assert_eq!(delivered, 1);
+    {
+        let captured = seen.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].topic, "council");
+        assert_eq!(captured[0].entity_id, "c123");
+        assert_eq!(captured[0].title, "Council awaiting decision");
+    }
+
+    srv.abort();
+    hub.close().await;
+}

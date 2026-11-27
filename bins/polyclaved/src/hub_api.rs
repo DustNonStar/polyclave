@@ -121,6 +121,7 @@ struct Lifecycle {
     drained: Notify,
     server: tokio::sync::Mutex<Option<JoinHandle<std::io::Result<()>>>>,
     observer: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    notifier: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 struct HostReviewerExecutor;
@@ -343,6 +344,55 @@ impl Hub {
         self.start_scm_observer(Arc::new(client), hub_session, Duration::from_secs(30))
             .await;
     }
+    pub async fn start_notification_dispatcher(&self) {
+        let mut slot = self.lifecycle.notifier.lock().await;
+        if let Some((prev_tx, prev_handle)) = slot.take() {
+            let _ = prev_tx.send(true);
+            let _ = prev_handle.await;
+        }
+        if self.is_closed() {
+            return;
+        }
+        let Ok(notifier) = polyclave_hub::notify::HttpPrivateNotifier::new() else {
+            return;
+        };
+        let mut cursor: i64 = self
+            .store
+            .read(|db| {
+                db.query_row("SELECT COALESCE(MAX(seq), 0) FROM change_log", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Into::into)
+            })
+            .unwrap_or(0);
+        let store = self.store.clone();
+        let (tx, mut rx) = watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        if let Ok((next_seq, _)) = polyclave_hub::notify::dispatch_pending_notifications(
+                            &store,
+                            &notifier,
+                            cursor,
+                        )
+                        .await
+                        {
+                            cursor = next_seq;
+                        }
+                    }
+                }
+            }
+        });
+        *slot = Some((tx, handle));
+    }
     pub(crate) fn pr_gate_deps(&self) -> HubResult<PrGateDeps> {
         let scm = self.scm().ok_or(Error::Credential)?;
         let reviewer = self.stage2.reviewer.lock().unwrap().clone();
@@ -562,6 +612,10 @@ impl Hub {
     pub async fn close(&self) {
         self.lifecycle.shutdown.cancel();
         if let Some((tx, handle)) = self.lifecycle.observer.lock().await.take() {
+            let _ = tx.send(true);
+            let _ = handle.await;
+        }
+        if let Some((tx, handle)) = self.lifecycle.notifier.lock().await.take() {
             let _ = tx.send(true);
             let _ = handle.await;
         }
