@@ -905,3 +905,21 @@ Branch `claude/mesh-budget-ac-238293` (`312398d..27c6fcf`) was fast-forwarded in
 - A (`b7b5534`): remote `worker_run` requires the calling Hub session's active, same-repository Ticket. Each dispatch is charged exactly once, keyed by Hub session and `request_id`, and the charge is never refunded. Exhaustion moves the Ticket to `blocked_on_user`.
 - The merge reviewer approved one existing-test edit: adding a Ticket and `ticket_id` to `mesh_worker_run_and_run_status_work_end_to_end_through_dispatch_remote`. No assertion changed.
 - Local macOS after the fast-forward: fmt and Clippy clean, 149 passed, 0 failed, the `proto.ts` check clean, privacy scan clean. Not verified: a real second machine and Windows CI.
+
+## dsh --model fix review: passed, merged
+
+Branch `claude/dsh-model-fix-84011a` (`2aec8e4`) was fast-forwarded into `main`.
+- The real `dsh --profile headless --help` (read-only, on this machine) lists only `--json`, `--session-id`, `--permission-mode`, `--approval-policy`, `--add-dir` and `-h/--help`. It has no model flag.
+- The Worker adapter and the CLI Hub transport no longer pass `--model`. A `dsh` Worker with a model set is refused with `Error::DshModelUnsupported`. A `dsh` Hub turn with a non-default model is refused with `Error::Profile`. Tests now check arguments against a strict fake that accepts only the real options.
+- The merge reviewer approved two existing-test edits: `agy_and_dsh_args_match_expected_flags` and the `cli_provider.rs` args test. Both asserted that `--model` was passed, which was the bug itself.
+- Local macOS: fmt and Clippy clean, 150 passed, 0 failed; privacy scan clean.
+- Still open (`PLAN-ISSUES.md` detail entry): how to choose a `dsh` model (a `--patch` file inside the isolated `DSH_HOME` needs one real run), and the fact that `mcp_url` is never passed to `dsh` (LESSONS item 9).
+
+## Dot branch `dot/claude-code-probe`: rejected
+
+Commits `4dc6d59` and `2e6d3a9` were reviewed read-only and not merged.
+- `tests/claude-probe.spec.ts` imports Node `src/` modules that `01c8645` deleted. `main` has no `package.json`, so no CI job runs the test.
+- Its fake (`tests/fixtures/fake-claude-probe.mjs`) parses the probe's own prompt to produce the expected frames, so the pass proves only that the harness agrees with its fake (LESSONS item 5). The report says no live Claude Code was run.
+- It is superseded by the Rust adapter `crates/polyclave-adapters/src/claude.rs` and the real Task 10 probe (`POLYCLAVE_REAL_CLAUDE=1`). `HANDOFF.md` conflicts on merge.
+- Flag check against the real `claude --help` (2.1.332): every flag the probe uses exists except `--max-turns`, which is not listed. A possible `--bare` / `--tools ""` hardening of `claude.rs` may be considered later, checked against real help output.
+- Action for Dot: delete the branch.
