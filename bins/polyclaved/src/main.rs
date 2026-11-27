@@ -68,14 +68,17 @@ async fn serve() -> io::Result<()> {
             mcp_url: format!("http://{endpoint}/mcp"),
             codex: resolve_cli_binary(Path::new("codex"))
                 .unwrap_or_else(|_| PathBuf::from("codex")),
-            claude: PathBuf::from("claude"),
-            claude_isolation: None,
+            claude: resolve_cli_binary(Path::new("claude"))
+                .unwrap_or_else(|_| PathBuf::from("claude")),
+            claude_isolation: polyclave_adapters::default_claude_isolation(&state),
         },
         move |run, ev| {
             let _ = stream_writer.send((run.to_owned(), ev.into()));
         },
     )
-    .map_err(io::Error::other)?;
+    .map_err(io::Error::other)?
+    .with_agy(resolve_cli_binary(Path::new("agy")).unwrap_or_else(|_| PathBuf::from("agy")))
+    .with_dsh(resolve_cli_binary(Path::new("dsh")).unwrap_or_else(|_| PathBuf::from("dsh")));
     runner.recover().map_err(io::Error::other)?;
     store.hub_recover_inputs().map_err(io::Error::other)?;
     store.builtin_profiles().map_err(io::Error::other)?;
