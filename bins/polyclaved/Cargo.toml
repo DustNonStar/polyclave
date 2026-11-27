@@ -3,3 +3,23 @@ name = "polyclaved"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+async-stream = "0.3"
+axum = "0.8"
+dirs = "6"
+polyclave-adapters = { path = "../../crates/polyclave-adapters" }
+polyclave-core = { path = "../../crates/polyclave-core" }
+polyclave-os = { path = "../../crates/polyclave-os" }
+polyclave-proto = { path = "../../crates/polyclave-proto" }
+polyclave-store = { path = "../../crates/polyclave-store" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

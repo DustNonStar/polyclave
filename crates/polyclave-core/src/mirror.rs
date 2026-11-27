@@ -415,7 +415,7 @@ impl MirrorManager {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CommitSummary {
     pub files: String,
     pub commits: String,

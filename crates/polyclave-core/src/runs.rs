@@ -96,7 +96,23 @@ impl RunManager {
                 .optional()?)
         })?;
         if let Some(id) = existing {
-            return Ok((self.get(&id)?, false));
+            let saved = self.get(&id)?;
+            let same_repo = Path::new(&saved.repo_cwd) == request.repo_cwd
+                || canonical_real_path(&request.repo_cwd)
+                    .is_ok_and(|path| path == Path::new(&saved.repo_cwd));
+            if !same_repo
+                || saved.vendor != request.vendor
+                || saved.model != request.model
+                || saved.instructions != request.instructions
+                || saved.base_branch != request.base_branch
+                || request
+                    .ticket_id
+                    .as_ref()
+                    .is_some_and(|ticket| ticket != &saved.ticket_id)
+            {
+                return Err(Error::ConflictError);
+            }
+            return Ok((saved, false));
         }
         let repo = canonical_real_path(&request.repo_cwd)
             .map_err(|_| Error::Invalid("repository is unavailable"))?;
@@ -254,6 +270,16 @@ impl RunManager {
         })
     }
 
+    pub fn commit_for_run(&self, run: &RunDto) -> Result<Option<crate::mirror::CommitSummary>> {
+        let Some(sha) = run.result_sha.as_ref().or(run.observed_sha.as_ref()) else {
+            return Ok(None);
+        };
+        self.git
+            .commit_summary(&self.attempt_git(run, run.current_attempt)?, sha)
+            .map(Some)
+            .map_err(|_| Error::Invalid("mirror is unavailable for the selected commit"))
+    }
+
     pub(crate) fn attempt_git(&self, run: &RunDto, number: u32) -> Result<AttemptGit> {
         let mirror = self.store.read(|db| {
             Ok(db.query_row(
@@ -274,6 +300,15 @@ impl RunManager {
     }
 
     pub fn resolve(&self, id: &str, decision: Resolution, note: &str) -> Result<RunDto> {
+        self.resolve_seen(id, decision, note, None)
+    }
+    pub fn resolve_seen(
+        &self,
+        id: &str,
+        decision: Resolution,
+        note: &str,
+        seen_sha: Option<&str>,
+    ) -> Result<RunDto> {
         if note.len() > 4096 || note.trim().is_empty() {
             return Err(Error::Invalid("resolution requires a note"));
         }
@@ -285,7 +320,7 @@ impl RunManager {
         let a = self.attempt_git(&run, run.current_attempt)?;
         let tip = match decision {
             Resolution::Accept => match self.git.reconcile(&a) {
-                BranchCheck::Present { tip, .. } => Some(tip),
+                BranchCheck::Present { tip, .. } if seen_sha == Some(tip.as_str()) => Some(tip),
                 _ => return Err(Error::ConflictError),
             },
             _ => None,

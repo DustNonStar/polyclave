@@ -1,0 +1,404 @@
+use crate::auth::{self, LocalAuth};
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    middleware,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    routing::{get, post},
+    Json, Router,
+};
+use polyclave_core::{
+    runner::TurnRunner,
+    runs::{Resolution, RunManager, RunRequest},
+};
+use polyclave_proto::{AgentEvent, ApiError, RunStatus, TurnMode};
+use polyclave_store::{new_id, now, Changes, Error, Store};
+use rusqlite::params;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{convert::Infallible, path::PathBuf, time::Duration};
+use tokio::sync::broadcast;
+
+#[derive(Clone)]
+pub struct App {
+    pub store: Store,
+    pub runs: RunManager,
+    pub runner: TurnRunner,
+    pub stream: broadcast::Sender<(String, AgentEvent)>,
+}
+
+pub fn router(app: App, auth: LocalAuth) -> Router {
+    let api = Router::new()
+        .route("/sessions", get(sessions).post(register))
+        .route("/runs", get(runs).post(accept))
+        .route("/runs/{id}", get(run))
+        .route("/runs/{id}/worker-chat", post(chat))
+        .route("/runs/{id}/cancel", post(cancel))
+        .route("/runs/{id}/retry", post(retry))
+        .route("/runs/{id}/resolve", post(resolve))
+        .route("/events", get(events))
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(auth, auth::require))
+        .with_state(app);
+    Router::new()
+        .nest("/api", api)
+        .route("/", get(|| async { "Polyclave local daemon" }))
+}
+
+type Reply = std::result::Result<Json<Value>, HttpError>;
+struct HttpError(StatusCode, &'static str, &'static str);
+impl IntoResponse for HttpError {
+    fn into_response(self) -> Response {
+        (
+            self.0,
+            Json(ApiError {
+                code: self.1.into(),
+                message: self.2.into(),
+            }),
+        )
+            .into_response()
+    }
+}
+impl From<Error> for HttpError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::NotFound => Self(StatusCode::NOT_FOUND, "not_found", "Not found"),
+            Error::BusyError => Self(StatusCode::CONFLICT, "busy", "The run is busy"),
+            Error::BudgetExceededError => Self(
+                StatusCode::CONFLICT,
+                "budget_exceeded",
+                "Run or Attempt budget exhausted",
+            ),
+            Error::ConflictError => Self(
+                StatusCode::CONFLICT,
+                "conflict",
+                "Not permitted in the current state",
+            ),
+            Error::Invalid(detail) => Self(StatusCode::BAD_REQUEST, "invalid_request", detail),
+            _ => Self(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "Host operation failed",
+            ),
+        }
+    }
+}
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Result<T, HttpError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| {
+            HttpError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "Host operation failed",
+            )
+        })?
+        .map_err(Into::into)
+}
+async fn runs(State(app): State<App>) -> Reply {
+    Ok(Json(json!(blocking(move || app.runs.list()).await?)))
+}
+async fn run(State(app): State<App>, Path(id): Path<String>) -> Reply {
+    Ok(Json(
+        blocking(move || {
+            let run = app.runs.get(&id)?;
+            let commit = app.runs.commit_for_run(&run)?;
+            Ok(json!({"run":run,"commit":commit}))
+        })
+        .await?,
+    ))
+}
+async fn accept(State(app): State<App>, Json(req): Json<RunRequest>) -> Reply {
+    Ok(Json(json!(
+        blocking(move || {
+            let (run, new) = app.runs.accept(req)?;
+            if new {
+                app.runner
+                    .schedule(&run.id, TurnMode::Start, run.instructions.clone())?;
+            }
+            Ok(run)
+        })
+        .await?
+    )))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Chat {
+    text: String,
+}
+async fn chat(State(app): State<App>, Path(id): Path<String>, Json(c): Json<Chat>) -> Reply {
+    if c.text.trim().is_empty() || c.text.len() > 1024 * 1024 {
+        return Err(Error::Invalid("missing or oversized message").into());
+    }
+    blocking(move || {
+        let run = app.runs.get(&id)?;
+        if matches!(run.status, RunStatus::Done | RunStatus::Failed) {
+            return Err(Error::ConflictError);
+        }
+        app.runner.schedule(&id, TurnMode::WorkerChat, c.text)?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({"accepted":true})))
+}
+async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Reply {
+    blocking(move || app.runner.cancel(&id)).await?;
+    Ok(Json(json!({"accepted":true})))
+}
+async fn retry(State(app): State<App>, Path(id): Path<String>) -> Reply {
+    blocking(move || {
+        let run = app.runs.get(&id)?;
+        app.runner
+            .schedule(&id, TurnMode::Retry, run.instructions)?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({"accepted":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Resolve {
+    decision: Resolution,
+    note: String,
+    seen_sha: Option<String>,
+}
+async fn resolve(State(app): State<App>, Path(id): Path<String>, Json(r): Json<Resolve>) -> Reply {
+    Ok(Json(json!(
+        blocking(move || app
+            .runs
+            .resolve_seen(&id, r.decision, &r.note, r.seen_sha.as_deref()))
+        .await?
+    )))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Register {
+    name: String,
+    repo_cwd: PathBuf,
+}
+async fn register(State(app): State<App>, Json(input): Json<Register>) -> Reply {
+    if input.name.trim().is_empty() || input.name.len() > 256 {
+        return Err(Error::Invalid("invalid session name").into());
+    }
+    Ok(Json(blocking(move||{
+        let repo=polyclave_os::canonical_real_path(&input.repo_cwd).map_err(|_|Error::Invalid("invalid repository path"))?;
+        let repo=repo.to_str().ok_or(Error::Invalid("repository path is not valid Unicode"))?.to_owned();
+        app.store.write(move|db|{
+            let stamp=now(db)?;
+            db.execute("INSERT OR IGNORE INTO provider_profiles(id,display_name,kind,models_json,created_at)
+                VALUES('builtin-hub','Local hub','codex_cli','[]',?1)",[&stamp])?;
+            let id=new_id('s');
+            db.execute("INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                VALUES(?1,?2,'hub',?3,'builtin-hub','default',?4)",params![id,input.name,repo,stamp])?;
+            Ok(json!({"id":id,"name":input.name,"role":"hub","repo_cwd":repo,"profile_id":"builtin-hub","provider_model":"default",
+                "vendor":null,"rolling_summary":"","agent_thread_id":null,"created_at":stamp}))
+        })
+    }).await?))
+}
+async fn sessions(State(app): State<App>) -> Reply {
+    Ok(Json(json!(blocking(move||app.store.read(|db|{
+        let mut q=db.prepare("SELECT id,name,role,repo_cwd,profile_id,provider_model,vendor,rolling_summary,agent_thread_id,created_at FROM sessions ORDER BY id")?;
+        let list=q.query_map([],|r|Ok(json!({
+            "id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"role":r.get::<_,String>(2)?,
+            "repo_cwd":r.get::<_,String>(3)?,"profile_id":r.get::<_,String>(4)?,"provider_model":r.get::<_,String>(5)?,
+            "vendor":r.get::<_,Option<String>>(6)?,"rolling_summary":r.get::<_,String>(7)?,
+            "agent_thread_id":r.get::<_,Option<String>>(8)?,"created_at":r.get::<_,String>(9)?
+        })))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(list)
+    })).await?)))
+}
+
+async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response, HttpError> {
+    let mut cursor =
+        match headers.get("last-event-id") {
+            None => None,
+            Some(v) => Some(v.to_str().ok().and_then(|v| v.parse::<i64>().ok()).ok_or(
+                HttpError(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_cursor",
+                    "Last-Event-ID must be an integer",
+                ),
+            )?),
+        };
+    let mut streaming = app.stream.subscribe();
+    let changes = app.store.clone();
+    let stream = async_stream::stream! {
+        let mut ticks=tokio::time::interval(Duration::from_millis(200));
+        let mut transient_open=true;
+        loop {
+            tokio::select! {
+                _=ticks.tick()=>{
+                    let changes=changes.clone();
+                    match tokio::task::spawn_blocking(move||changes.changes(cursor)).await{
+                        Ok(Ok(Changes::Events(events)))=>for item in events {
+                            cursor=Some(item.seq);
+                            let ev=Event::default().event("change").id(item.seq.to_string()).json_data(item);
+                            if let Ok(ev)=ev {yield Ok::<Event,Infallible>(ev);}
+                        },
+                        _=>{
+                            yield Ok(Event::default().event("resync_required").data("{}"));
+                            break;
+                        }
+                    }
+                },
+                event=streaming.recv(), if transient_open=>match event{
+                    Ok((run,message))=>{
+                        if let Ok(ev)=Event::default().event("agent").json_data(json!({"run_id":run,"message":message})) {
+                            yield Ok(ev);
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(_))=>(),
+                    Err(broadcast::error::RecvError::Closed)=>transient_open=false,
+                }
+            }
+        }
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use polyclave_core::{mirror::MirrorManager, runner::RunnerConfig};
+    use polyclave_proto::ChangeTopic;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn fixture() -> (tempfile::TempDir, Store, Router) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        let runs = RunManager::new(
+            store.clone(),
+            Arc::new(MirrorManager::new(dir.path()).unwrap()),
+        );
+        let runner = TurnRunner::new(
+            runs.clone(),
+            dir.path(),
+            "fixture".into(),
+            RunnerConfig {
+                supervisor: "offline".into(),
+                mcp_url: "http://127.0.0.1:1/mcp".into(),
+                codex: "offline".into(),
+                claude: "offline".into(),
+                claude_isolation: None,
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        let (stream, _) = broadcast::channel(8);
+        let app = router(
+            App {
+                store: store.clone(),
+                runs,
+                runner,
+                stream,
+            },
+            LocalAuth::new("test-only".into(), 4310),
+        );
+        (dir, store, app)
+    }
+
+    #[tokio::test]
+    async fn origin_host_and_bearer_are_independent_requirements() {
+        let (_dir, _store, app) = fixture();
+        for (host, origin, bearer, expected) in [
+            ("127.0.0.1:4310", None, None, StatusCode::UNAUTHORIZED),
+            (
+                "127.0.0.1:4310",
+                Some("https://wrong.example.invalid"),
+                Some("Bearer test-only"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "wrong.example.invalid",
+                None,
+                Some("Bearer test-only"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "127.0.0.1:4310",
+                None,
+                Some("Bearer wrong"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "127.0.0.1:4310",
+                Some("tauri://localhost"),
+                Some("Bearer test-only"),
+                StatusCode::OK,
+            ),
+        ] {
+            let mut request = Request::get("/api/sessions").header("host", host);
+            if let Some(o) = origin {
+                request = request.header("origin", o);
+            }
+            if let Some(b) = bearer {
+                request = request.header("authorization", b);
+            }
+            assert_eq!(
+                app.clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+        let query = Request::get("/api/events?token=test-only")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(query).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    async fn event(app: Router, cursor: &str) -> String {
+        let response = app
+            .oneshot(
+                Request::get("/api/events")
+                    .header("host", "127.0.0.1:4310")
+                    .header("authorization", "Bearer test-only")
+                    .header("last-event-id", cursor)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+    }
+    #[tokio::test]
+    async fn sse_resumes_after_cursor_and_requests_resync_for_ahead_cursor() {
+        let (_dir, store, app) = fixture();
+        store
+            .write(|db| {
+                Store::append_change(db, ChangeTopic::Run, "first", &json!({"status":"running"}))?;
+                Store::append_change(db, ChangeTopic::Run, "second", &json!({"status":"done"}))?;
+                Ok(())
+            })
+            .unwrap();
+        let replay = event(app.clone(), "1").await;
+        assert!(replay.contains("event: change"));
+        assert!(replay.contains("id: 2"));
+        assert!(replay.contains("second"));
+        assert!(!replay.contains("first"));
+        assert!(event(app, "3").await.contains("event: resync_required"));
+    }
+}
