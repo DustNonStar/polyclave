@@ -1278,3 +1278,129 @@ async fn stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notificat
     ntfy_srv.abort();
     hub.close().await;
 }
+
+#[tokio::test]
+async fn stage4_cua_reclaim_evolution_skills_and_opt_in_community_routes() {
+    use axum::body::to_bytes;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store)),
+    );
+
+    let post_json = |uri: &str, body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1:4310")
+            .header(header::AUTHORIZATION, "Bearer cap-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // CUA acquire + busy + 1-click reclaim.
+    assert_eq!(
+        app.clone()
+            .oneshot(post_json(
+                "/api/cua/acquire",
+                json!({"holder_run_id":"r1","target_window":"Polyclave","observed_idle_secs":45})
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(post_json(
+                "/api/cua/acquire",
+                json!({"holder_run_id":"r2","target_window":"Polyclave","observed_idle_secs":45})
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(post_json("/api/cua/reclaim", json!({})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Community draft refused when opt_in=false, succeeds when opt_in=true.
+    let get_draft = Request::builder()
+        .method("GET")
+        .uri("/api/community/draft")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(get_draft).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(post_json("/api/community/opt-in", json!({"opt_in": true})))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let get_draft_ok = Request::builder()
+        .method("GET")
+        .uri("/api/community/draft")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, "Bearer cap-token")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(get_draft_ok).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // Distill + Teach-Once skill sync.
+    let dist_resp = app
+        .clone()
+        .oneshot(post_json("/api/evolution/distill", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(dist_resp.status(), StatusCode::OK);
+    let skill_resp = app
+        .clone()
+        .oneshot(post_json(
+            "/api/skills",
+            json!({
+                "name":"smoke-check",
+                "description":"Run workspace check",
+                "body_md":"# Smoke\ncargo test",
+                "synced_vendors":["codex","dsh"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(skill_resp.status(), StatusCode::OK);
+    let skill_val: Value =
+        serde_json::from_slice(&to_bytes(skill_resp.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(skill_val["version"], 1);
+    assert!(hub
+        .state
+        .join("isolated-homes/codex/skills/smoke-check/SKILL.md")
+        .is_file());
+    hub.close().await;
+}

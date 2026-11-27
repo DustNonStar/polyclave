@@ -2,15 +2,20 @@ use super::*;
 use crate::routes::{HttpError, Reply};
 use polyclave_hub::{
     council::{start_council as run_start_council, StartCouncilRequest},
+    evolution::{
+        build_redacted_community_draft, distill_local_suggestions, sync_skill_to_isolated_homes,
+    },
     notify::{
         validate_private_endpoint, HttpPrivateNotifier, NotificationMetadata, PrivateNotifier,
     },
     pr_gate::{resume_all as pr_gate_resume_all, run_pr_gate as execute_pr_gate, ReviewerSpec},
 };
 use polyclave_proto::{
-    ClientKind, CouncilLevel, MeshNodeStatus, NotificationChannelKind, PlanningPreference,
+    ClientKind, CouncilLevel, EvolutionStatus, MeshNodeStatus, NotificationChannelKind,
+    PlanningPreference, Vendor,
 };
 use polyclave_store::stage3::{NewMeshNode, NewNotificationChannel};
+use polyclave_store::stage4::NewLocalSkill;
 
 pub(super) async fn mcp(
     State(hub): State<Hub>,
@@ -115,6 +120,27 @@ pub fn router(hub: Hub) -> Router {
             axum::routing::delete(delete_notification_channel),
         )
         .route("/notifications/test", post(test_notifications))
+        .route("/cua", axum::routing::get(cua_state))
+        .route("/cua/acquire", post(cua_acquire))
+        .route("/cua/release", post(cua_release))
+        .route("/cua/reclaim", post(cua_reclaim))
+        .route(
+            "/evolution/suggestions",
+            axum::routing::get(evolution_suggestions),
+        )
+        .route("/evolution/distill", post(evolution_distill))
+        .route("/evolution/suggestions/{id}/apply", post(evolution_apply))
+        .route(
+            "/evolution/suggestions/{id}/rollback",
+            post(evolution_rollback),
+        )
+        .route(
+            "/skills",
+            axum::routing::get(local_skills).post(save_local_skill),
+        )
+        .route("/skills/{id}/rollback", post(rollback_local_skill))
+        .route("/community/draft", axum::routing::get(community_draft))
+        .route("/community/opt-in", post(community_opt_in))
         .with_state(hub)
 }
 
@@ -824,4 +850,159 @@ async fn test_notifications(State(hub): State<Hub>) -> Reply {
         delivered += 1;
     }
     Ok(Json(json!({ "delivered": delivered })))
+}
+
+async fn cua_state(State(hub): State<Hub>) -> Reply {
+    let state = run_blocking(move || hub.store.cua_state().map_err(HttpError::from)).await?;
+    Ok(Json(json!(state)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CuaAcquireBody {
+    holder_run_id: String,
+    target_window: String,
+    observed_idle_secs: u32,
+}
+
+async fn cua_acquire(State(hub): State<Hub>, Json(body): Json<CuaAcquireBody>) -> Reply {
+    let state = run_blocking(move || {
+        hub.store
+            .cua_acquire(
+                body.holder_run_id,
+                body.target_window,
+                body.observed_idle_secs,
+            )
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(state)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CuaReleaseBody {
+    holder_run_id: String,
+}
+
+async fn cua_release(State(hub): State<Hub>, Json(body): Json<CuaReleaseBody>) -> Reply {
+    let state = run_blocking(move || {
+        hub.store
+            .cua_release(&body.holder_run_id)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(state)))
+}
+
+async fn cua_reclaim(State(hub): State<Hub>) -> Reply {
+    let state = run_blocking(move || hub.store.cua_reclaim().map_err(HttpError::from)).await?;
+    Ok(Json(json!(state)))
+}
+
+async fn evolution_suggestions(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || {
+        hub.store
+            .list_evolution_suggestions()
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(list)))
+}
+
+async fn evolution_distill(State(hub): State<Hub>) -> Reply {
+    let created =
+        run_blocking(move || distill_local_suggestions(&hub.store).map_err(map_hub_err)).await?;
+    Ok(Json(json!(created)))
+}
+
+async fn evolution_apply(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let updated = run_blocking(move || {
+        hub.store
+            .set_evolution_status(&id, EvolutionStatus::Applied)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(updated)))
+}
+
+async fn evolution_rollback(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let updated = run_blocking(move || {
+        hub.store
+            .set_evolution_status(&id, EvolutionStatus::RolledBack)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(updated)))
+}
+
+async fn local_skills(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || hub.store.list_local_skills().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveSkillBody {
+    name: String,
+    description: String,
+    body_md: String,
+    synced_vendors: Option<Vec<Vendor>>,
+}
+
+async fn save_local_skill(State(hub): State<Hub>, Json(body): Json<SaveSkillBody>) -> Reply {
+    let vendors = body
+        .synced_vendors
+        .unwrap_or_else(|| vec![Vendor::Codex, Vendor::Claude, Vendor::Agy, Vendor::Dsh]);
+    let saved = run_blocking(move || {
+        let skill = hub
+            .store
+            .save_local_skill(NewLocalSkill {
+                name: body.name,
+                description: body.description,
+                body_md: body.body_md,
+                synced_vendors: vendors,
+            })
+            .map_err(HttpError::from)?;
+        sync_skill_to_isolated_homes(&hub.state, &skill).map_err(map_hub_err)?;
+        Ok(skill)
+    })
+    .await?;
+    Ok(Json(json!(saved)))
+}
+
+async fn rollback_local_skill(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let rolled = run_blocking(move || {
+        let skill = hub
+            .store
+            .rollback_local_skill(&id)
+            .map_err(HttpError::from)?;
+        sync_skill_to_isolated_homes(&hub.state, &skill).map_err(map_hub_err)?;
+        Ok(skill)
+    })
+    .await?;
+    Ok(Json(json!(rolled)))
+}
+
+async fn community_draft(State(hub): State<Hub>) -> Reply {
+    let draft =
+        run_blocking(move || build_redacted_community_draft(&hub.store).map_err(map_hub_err))
+            .await?;
+    Ok(Json(json!(draft)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityOptInBody {
+    opt_in: bool,
+}
+
+async fn community_opt_in(State(hub): State<Hub>, Json(body): Json<CommunityOptInBody>) -> Reply {
+    let opt_in = run_blocking(move || {
+        hub.store
+            .set_community_opt_in(body.opt_in)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!({ "opt_in": opt_in })))
 }
