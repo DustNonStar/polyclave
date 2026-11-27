@@ -826,3 +826,11 @@ Branch `claude/pr-push-origin-81ae96` (`764e98c..ed08752`) was fast-forwarded in
 - Existing tests: only an import line changed. Local macOS after the fast-forward: fmt and Clippy clean, 139 passed, 0 failed; privacy scan clean.
 - Nit: the token reaches git through an environment variable, which other processes of the same user can read while the push runs. This is within the v5 threat model, which trusts same-user processes.
 - Not verified: a real GitHub push, PR or auto-merge; Windows CI.
+
+## Mesh worker_run idempotency review: passed, merged
+
+Branch `claude/mesh-run-budget-b7a297` (`f0dedff..ac81ae8`) was fast-forwarded into `main`.
+
+- `ac81ae8`: `worker_run` now requires a non-blank `request_id`. The receiver returns 400 without one, and the primary's `dispatch_remote` refuses before sending. The same id twice admits one Run. Local macOS: fmt and Clippy clean, 141 passed, 0 failed; privacy scan clean.
+- Remaining gap: the `request_id` comes from the Hub model's tool call, not from durable primary state. After a primary crash, the model may resend with a new id. Option A in the open PLAN-ISSUES entry (a primary remote-dispatch row keyed by Hub session and `request_id`) would close this.
+- `f0dedff`: opens a `direction` entry in `PLAN-ISSUES.md` asking where a remote Run is charged against a Ticket budget. Options A, B and C are listed there; A is recommended. Until it is decided, remote Runs still bypass the requesting Ticket's `max_runs`.
