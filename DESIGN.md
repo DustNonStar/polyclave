@@ -1,3 +1,11 @@
+- **v5 Desktop & Mobile UI (`apps/polyclave-app/ui/`):** Deep Obsidian / Daylight Crystal themes, 3-column workspace (1440×900) and responsive mobile tabs (375×812), zero `backdrop-filter` GPU thrash, zero external requests.
+- **Stage 2 additions:**
+  - **Global Pause (`#pause-toggle`):** Prominent top-header control (`Pause` / `Paused · Resume`) backed by `/api/pause` and `/api/resume`, mirrored in the bottom status bar.
+  - **Review sub-navigation (`Runs | Council | PR Gates`):**
+    - **Blind Council:** Anonymous proposal cards (`方案甲` / `方案乙` / `方案丙`) with risk & escalation pills (`touched_paths`, `security_sensitive`, `public_interface_changes`, `new_dependencies`, `open_questions`), decision selector for `direction` / escalated councils, and post-decision vendor/model reveal.
+    - **PR Gates & SCM Observer:** Repo/branch/SHA chips, `auto_merge_armed` state, `scope_violations` callout, heterogeneous reviewer verdicts, and Pause-aware `Run PR Gate` control.
+  - **Adapters & Credentials:** `Antigravity (agy)` and `DeepSeek Harness (dsh)` added to Worker dispatch; Settings documents distinct OS Keychain `Polyclave.GitHub` (`bot_token` / `reviewer_token`) bindings.
+
 ---
 name: Polyclave
 description: Host page for coding agents from several vendors; black and silver, soft, with fluorescent colour reserved for work in motion.

@@ -2,7 +2,7 @@ import './motion/index.js';
 import { bootstrap, follow } from './api/sse.js';
 import type { Frame } from './api/sse.js';
 import { api as makeApi } from './api/client.js';
-import { S, needsReview, selectedSession } from './state/store.js';
+import { S, attentionPrGates, awaitingCouncils, needsReview, selectedSession } from './state/store.js';
 import type { Actions, Panel, Pane } from './state/store.js';
 import { byId } from './views/elements.js';
 import { icon, setIcon } from './views/icons.js';
@@ -89,10 +89,12 @@ async function loadSession(): Promise<void> {
 
 async function sync(): Promise<void> {
   if (!S.connection) return;
-  const [sessions, runs, profiles, tickets, usage] = await Promise.all([
+  const [sessions, runs, profiles, tickets, usage, councils, prGates, pause] = await Promise.all([
     api.sessions(), api.runs(), api.profiles(), api.tickets().catch(() => S.tickets), api.usage().catch(() => S.usage),
+    api.councils().catch(() => S.councils), api.prGates().catch(() => S.prGates), api.pauseState().catch(() => S.pause),
   ]);
   S.sessions = sessions; S.runs = runs; S.profiles = profiles; S.tickets = tickets; S.usage = usage;
+  S.councils = councils; S.prGates = prGates; S.pause = pause;
   if (!S.global && (!S.selected || !sessions.some(s => s.id === S.selected))) S.selected = sessions.find(s => s.role === 'hub')?.id ?? null;
   if (S.selected) {
     const id = S.selected;
@@ -158,9 +160,23 @@ byId('theme').addEventListener('click', () => setTheme(document.documentElement.
 byId('register').addEventListener('click', () => registerProject(api, act));
 byId('global-hub').addEventListener('click', () => act.selectGlobal());
 byId('needs-you').addEventListener('click', () => {
-  const first = needsReview()[0];
-  if (first) act.openRun(first.id, true);
-  else act.tell('Nothing needs your review right now', 'info');
+  const firstRun = needsReview()[0];
+  if (firstRun) { S.reviewView = 'runs'; act.openRun(firstRun.id, true); return; }
+  const firstCouncil = awaitingCouncils()[0];
+  if (firstCouncil) { S.activeCouncil = firstCouncil.id; S.reviewView = 'council'; act.setPanel('Review'); return; }
+  const firstGate = attentionPrGates()[0];
+  if (firstGate) { S.activePrGate = firstGate.id; S.reviewView = 'pr_gates'; act.setPanel('Review'); return; }
+  act.tell('Nothing needs your review right now', 'info');
+});
+byId('pause-toggle').addEventListener('click', () => {
+  const b = byId<HTMLButtonElement>('pause-toggle');
+  b.disabled = true;
+  const op = S.pause.paused ? api.resume() : api.pause('Paused from Polyclave UI');
+  void op.then(state => {
+    S.pause = state;
+    act.tell(state.paused ? 'Host globally paused' : 'Host resumed', 'info');
+    return sync();
+  }).catch(act.problem).finally(() => { b.disabled = false; });
 });
 byId('usage').addEventListener('click', () => {
   void api.usage().then(v => { S.usage = v; renderStatus(); }).catch(() => {}).finally(() => openSettings(act, setTheme));

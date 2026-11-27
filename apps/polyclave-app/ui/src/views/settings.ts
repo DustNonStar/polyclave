@@ -87,6 +87,9 @@ function keyRows(act: Actions): HTMLElement {
     }, 'btn-danger');
     wrap.append(h('div', { class: 'card key-row' }, h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: p.display_name }), status), fieldL, h('div', { class: 'row actions' }, save, remove)));
   }
+  wrap.append(h('div', { class: 'card key-row' },
+    h('div', { class: 'row' }, h('span', { class: 'card-title grow', text: 'GitHub PR Gate & SCM Observer' }), h('span', { class: 'key-status', text: 'System keychain' })),
+    h('p', { class: 'field-hint', text: 'PR Gate and SCM Observer read separate Bot and Reviewer tokens from the OS keychain under service "Polyclave.GitHub" (accounts "bot_token" and "reviewer_token"). Bot and Reviewer accounts must be distinct; tokens never appear in UI output or logs.' })));
   return wrap;
 }
 

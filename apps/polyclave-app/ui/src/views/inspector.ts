@@ -1,13 +1,16 @@
 // Right inspector: Topology DAG, Review decisions, read-only Files and verified Memory.
 import type { Api, Decision, RunDetail } from '../api/client.js';
-import type { RunDto } from '../generated/proto.js';
-import { S, activeRunDto, needsReview, runLabel, runTone, selectedSession, visibleRuns } from '../state/store.js';
-import type { Actions, Panel } from '../state/store.js';
+import type { CouncilDto, PrGateDto, RunDto } from '../generated/proto.js';
+import {
+  S, activeRunDto, attentionPrGates, awaitingCouncils, needsReview, runLabel, runTone,
+  selectedSession, totalNeedsCount, vendorLabel, visibleRuns,
+} from '../state/store.js';
+import type { Actions, Panel, ReviewView } from '../state/store.js';
 import { withFocusPreserved } from '../state/focus.js';
 import { button, byId, h, short, svgEl } from './elements.js';
 import { icon } from './icons.js';
 import type { IconName } from './icons.js';
-import { dispatchWorker, rememberRule } from './flows.js';
+import { dispatchWorker, rememberRule, startCouncilDialog } from './flows.js';
 import { areaField } from './dialog.js';
 
 const PANELS: readonly [Panel, IconName][] = [['Topology', 'topology'], ['Review', 'review'], ['Files', 'file'], ['Memory', 'memory']];
@@ -26,7 +29,7 @@ export function renderTabs(act: Actions): void {
       tabs.append(b);
     });
   }
-  const waiting = needsReview().length;
+  const waiting = totalNeedsCount();
   for (const [name] of PANELS) {
     const b = byId('tab-' + name.toLowerCase());
     const on = name === S.panel;
@@ -73,7 +76,7 @@ function topology(api: Api, act: Actions): Node[] {
       type: 'button', class: 'topo-node', 'data-node': r.id, 'data-tone': tone, 'aria-pressed': String(r.id === S.activeRun), 'data-focus-key': 'topo-' + r.id,
       onclick: () => act.openRun(r.id, true), title: r.instructions.slice(0, 240),
     },
-    h('div', { class: 'n-top' }, h('span', { class: 'vendor-tag', 'data-vendor': r.vendor, text: r.vendor === 'codex' ? 'Codex' : 'Claude' }), h('span', { class: 'model', text: r.model ?? 'default' })),
+    h('div', { class: 'n-top' }, h('span', { class: 'vendor-tag', 'data-vendor': r.vendor, text: vendorLabel(r.vendor) }), h('span', { class: 'model', text: r.model ?? 'default' })),
     h('div', { class: 'n-title', text: r.instructions.split('\n')[0] || r.id }),
     h('div', { class: 'n-foot' }, h('span', { text: runLabel(r.status) }), h('span', { class: 'progress', 'data-tone': tone, style: '--value:' + pct + '%' }, h('i')), h('span', { text: r.current_attempt + '/' + r.max_attempts }))));
   }
@@ -162,10 +165,198 @@ function parseFiles(files: string): { path: string; add: string; del: string }[]
   });
 }
 
+function reviewSubtabs(api: Api, act: Actions): HTMLElement {
+  const views: [ReviewView, string, number][] = [
+    ['runs', 'Runs', needsReview().length],
+    ['council', 'Council', awaitingCouncils().length],
+    ['pr_gates', 'PR Gates', attentionPrGates().length],
+  ];
+  const bar = h('div', { class: 'review-subtabs', role: 'group', 'aria-label': 'Review sections' });
+  for (const [key, label, count] of views) {
+    const b = button(label, () => { S.reviewView = key; void renderInspector(api, act); }, 'subtab', {
+      'aria-pressed': String(S.reviewView === key),
+      'data-review-view': key,
+      'data-focus-key': 'rev-sub-' + key,
+    });
+    if (count > 0) b.append(h('span', { class: 'badge', text: String(count) }));
+    bar.append(b);
+  }
+  return bar;
+}
+
+function councilTone(status: CouncilDto['status']): string {
+  switch (status) {
+    case 'running': return 'run';
+    case 'awaiting_user': return 'review';
+    case 'decided': return 'done';
+    case 'failed': return 'fail';
+    default: return 'idle';
+  }
+}
+
+function prGateTone(status: PrGateDto['status']): string {
+  switch (status) {
+    case 'reviewing': return 'run';
+    case 'scope_violation': case 'revise_requested': case 'escalated': case 'paused': return 'review';
+    case 'approved': case 'auto_merge_armed': case 'merged': return 'done';
+    case 'failed': return 'fail';
+    default: return 'idle';
+  }
+}
+
+function councilSection(api: Api, act: Actions): Node[] {
+  const list = S.councils;
+  const active = list.find(c => c.id === S.activeCouncil) ?? list.find(c => c.status === 'awaiting_user') ?? list.slice(-1)[0];
+  const head = h('header', { class: 'panel-head' },
+    h('h2', { text: 'Blind Council' }),
+    button([icon('bolt', 'ic--sm'), 'New Council'], () => startCouncilDialog(api, act), 'btn-ghost', { 'data-focus-key': 'new-council', disabled: S.pause.paused }));
+  if (!active) {
+    return [head, h('p', { class: 'empty', text: 'No blind councils yet. Start one to gather anonymous proposals from enabled managers.' })];
+  }
+  const nodes: Node[] = [head];
+  if (list.length > 1) {
+    const picker = h('select', { class: 'field run-picker', 'aria-label': 'Council session', 'data-focus-key': 'council-picker' });
+    for (const c of list.slice().reverse()) {
+      picker.add(new Option(c.id + ' · ' + c.status.replaceAll('_', ' ') + ' · ' + c.prompt.slice(0, 44), c.id));
+    }
+    picker.value = active.id;
+    picker.addEventListener('change', () => { S.activeCouncil = picker.value; void renderInspector(api, act); });
+    nodes.push(picker);
+  }
+
+  const meta = h('section', { class: 'review-head' },
+    h('div', { class: 'row' },
+      h('span', { class: 'eyebrow grow', text: active.id + ' · ' + active.level }),
+      h('span', { class: 'pill-tag', 'data-tone': councilTone(active.status), text: active.status.replaceAll('_', ' ') })),
+    h('h2', { text: active.prompt }),
+    active.escalation_reasons.length
+      ? h('div', { class: 'chips' }, ...active.escalation_reasons.map(r => h('span', { class: 'pill-tag', 'data-tone': 'review', text: r })))
+      : null);
+  nodes.push(meta);
+
+  const grid = h('div', { class: 'council-grid' });
+  let selectedLabel = active.chosen_label ?? active.proposals[0]?.label ?? '';
+  for (const p of active.proposals) {
+    const revealed = active.status === 'decided' && p.vendor;
+    const isChosen = active.chosen_label === p.label;
+    const card = h('article', {
+      class: 'card proposal-card',
+      'data-chosen': String(isChosen),
+      'data-blind': String(!revealed),
+    },
+    h('div', { class: 'row' },
+      h('span', { class: 'card-title grow', text: p.label }),
+      revealed
+        ? h('span', { class: 'vendor-tag', 'data-vendor': p.vendor ?? undefined, text: vendorLabel(p.vendor!) + (p.model ? ' · ' + p.model : '') })
+        : h('span', { class: 'pill-tag', text: 'Blind' })),
+    h('p', { class: 'proposal-summary', text: p.payload.summary }),
+    h('p', { class: 'card-sub', text: p.payload.approach }),
+    h('div', { class: 'risk-chips' },
+      h('span', { class: 'pill-tag', text: p.payload.touched_paths.length + ' paths' }),
+      p.payload.security_sensitive ? h('span', { class: 'pill-tag', 'data-tone': 'review', text: 'security sensitive' }) : null,
+      p.payload.public_interface_changes ? h('span', { class: 'pill-tag', 'data-tone': 'review', text: 'public API change' }) : null,
+      p.payload.new_dependencies.length ? h('span', { class: 'pill-tag', 'data-tone': 'review', text: p.payload.new_dependencies.length + ' new deps' }) : null,
+      p.payload.beyond_request ? h('span', { class: 'pill-tag', 'data-tone': 'review', text: 'beyond request' }) : null,
+      p.payload.open_questions.length ? h('span', { class: 'pill-tag', 'data-tone': 'review', text: p.payload.open_questions.length + ' open questions' }) : null),
+    p.payload.pros.length ? h('p', { class: 'decision-note', text: 'Pros: ' + p.payload.pros.join(' · ') }) : null,
+    p.payload.cons.length ? h('p', { class: 'decision-note', text: 'Cons: ' + p.payload.cons.join(' · ') }) : null);
+    grid.append(card);
+  }
+  nodes.push(grid);
+
+  if (active.status === 'awaiting_user' && active.proposals.length) {
+    const [noteL, note] = areaField('Decision note', { rows: 2, placeholder: 'Optional rationale for choosing this proposal.' });
+    note.dataset.focusKey = 'council-note-' + active.id;
+    const choiceBar = h('div', { class: 'actions' });
+    const btns: HTMLButtonElement[] = [];
+    for (const p of active.proposals) {
+      const b = button('Choose ' + p.label, () => {
+        selectedLabel = p.label;
+        for (const x of btns) x.setAttribute('aria-pressed', String(x === b));
+      }, 'btn-ghost', { 'aria-pressed': String(selectedLabel === p.label), 'data-focus-key': 'choose-' + p.label });
+      btns.push(b);
+      choiceBar.append(b);
+    }
+    const confirm = button([icon('check'), 'Confirm decision'], () => {
+      if (!selectedLabel) return;
+      confirm.disabled = true;
+      void api.resolveCouncil(active.id, selectedLabel, note.value.trim() || null).then(async updated => {
+        S.activeCouncil = updated.id;
+        act.tell('Council decided: ' + selectedLabel, 'info');
+        await act.refresh();
+      }).catch(e => { confirm.disabled = false; act.problem(e); });
+    }, 'btn-primary', { 'data-focus-key': 'confirm-council' });
+    nodes.push(h('section', { class: 'card decision', 'data-tone': 'review' },
+      h('span', { class: 'card-title', text: 'Select winning proposal' }),
+      choiceBar, noteL, h('div', { class: 'actions' }, confirm)));
+  } else if (active.decision_note) {
+    nodes.push(h('p', { class: 'decision-note', text: 'Decision note: ' + active.decision_note }));
+  }
+  return nodes;
+}
+
+function prGatesSection(api: Api, act: Actions): Node[] {
+  const list = S.prGates;
+  const head = h('header', { class: 'panel-head' },
+    h('h2', { text: 'PR Gates & SCM Observer' }),
+    h('small', { text: S.pause.paused ? 'Globally paused' : list.length + ' gates' }));
+  const active = list.find(g => g.id === S.activePrGate) ?? attentionPrGates()[0] ?? list.slice(-1)[0];
+  if (!active) {
+    return [head, h('p', { class: 'empty', text: 'No PR gates yet. Completed Worker runs can be pushed and reviewed through PR Gate.' })];
+  }
+  const nodes: Node[] = [head];
+  if (list.length > 1) {
+    const picker = h('select', { class: 'field run-picker', 'aria-label': 'PR Gate', 'data-focus-key': 'pr-gate-picker' });
+    for (const g of list.slice().reverse()) {
+      picker.add(new Option(g.id + ' · ' + g.status.replaceAll('_', ' ') + ' · ' + g.repo_slug, g.id));
+    }
+    picker.value = active.id;
+    picker.addEventListener('change', () => { S.activePrGate = picker.value; void renderInspector(api, act); });
+    nodes.push(picker);
+  }
+  const gateCard = h('section', { class: 'card pr-gate-card', 'data-tone': prGateTone(active.status) },
+    h('div', { class: 'row' },
+      h('span', { class: 'card-title grow', text: active.repo_slug + (active.pr_number ? ' #' + active.pr_number : '') }),
+      h('span', { class: 'pill-tag', 'data-tone': prGateTone(active.status), text: active.status.replaceAll('_', ' ') })),
+    h('div', { class: 'chips' },
+      h('span', { class: 'sha' }, h('b', { text: 'branch' }), active.branch),
+      h('span', { class: 'sha' }, h('b', { text: 'base' }), short(active.base_sha)),
+      h('span', { class: 'sha', 'data-tone': 'done' }, h('b', { text: 'head' }), short(active.head_sha)),
+      active.auto_merge_armed ? h('span', { class: 'pill-tag', 'data-tone': 'done', text: 'auto-merge armed' }) : null,
+      active.revise_rounds > 0 ? h('span', { class: 'pill-tag', text: active.revise_rounds + ' revise rounds' }) : null),
+    active.scope_violations.length
+      ? h('div', { class: 'diff-well' },
+          h('div', { class: 'diff-title', text: 'Scope violations (' + active.scope_violations.length + ')' }),
+          ...active.scope_violations.map(v => h('div', { class: 'diff-row' }, h('span', { class: 'path', text: v }))))
+      : null,
+    h('div', { class: 'actions' },
+      button([icon('review', 'ic--sm'), 'Run PR Gate'], () => {
+        void api.runPrGate(active.id).then(async () => {
+          act.tell('PR Gate updated', 'info');
+          await act.refresh();
+        }).catch(act.problem);
+      }, 'btn-primary', { 'data-focus-key': 'run-pr-gate', disabled: S.pause.paused })));
+  nodes.push(gateCard);
+
+  if (active.reviews.length) {
+    const revBox = h('section', { class: 'diff-well' }, h('div', { class: 'diff-title', text: 'Heterogeneous reviews (' + active.reviews.length + ')' }));
+    for (const rv of active.reviews) {
+      revBox.append(h('div', { class: 'diff-row' },
+        h('span', { class: 'vendor-tag', 'data-vendor': rv.reviewer_vendor, text: vendorLabel(rv.reviewer_vendor) }),
+        h('span', { class: 'path', text: rv.reviewer_model + ' · ' + rv.verdict + ' @ ' + short(rv.reviewed_sha) + (rv.comments ? ' — ' + rv.comments : '') })));
+    }
+    nodes.push(revBox);
+  }
+  return nodes;
+}
+
 async function review(api: Api, act: Actions): Promise<Node[]> {
+  const sub = reviewSubtabs(api, act);
+  if (S.reviewView === 'council') return [sub, ...councilSection(api, act)];
+  if (S.reviewView === 'pr_gates') return [sub, ...prGatesSection(api, act)];
   const runs = visibleRuns();
   const run = activeRunDto();
-  if (!run) return [h('p', { class: 'empty', text: 'No Worker run selected. Dispatch a Worker from a ticket to see host verification here.' })];
+  if (!run) return [sub, h('p', { class: 'empty', text: 'No Worker run selected. Dispatch a Worker from a ticket to see host verification here.' })];
   let detail: RunDetail | undefined = S.details.get(run.id);
   try { detail = await api.run(run.id); S.details.set(run.id, detail); } catch { /* keep the last known detail */ }
   const r: RunDto = detail?.run ?? run;
@@ -178,7 +369,7 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
   picker.addEventListener('change', () => act.openRun(picker.value));
 
   const head = h('section', { class: 'review-head' },
-    h('div', { class: 'row' }, h('span', { class: 'eyebrow grow', text: r.id + ' · attempt ' + r.current_attempt + '/' + r.max_attempts }), h('span', { class: 'vendor-tag', 'data-vendor': r.vendor, text: (r.vendor === 'codex' ? 'Codex' : 'Claude') + (r.model ? ' · ' + r.model : '') })),
+    h('div', { class: 'row' }, h('span', { class: 'eyebrow grow', text: r.id + ' · attempt ' + r.current_attempt + '/' + r.max_attempts }), h('span', { class: 'vendor-tag', 'data-vendor': r.vendor, text: vendorLabel(r.vendor) + (r.model ? ' · ' + r.model : '') })),
     h('h2', { text: r.instructions.split('\n')[0] || r.id }),
     h('div', { class: 'chips' },
       h('span', { class: 'pill-tag', 'data-tone': tone, text: runLabel(r.status) }),
@@ -188,7 +379,7 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
     r.detail ? h('p', { class: 'card-sub', text: r.detail }) : null,
     r.resolution ? h('p', { class: 'card-sub', text: 'Resolution: ' + r.resolution }) : null);
 
-  const nodes: Node[] = [runs.length > 1 ? picker : h('span'), head];
+  const nodes: Node[] = [sub, runs.length > 1 ? picker : h('span'), head];
 
   const diff = h('section', { class: 'diff-well' }, h('div', { class: 'diff-title' }, icon('branch', 'ic--sm'), 'What changed', sha ? h('span', { class: 'sha', text: short(sha) }) : null));
   if (detail?.commit) {

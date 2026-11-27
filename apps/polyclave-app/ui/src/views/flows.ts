@@ -1,6 +1,6 @@
 // Dialog flows that create durable records. Each one shows the exact data and saves only on explicit confirmation.
 import type { Api } from '../api/client.js';
-import type { MemoryKind, Vendor } from '../generated/proto.js';
+import type { CouncilLevel, MemoryKind, PlanningPreference, Vendor } from '../generated/proto.js';
 import { S, selectedSession } from '../state/store.js';
 import type { Actions } from '../state/store.js';
 import { button, h } from './elements.js';
@@ -73,7 +73,7 @@ export function dispatchWorker(api: Api, act: Actions, ticketId: string | null):
   const s = selectedSession();
   if (!s) { act.tell('Choose a project Hub first'); return; }
   let vendor: Vendor = 'codex';
-  const vendorSeg = segmented('Worker vendor', ['codex', 'claude'] as const, vendor, v => { vendor = v; }, { codex: 'Codex', claude: 'Claude' });
+  const vendorSeg = segmented('Worker vendor', ['codex', 'claude', 'agy', 'dsh'] as const, vendor, v => { vendor = v; }, { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', dsh: 'DSH' });
   const [modelL, model] = textField('Model', { placeholder: 'Vendor default', hint: 'Leave empty to use the vendor default.', mono: true });
   const [branchL, branch] = textField('Base branch', { value: 'main', mono: true });
   const [instL, inst] = areaField('Instructions', { rows: 6, placeholder: 'Describe the change, the files involved and how to verify it.' });
@@ -92,6 +92,36 @@ export function dispatchWorker(api: Api, act: Actions, ticketId: string | null):
   openDialog(ticketId ? 'Dispatch Worker · ' + ticketId : 'Dispatch Worker', [
     h('p', { text: 'The host prepares an isolated Attempt worktree from the base branch and verifies the result before you review it.' }),
     h('div', { class: 'field-label' }, h('span', { text: 'Vendor' }), vendorSeg), h('div', { class: 'grid-2' }, modelL, branchL), instL, err,
+  ], { footer: [button('Cancel', closeDialog, 'btn-ghost'), go] });
+}
+
+export function startCouncilDialog(api: Api, act: Actions): void {
+  const s = selectedSession();
+  if (!s) { act.tell('Choose a project Hub first'); return; }
+  let level: CouncilLevel = 'direction';
+  let preference: PlanningPreference = 'balanced';
+  const levelSeg = segmented('Council level', ['direction', 'detail'] as const, level, v => { level = v; }, { direction: 'Direction · user picks', detail: 'Detail · auto-selects if safe' });
+  const prefSeg = segmented('Planning preference', ['thorough', 'balanced', 'conservative'] as const, preference, v => { preference = v; }, { thorough: 'Thorough', balanced: 'Balanced', conservative: 'Conservative' });
+  const [promptL, prompt] = areaField('Proposal prompt', { rows: 5, placeholder: 'Describe the architectural question or implementation trade-offs for the blind council.' });
+  const err = errorLine();
+  const go = button([icon('bolt'), 'Start Council'], () => {
+    const text = prompt.value.trim();
+    if (!text) { err.textContent = 'A prompt is required.'; return; }
+    go.disabled = true;
+    void api.startCouncil({ hub_session_id: s.id, repo_cwd: s.repo_cwd, level, preference, prompt: text }).then(async council => {
+      closeDialog();
+      S.activeCouncil = council.id;
+      S.reviewView = 'council';
+      act.setPanel('Review');
+      act.tell('Council ' + council.id + ' started', 'info');
+      await act.refresh();
+    }).catch(e => { go.disabled = false; err.textContent = e instanceof Error ? e.message : 'The council could not be started'; });
+  }, 'btn-primary');
+  openDialog('Start blind council', [
+    h('p', { text: 'Enabled managers produce independent proposals without seeing each other. Vendor and model identities stay hidden until a decision is made.' }),
+    h('div', { class: 'field-label' }, h('span', { text: 'Level' }), levelSeg),
+    h('div', { class: 'field-label' }, h('span', { text: 'Preference' }), prefSeg),
+    promptL, err,
   ], { footer: [button('Cancel', closeDialog, 'btn-ghost'), go] });
 }
 

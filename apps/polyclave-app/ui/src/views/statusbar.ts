@@ -35,13 +35,26 @@ function ring(vendor: string): SVGSVGElement {
 export function renderStatus(): void {
   const conn = byId('conn-dot');
   conn.dataset.state = S.online ? 'online' : S.connection ? 'connecting' : 'offline';
+  const pauseBtn = document.getElementById('pause-toggle');
+  if (pauseBtn) {
+    pauseBtn.setAttribute('aria-pressed', String(S.pause.paused));
+    pauseBtn.dataset.paused = String(S.pause.paused);
+    pauseBtn.textContent = S.pause.paused ? 'Paused · Resume' : 'Pause';
+    pauseBtn.title = S.pause.paused
+      ? (S.pause.reason ? 'Paused: ' + S.pause.reason + ' — click to resume' : 'Host globally paused — click to resume')
+      : 'Pause all dispatches and auto-merges';
+  }
   const count = (status: string) => S.runs.filter(r => r.status === status).length;
   const thinking = [...S.live.keys()].filter(k => S.sessions.some(s => s.id === k)).length;
   const items: [string, number, string][] = [
     ['run', count('running'), 'running'], ['think', thinking, 'thinking'], ['review', count('needs_review'), 'to review'], ['done', count('done'), 'done'],
   ];
-  byId('counts').replaceChildren(...items.map(([tone, n, label]) =>
-    h('span', { class: 'count', title: n + ' ' + label }, h('span', { class: 'dot dot--' + tone }), h('b', { text: String(n) }), h('span', { class: 'count-label', text: label }))));
+  const countNodes: Node[] = items.map(([tone, n, label]) =>
+    h('span', { class: 'count', title: n + ' ' + label }, h('span', { class: 'dot dot--' + tone }), h('b', { text: String(n) }), h('span', { class: 'count-label', text: label })));
+  if (S.pause.paused) {
+    countNodes.unshift(h('span', { class: 'pill-tag status-paused', 'data-tone': 'review', text: 'Paused' }));
+  }
+  byId('counts').replaceChildren(...countNodes);
 
   const quota = byId('quota');
   quota.replaceChildren(...VENDORS.map(v => {

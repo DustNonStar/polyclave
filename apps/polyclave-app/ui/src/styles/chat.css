@@ -15,6 +15,20 @@
   flex: none;
 }
 .ticket-chip[data-tone="review"] { color: var(--orange); border-color: var(--orange-edge); background: var(--orange-wash); }
+.head-controls { display: flex; align-items: center; gap: 8px; flex: none; min-width: 0; }
+.pill--pause {
+  min-height: 32px; padding: 0 12px; border-radius: var(--r-pill); font-size: var(--fs-sm); font-weight: 500;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink-2); white-space: nowrap;
+}
+.pill--pause:hover { color: var(--ink); border-color: var(--line-hi); }
+.pill--pause[data-paused="true"] {
+  color: var(--orange); border-color: var(--orange-edge); background: var(--orange-wash); font-weight: 600;
+}
+@media (max-width: 859px) {
+  .conversation-head { flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .pill--pause { min-height: 44px; padding: 0 14px; }
+  .model-trigger { min-height: 44px; }
+}
 
 /* Custom model selector */
 .model-select { position: relative; flex: none; }

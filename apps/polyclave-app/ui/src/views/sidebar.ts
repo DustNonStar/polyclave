@@ -1,5 +1,5 @@
 // Left navigation: Global Hub, Needs you and the collapsible project tree.
-import { S, hubSessions, needsReview, runLabel, runTone } from '../state/store.js';
+import { S, hubSessions, runLabel, runTone, totalNeedsCount } from '../state/store.js';
 import type { Actions } from '../state/store.js';
 import { withFocusPreserved } from '../state/focus.js';
 import { basename, byId, h } from './elements.js';
@@ -13,11 +13,11 @@ export function loadCollapsed(): void {
 }
 
 export function renderSidebar(act: Actions): void {
-  const review = needsReview();
+  const waitingTotal = totalNeedsCount();
   const count = byId('needs-count');
-  count.hidden = review.length === 0;
-  count.textContent = String(review.length);
-  byId('needs-you').setAttribute('aria-label', 'Needs you' + (review.length ? ', ' + review.length + ' waiting' : ''));
+  count.hidden = waitingTotal === 0;
+  count.textContent = String(waitingTotal);
+  byId('needs-you').setAttribute('aria-label', 'Needs you' + (waitingTotal ? ', ' + waitingTotal + ' waiting' : ''));
   byId('global-hub').setAttribute('aria-pressed', String(S.global));
   const running = S.runs.filter(r => r.status === 'running').length;
   byId('global-meta').textContent = running ? running + ' running' : hubSessions().length ? 'All projects' : '';

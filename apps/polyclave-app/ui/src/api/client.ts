@@ -1,7 +1,10 @@
 // Typed wrappers for the local daemon API. Every call goes through the authenticated loopback connection.
 import { request } from './sse.js';
 import type { Connection } from './sse.js';
-import type { JsonValue, MemoryItemDto, MemoryKind, RunDto, SessionDto, Vendor } from '../generated/proto.js';
+import type {
+  CouncilDto, CouncilLevel, JsonValue, MemoryItemDto, MemoryKind, PauseStateDto,
+  PlanningPreference, PrGateDto, RunDto, SessionDto, Vendor,
+} from '../generated/proto.js';
 
 export interface Profile { id: string; display_name: string; kind: string; models: string[] }
 /** Hub message as the daemon serializes it (`metadata`); older fixtures may use `metadata_json`. */
@@ -59,6 +62,19 @@ export function api(connection: () => Connection | null) {
     commitMemory: (id: string, memoryId: string) => call<MemoryItemDto>(s(id) + '/memory', { action: 'commit', id: memoryId }),
     archiveMemory: (id: string, memoryId: string) => call<MemoryItemDto>(s(id) + '/memory', { action: 'archive', id: memoryId }),
     usage: () => call<ProviderUsage[]>('/api/usage'),
+    councils: () => call<CouncilDto[]>('/api/councils'),
+    startCouncil: (body: {
+      hub_session_id?: string; ticket_id?: string | null; repo_cwd?: string;
+      level?: CouncilLevel; preference?: PlanningPreference; prompt: string;
+    }) => call<CouncilDto>('/api/councils', body),
+    resolveCouncil: (id: string, chosen_label: string, decision_note?: string | null) =>
+      call<CouncilDto>('/api/councils/' + enc(id) + '/resolve', { chosen_label, decision_note: decision_note || null }),
+    prGates: () => call<PrGateDto[]>('/api/pr-gates'),
+    prGate: (id: string) => call<PrGateDto>('/api/pr-gates/' + enc(id)),
+    runPrGate: (id: string, body?: Record<string, unknown>) => call<PrGateDto>('/api/pr-gates/' + enc(id) + '/run', body ?? {}),
+    pauseState: () => call<PauseStateDto>('/api/pause'),
+    pause: (reason?: string | null) => call<PauseStateDto>('/api/pause', reason ? { reason } : {}),
+    resume: () => call<PauseStateDto>('/api/resume', {}),
   };
 }
 export type Api = ReturnType<typeof api>;

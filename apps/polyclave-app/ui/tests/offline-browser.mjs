@@ -10,6 +10,25 @@ const clients=new Set();
 const session={id:'sfixture',name:'Fixture workspace',role:'hub',repo_cwd:'fixture',
  profile_id:'builtin-hub',provider_model:'default'};
 const messages=[{id:1,source:'user',text:'Keep the review evidence in the Hub.',queued:false}];
+let pausedState={paused:false,reason:null,updated_at:'2026-11-27T00:00:00Z'};
+let stage2Active=false;
+const makeCouncil=()=>({
+  id:'c1',ticket_id:null,repo_cwd:'fixture',level:'direction',status:'awaiting_user',
+  prompt:'Choose the Stage 2 storage layout.',escalation_reasons:['direction'],chosen_label:null,decision_note:null,
+  proposals:[
+    {label:'方案甲',payload:{summary:'Normalized SQLite tables',approach:'Use additive migrations',touched_paths:['crates/polyclave-store/src/stage2.rs'],public_interface_changes:false,new_dependencies:[],security_sensitive:false,beyond_request:false,open_questions:[],pros:['Clean schema'],cons:['More joins']},vendor:null,model:null},
+    {label:'方案乙',payload:{summary:'Single JSON document table',approach:'Store blobs in one table',touched_paths:['crates/polyclave-store/src/writer.rs'],public_interface_changes:true,new_dependencies:[],security_sensitive:false,beyond_request:false,open_questions:[],pros:['Fast prototype'],cons:['Harder queries']},vendor:null,model:null},
+  ],
+  created_at:'2026-11-27T00:00:00Z',decided_at:null,
+});
+let councilState=makeCouncil();
+const prGateState={
+  id:'pg1',run_id:'r1',ticket_id:'t1',repo_slug:'owner/polyclave',branch:'agent/r1/a1',
+  base_sha:'111111111111',head_sha:'222222222222',pr_number:42,pr_url:null,
+  status:'approved',scope_violations:[],revise_rounds:0,auto_merge_armed:true,
+  reviews:[{id:'rev1',pr_gate_id:'pg1',reviewer_vendor:'agy',reviewer_model:'gemini-4',reviewed_sha:'222222222222',verdict:'approve',comments:'Looks clean.',github_review_id:101,created_at:'2026-11-27T00:00:00Z'}],
+  updated_at:'2026-11-27T00:00:00Z',
+};
 let observedRequests=0;
 const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/','http://127.0.0.1');
@@ -21,9 +40,29 @@ const server=createServer(async(req,res)=>{
       res.writeHead(200,{'content-type':'text/event-stream'});
       res.write(': ready\n\n');clients.add(res);req.on('close',()=>clients.delete(res));return;
     }
+    let body='';for await (const chunk of req) body+=chunk;
     res.setHeader('content-type','application/json');
+    if(path==='/api/pause'&&req.method==='POST'){
+      stage2Active=true;
+      const parsed=body?JSON.parse(body):{};
+      pausedState={paused:true,reason:parsed.reason??null,updated_at:'2026-11-27T00:01:00Z'};
+      res.end(JSON.stringify(pausedState));return;
+    }
+    if(path==='/api/resume'&&req.method==='POST'){
+      pausedState={paused:false,reason:null,updated_at:'2026-11-27T00:02:00Z'};
+      res.end(JSON.stringify(pausedState));return;
+    }
+    if(path==='/api/councils/c1/resolve'&&req.method==='POST'){
+      const parsed=JSON.parse(body||'{}');
+      councilState={
+        ...councilState,status:'decided',chosen_label:parsed.chosen_label??'方案甲',decision_note:parsed.decision_note??null,decided_at:'2026-11-27T00:03:00Z',
+        proposals:councilState.proposals.map((p,idx)=>({...p,vendor:idx===0?'claude':'dsh',model:idx===0?'claude-sonnet':'deepseek-v4-pro'})),
+      };
+      res.end(JSON.stringify(councilState));return;
+    }
     const data=path==='/api/sessions'?[session]:path==='/api/profiles'?[{id:'builtin-hub',kind:'codex_cli',display_name:'Codex CLI',models:['default']},{id:'deepseek-api',kind:'openai_compat',display_name:'DeepSeek API',models:['deepseek-flash','deepseek-v4-pro']}]:
-      path.endsWith('/messages')?messages:path==='/api/usage'?[{vendor:'DeepSeek',context:240000,tokens:32000,cost:.37}]:[];
+      path.endsWith('/messages')?messages:path==='/api/usage'?[{vendor:'DeepSeek',context:240000,tokens:32000,cost:.37}]:
+      path==='/api/councils'?(stage2Active?[councilState]:[]):path==='/api/pr-gates'?(stage2Active?[prGateState]:[]):path==='/api/pause'?pausedState:[];
     res.end(JSON.stringify(data));return;
   }
   try{
@@ -47,6 +86,7 @@ try{
   const browser=await type.launch(options);
   try{
    for(const dims of [[1440,900],[375,812]]){
+    stage2Active=false;councilState=makeCouncil();
     const [width,height]=dims;
     const page=await browser.newPage({viewport:{width,height}});
     const errors=[];const outside=[];const responses=[];
@@ -136,6 +176,24 @@ try{
     send('text_delta','Reduced-motion text');
     await page.locator('#stream').getByText('Reduced-motion text',{exact:true}).waitFor({state:'visible'});
     assert.equal(await page.locator('html').getAttribute('data-motion'),'0fps');
+    // Stage 2: Global Pause toggle, Blind Council & PR Gates views.
+    await page.locator('#pause-toggle').click();
+    await page.waitForFunction(()=>document.getElementById('pause-toggle')?.getAttribute('aria-pressed')==='true');
+    assert.ok((await page.locator('#counts').textContent()).includes('Paused'));
+    await page.locator('#pause-toggle').click();
+    await page.waitForFunction(()=>document.getElementById('pause-toggle')?.getAttribute('aria-pressed')==='false');
+    if(width===375)await page.getByRole('button',{name:'Inspect',exact:true}).click();
+    await page.locator('#tab-review').click();
+    await page.locator('[data-review-view="council"]').click();
+    await page.locator('.proposal-card').first().waitFor({state:'visible'});
+    assert.equal(await page.locator('.proposal-card[data-blind="true"]').count(),2);
+    if(councilState.status==='awaiting_user'){
+      await page.locator('[data-focus-key="confirm-council"]').click();
+      await page.waitForFunction(()=>document.querySelectorAll('.proposal-card[data-blind="false"]').length===2);
+    }
+    await page.locator('[data-review-view="pr_gates"]').click();
+    await page.locator('.pr-gate-card').waitFor({state:'visible'});
+    assert.ok((await page.locator('.pr-gate-card').textContent()).includes('auto-merge armed'));
     assert.equal(await page.locator('body').evaluate(e=>e.scrollWidth),width);
     assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
     console.log(engine+' '+width+'x'+height+' '+JSON.stringify(measured)+' highlights='+supported+' no external requests');
