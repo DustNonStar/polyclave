@@ -848,3 +848,8 @@ A records check, not a review of code.
 - **What is missing.** No entry in this file, `PLAN-ISSUES.md`, `REVIEWER.md` or `handcheck/` records that real-environment acceptance passed, or that the owner approved removing the archive. Who decided the removal is not recorded. `docs/LESSONS.md` item 7 describes the same gap.
 - **Recovery.** The archive is unchanged in git history: `git checkout 01c8645^ -- legacy-node` restores it.
 - **Still pending.** Real `codex` and `claude` Worker probes; real CLI Hub probes; live DeepSeek `deepseek-flash` and `deepseek-v4-pro` calls; the installed WKWebView and WebView2 walkthrough; a real GitHub push, PR and auto-merge through the PR gate; a real phone scan of the pairing QR, with approval and revocation; a two-machine mesh run. `README.md` lists the same items by capability.
+
+## Docs v5 sync review: passed, merged
+
+The four commits on `claude/docs-v5-sync-308251` were cherry-picked onto `main` as `8089136..5acb369`, because `main` had moved on with the A + C budget decision. README, PRODUCT.md and NEXT.md now describe v5. README has a per-capability verification table, and the PRODUCT.md competitor claim is replaced by what Polyclave itself checks. A later commit updates NEXT.md, which still listed the mesh budget question as open.
+- Found while writing: `dsh_args` passes `--model`, but the real `dsh headless` has no such flag (LESSONS item 9). This is not fixed yet.
