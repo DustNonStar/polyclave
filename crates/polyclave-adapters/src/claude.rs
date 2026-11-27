@@ -1,9 +1,9 @@
 use crate::{
-    environment, home, push_option, roots, tmp_config_path, ClaudeIsolation, Error, WorkerCommand,
-    WorkerContext,
+    base_environment, claude_secure_storage_dir, prepare_isolated_home, push_option, roots,
+    tmp_config_path, ClaudeIsolation, Error, WorkerCommand, WorkerContext,
 };
 use polyclave_os::{resolve_cli_binary, write_private_file};
-use polyclave_proto::AgentEvent;
+use polyclave_proto::{AgentEvent, Vendor};
 use serde_json::{json, Value};
 use std::{ffi::OsString, path::Path};
 use uuid::Uuid;
@@ -52,10 +52,14 @@ pub fn claude_worker(
     let args = claude_args(&config, id, ctx.thread.is_some(), ctx.model);
     let (executable, args) =
         isolation.verified_command(&resolve_cli_binary(ctx.executable)?, &args, &paths)?;
-    let mut env = environment();
+    let mut env = base_environment();
     env.push((
         "CLAUDE_CONFIG_DIR".into(),
-        home(ctx.state_dir, "claude")?.into_os_string(),
+        prepare_isolated_home(ctx.state_dir, Vendor::Claude)?.into_os_string(),
+    ));
+    env.push((
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+        claude_secure_storage_dir(),
     ));
     let payload = json!({"mcpServers":{"host":{"type":"http","url":ctx.mcp_url,
         "headers":{"Authorization":format!("Bearer {}",ctx.token)}}}});

@@ -317,12 +317,10 @@ impl Hub {
                 } else {
                     (Vendor::Claude, "claude")
                 };
-                let homes = hub.state.join("isolated-homes");
-                let home = homes.join(binary);
+                let home = polyclave_adapters::prepare_isolated_home(&hub.state, vendor)
+                    .map_err(|_| Error::NotStarted)?;
                 let scratch = hub.state.join("hub-read-only");
-                for dir in [&homes, &home, &scratch] {
-                    ensure_private(dir)?;
-                }
+                ensure_private(&scratch)?;
                 let transport = SupervisedCli {
                     store: hub.store.clone(),
                     vendor,

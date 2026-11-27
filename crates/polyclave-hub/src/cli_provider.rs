@@ -368,25 +368,7 @@ impl CliTransport for SupervisedCli {
             )
             .map_err(|_| Error::NotStarted)?;
         }
-        let mut env: Vec<(OsString, OsString)> = [
-            "PATH",
-            "HOME",
-            "PATHEXT",
-            "SYSTEMROOT",
-            "PROGRAMFILES",
-            "WINDIR",
-            "COMSPEC",
-            "USERPROFILE",
-            "LOCALAPPDATA",
-            "APPDATA",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "LANG",
-        ]
-        .into_iter()
-        .filter_map(|k| std::env::var_os(k).map(|v| (k.into(), v)))
-        .collect();
+        let mut env = polyclave_adapters::base_environment();
         if self.vendor == Vendor::Codex {
             env.push(("CODEX_HOME".into(), self.home.clone().into_os_string()));
             env.push(("POLYCLAVE_MCP_TOKEN".into(), claim.turn_credential().into()));
@@ -394,6 +376,10 @@ impl CliTransport for SupervisedCli {
             env.push((
                 "CLAUDE_CONFIG_DIR".into(),
                 self.home.clone().into_os_string(),
+            ));
+            env.push((
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                polyclave_adapters::claude_secure_storage_dir(),
             ));
         }
         let (system_prompt, prompt_text) = format_prompt(

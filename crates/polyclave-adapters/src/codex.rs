@@ -1,6 +1,9 @@
-use crate::{environment, home, push_option, roots, Error, WorkerCommand, WorkerContext};
+use crate::{
+    base_environment, prepare_isolated_home, push_option, roots, Error, WorkerCommand,
+    WorkerContext,
+};
 use polyclave_os::resolve_cli_binary;
-use polyclave_proto::AgentEvent;
+use polyclave_proto::{AgentEvent, Vendor};
 use serde_json::Value;
 use std::{ffi::OsString, path::PathBuf};
 
@@ -54,10 +57,10 @@ pub fn codex_args(
 
 pub fn codex_worker(ctx: &WorkerContext<'_>) -> Result<WorkerCommand, Error> {
     let paths = roots(ctx)?;
-    let mut env = environment();
+    let mut env = base_environment();
     env.push((
         "CODEX_HOME".into(),
-        home(ctx.state_dir, "codex")?.into_os_string(),
+        prepare_isolated_home(ctx.state_dir, Vendor::Codex)?.into_os_string(),
     ));
     env.push(("POLYCLAVE_MCP_TOKEN".into(), ctx.token.into()));
     Ok(WorkerCommand {
