@@ -1,6 +1,7 @@
 //! Hub providers and the canonical conversation boundary.
 pub mod api_provider;
 pub mod cli_provider;
+pub mod council;
 pub mod curation;
 pub mod provider;
 pub mod repo_tools;
