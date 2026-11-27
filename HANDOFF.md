@@ -815,3 +815,14 @@ Branch `claude/pairing-qr-fix-5a523f` (`05ae56e`) was fast-forwarded into `main`
 - `tests/qr-roundtrip.mjs` rasterizes the built SVG in Chrome and decodes it with `jsqr@1.4.0` (dev only). The decoded text equals the URI byte for byte for short, 69-byte daemon-shaped, and longer URIs. It runs in `npm run test:browser`, which CI calls.
 - `DESIGN.md` was updated in the same commit.
 - Not verified: a real phone scan, pairing approval and revocation. Nit: today's 69-byte URI is version 5 (45 modules including the quiet zone) on a 112 px tile, about 2.5 CSS px per module. If phone scans are unreliable, enlarge the tile.
+
+## PR push target from origin review: passed, merged
+
+Branch `claude/pr-push-origin-81ae96` (`764e98c..ed08752`) was fast-forwarded into `main`. It implements the owner decision of 2026-11-27: infer the publish target from the repository's `origin`.
+
+- `764e98c`: when a Run is admitted, `origin`'s URLs and pushurls are recorded with credentials stripped (new table `run_publish_origins`). Changing `origin` later does not change the record.
+- `dd6b1d6`: before any push or PR, the gate requires exactly one GitHub HTTPS or SSH origin URL whose `owner/repo` equals `repo_slug`, and no separate pushurl. Otherwise it escalates and pushes nothing. The push always goes to the canonical `https://github.com/<repo_slug>.git`, never to a snapshot URL or a named remote. Worker push, R1 and the mirror are unchanged, as the R3 decision requires.
+- `ed08752`: the bot token (`Polyclave.GitHub` / `bot_token`) reaches git through a one-shot `credential.helper`, with the user's helpers cleared and `GIT_ALLOW_PROTOCOL=https`. Tests confirm that a sentinel token is absent from argv, stderr and events.
+- Existing tests: only an import line changed. Local macOS after the fast-forward: fmt and Clippy clean, 139 passed, 0 failed; privacy scan clean.
+- Nit: the token reaches git through an environment variable, which other processes of the same user can read while the push runs. This is within the v5 threat model, which trusts same-user processes.
+- Not verified: a real GitHub push, PR or auto-merge; Windows CI.
