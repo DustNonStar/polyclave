@@ -34,9 +34,7 @@ pub fn validate_private_mesh_endpoint(raw: &str) -> Result<reqwest::Url> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::Denied("public mesh endpoint rejected"));
     }
-    let host = url
-        .host_str()
-        .ok_or(Error::Invalid("missing mesh host"))?;
+    let host = url.host_str().ok_or(Error::Invalid("missing mesh host"))?;
     let normalized = host.trim_start_matches('[').trim_end_matches(']');
     if normalized.eq_ignore_ascii_case("localhost")
         || normalized.ends_with(".ts.net")
