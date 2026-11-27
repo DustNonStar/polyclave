@@ -1,5 +1,6 @@
 //! Hub providers and the canonical conversation boundary.
 pub mod api_provider;
+pub mod cli_provider;
 pub mod provider;
 
 #[derive(Debug, thiserror::Error)]
@@ -8,6 +9,10 @@ pub enum Error {
     Profile,
     #[error("provider credential is unavailable")]
     Credential,
+    #[error("the provider thread is unavailable")]
+    MissingThread,
+    #[error("the provider did not start")]
+    NotStarted,
     #[error("provider could not complete the request")]
     Transport,
     #[error("provider returned an invalid or incomplete stream")]

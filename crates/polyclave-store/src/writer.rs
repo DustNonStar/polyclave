@@ -65,7 +65,20 @@ impl Store {
         if version <= 1 {
             migration.execute_batch("ALTER TABLE turns ADD COLUMN mcp_revoked INTEGER NOT NULL DEFAULT 0 CHECK (mcp_revoked IN (0, 1));")?;
             migration.pragma_update(None, "user_version", 2)?;
-        } else if version != 2 {
+        }
+        if version <= 2 {
+            migration.execute_batch("
+                CREATE TABLE hub_input_requests(
+                    session_id TEXT NOT NULL REFERENCES sessions(id),request_id TEXT NOT NULL,
+                    message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),PRIMARY KEY(session_id,request_id));
+                CREATE TABLE hub_input_recovery(turn_id INTEGER PRIMARY KEY REFERENCES turns(id));
+                CREATE TABLE hub_turn_profiles(turn_id INTEGER PRIMARY KEY REFERENCES turns(id),profile_id TEXT NOT NULL REFERENCES provider_profiles(id));
+                CREATE TABLE hub_thread_ack(
+                    session_id TEXT NOT NULL,profile_id TEXT NOT NULL,message_id INTEGER NOT NULL REFERENCES messages(id),
+                    FOREIGN KEY(session_id,profile_id) REFERENCES hub_provider_threads(session_id,profile_id),
+                    PRIMARY KEY(session_id,profile_id,message_id));")?;
+            migration.pragma_update(None, "user_version", 3)?;
+        } else if version != 3 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;
