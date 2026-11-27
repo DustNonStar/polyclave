@@ -3,9 +3,11 @@ pub mod api_provider;
 pub mod cli_provider;
 pub mod council;
 pub mod curation;
+pub mod pr_gate;
 pub mod provider;
 pub mod repo_tools;
 pub mod scm;
+pub mod scm_observer;
 pub mod triage;
 
 #[derive(Debug, thiserror::Error)]
