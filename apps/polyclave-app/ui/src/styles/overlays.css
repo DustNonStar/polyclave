@@ -44,6 +44,12 @@ dialog::backdrop { background: var(--scrim); }
 
 .context-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: center; }
 #settings-vial { width: 220px; height: 44px; display: block; }
+.mesh-node { display: grid; gap: 10px; }
+.mesh-cap { display: flex; align-items: center; gap: 12px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.mesh-cap-label { font-size: var(--fs-sm); font-weight: 500; }
+.stepper { display: inline-flex; align-items: center; flex: none; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--well); }
+.stepper-btn { min-width: var(--touch); padding: 0; border-color: transparent; background: transparent; border-radius: var(--r-pill); font-size: var(--fs-md); }
+.stepper-value { min-width: 2.5ch; text-align: center; font-size: var(--fs-md); font-variant-numeric: tabular-nums; }
 .context-card .big { font: 600 22px var(--mono); letter-spacing: -.02em; }
 
 .bars-24 { display: grid; gap: 8px; }

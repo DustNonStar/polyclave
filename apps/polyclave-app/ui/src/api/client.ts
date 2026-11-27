@@ -3,7 +3,7 @@ import { request } from './sse.js';
 import type { Connection } from './sse.js';
 import type {
   ClientKind, CommunityDraftDto, CouncilDto, CouncilLevel, CuaLockDto, EvolutionSuggestionDto,
-  JsonValue, LocalSkillDto, MemoryItemDto, MemoryKind, MeshNodeDto, NotificationChannelDto,
+  JsonValue, LocalSkillDto, MemoryItemDto, MemoryKind, MeshNodeDto, MeshNodeLimitDto, NotificationChannelDto,
   NotificationChannelKind, PairedDeviceDto, PairingTicketDto, PauseStateDto, PlanningPreference,
   PrGateDto, RunDto, SessionDto, Vendor,
 } from '../generated/proto.js';
@@ -84,6 +84,9 @@ export function api(connection: () => Connection | null) {
     revokeDevice: (id: string) => call<PairedDeviceDto>('/api/devices/' + enc(id) + '/revoke', {}),
     meshNodes: () => call<MeshNodeDto[]>('/api/mesh/nodes'),
     revokeMeshNode: (id: string) => call<MeshNodeDto>('/api/mesh/nodes/' + enc(id) + '/revoke', {}),
+    meshLimits: () => call<MeshNodeLimitDto[]>('/api/mesh/limits'),
+    setMeshConcurrency: (id: string, max_concurrent_runs: number) =>
+      call<MeshNodeLimitDto>('/api/mesh/nodes/' + enc(id) + '/concurrency', { max_concurrent_runs }),
     notificationChannels: () => call<NotificationChannelDto[]>('/api/notifications/channels'),
     upsertNotificationChannel: (body: { kind: NotificationChannelKind; label: string; endpoint: string; topic: string; enabled?: boolean }) =>
       call<NotificationChannelDto>('/api/notifications/channels', body),

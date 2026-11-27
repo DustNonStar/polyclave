@@ -141,6 +141,42 @@ function remoteDevicesSection(api: Api, act: Actions): HTMLElement {
   return wrap;
 }
 
+const MESH_CONCURRENCY_MAX = 16;
+const MESH_CONCURRENCY_DEFAULT = 3;
+
+/** Concurrent mesh Runs this node may have on this host: a − n + stepper that saves each step. */
+function meshConcurrency(api: Api, act: Actions, nodeId: string): HTMLElement {
+  const limit = S.meshLimits.find(l => l.node_id === nodeId);
+  let value = limit?.max_concurrent_runs ?? MESH_CONCURRENCY_DEFAULT;
+  let active = limit?.active_runs ?? 0;
+  const out = h('output', { class: 'stepper-value mono', 'aria-live': 'polite' });
+  const hint = h('p', { class: 'field-hint' });
+  const show = () => {
+    out.textContent = String(value);
+    hint.textContent = active + ' running now · new Runs over the limit are refused, not queued · default ' + MESH_CONCURRENCY_DEFAULT + ', up to ' + MESH_CONCURRENCY_MAX;
+    dec.disabled = value <= 1;
+    inc.disabled = value >= MESH_CONCURRENCY_MAX;
+  };
+  const save = (next: number) => {
+    if (next < 1 || next > MESH_CONCURRENCY_MAX) return;
+    dec.disabled = inc.disabled = true;
+    void api.setMeshConcurrency(nodeId, next)
+      .then(res => {
+        value = res.max_concurrent_runs; active = res.active_runs;
+        S.meshLimits = S.meshLimits.filter(l => l.node_id !== nodeId).concat(res);
+        act.tell('At most ' + value + ' concurrent Runs from this node', 'info');
+      })
+      .catch(act.problem)
+      .finally(show);
+  };
+  const dec = button('\u2212', () => save(value - 1), 'stepper-btn', { 'aria-label': 'Fewer concurrent Runs', 'data-focus-key': 'mesh-dec-' + nodeId });
+  const inc = button('+', () => save(value + 1), 'stepper-btn', { 'aria-label': 'More concurrent Runs', 'data-focus-key': 'mesh-inc-' + nodeId });
+  show();
+  return h('div', { class: 'mesh-cap' },
+    h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 'mesh-cap-label', text: 'Concurrent Runs' }), hint),
+    h('div', { class: 'stepper', role: 'group', 'aria-label': 'Concurrent Runs from ' + nodeId }, dec, out, inc));
+}
+
 function meshSection(api: Api, act: Actions): HTMLElement {
   const wrap = h('div', { style: 'display:grid;gap:10px' });
   if (!S.meshNodes.length) {
@@ -148,13 +184,15 @@ function meshSection(api: Api, act: Actions): HTMLElement {
     return wrap;
   }
   for (const n of S.meshNodes) {
-    wrap.append(h('div', { class: 'card row' },
-      h('div', { class: 'grow', style: 'min-width:0' },
-        h('div', { class: 'card-title', text: n.name + ' · ' + n.os_family + ' (' + n.status + ')' }),
-        h('p', { class: 'field-hint mono', text: n.endpoint + ' · repos: ' + (n.allowed_repos.join(', ') || 'none') })),
-      n.status !== 'revoked' ? button('Revoke', () => {
-        void api.revokeMeshNode(n.id).then(() => act.refresh()).catch(act.problem);
-      }, 'btn-danger', { 'data-focus-key': 'rev-mesh-' + n.id }) : null));
+    wrap.append(h('div', { class: 'card mesh-node' },
+      h('div', { class: 'row' },
+        h('div', { class: 'grow', style: 'min-width:0' },
+          h('div', { class: 'card-title', text: n.name + ' · ' + n.os_family + ' (' + n.status + ')' }),
+          h('p', { class: 'field-hint mono', style: 'overflow-wrap:anywhere', text: n.endpoint + ' · repos: ' + (n.allowed_repos.join(', ') || 'none') })),
+        n.status !== 'revoked' ? button('Revoke', () => {
+          void api.revokeMeshNode(n.id).then(() => act.refresh()).catch(act.problem);
+        }, 'btn-danger', { 'data-focus-key': 'rev-mesh-' + n.id }) : null),
+      n.status !== 'revoked' ? meshConcurrency(api, act, n.id) : null));
   }
   return wrap;
 }
