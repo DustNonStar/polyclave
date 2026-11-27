@@ -15,6 +15,8 @@ pub enum SessionRole {
 pub enum Vendor {
     Codex,
     Claude,
+    Agy,
+    Dsh,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -311,4 +313,131 @@ pub struct ProviderProfileDto {
     pub models: Vec<String>,
     pub configured: bool,
     pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilLevel {
+    Direction,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningPreference {
+    Thorough,
+    Balanced,
+    Conservative,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilStatus {
+    Running,
+    AwaitingUser,
+    Decided,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+pub struct ProposalPayload {
+    pub summary: String,
+    pub approach: String,
+    pub touched_paths: Vec<String>,
+    pub public_interface_changes: bool,
+    pub new_dependencies: Vec<String>,
+    pub security_sensitive: bool,
+    pub beyond_request: bool,
+    pub open_questions: Vec<String>,
+    pub pros: Vec<String>,
+    pub cons: Vec<String>,
+}
+
+/// Blind projection of one council proposal. `vendor` and `model` are only
+/// populated once the owning council is `Decided`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct CouncilProposalDto {
+    pub label: String,
+    pub payload: ProposalPayload,
+    pub vendor: Option<Vendor>,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct CouncilDto {
+    pub id: String,
+    pub ticket_id: Option<String>,
+    pub repo_cwd: String,
+    pub level: CouncilLevel,
+    pub status: CouncilStatus,
+    pub prompt: String,
+    pub escalation_reasons: Vec<String>,
+    pub chosen_label: Option<String>,
+    pub decision_note: Option<String>,
+    pub proposals: Vec<CouncilProposalDto>,
+    pub created_at: String,
+    pub decided_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PrGateStatus {
+    Pending,
+    ScopeViolation,
+    Reviewing,
+    ReviseRequested,
+    Approved,
+    AutoMergeArmed,
+    Merged,
+    Escalated,
+    Paused,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Approve,
+    Revise,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PrReviewDto {
+    pub id: String,
+    pub pr_gate_id: String,
+    pub reviewer_vendor: Vendor,
+    pub reviewer_model: String,
+    pub reviewed_sha: String,
+    pub verdict: ReviewVerdict,
+    pub comments: String,
+    #[ts(type = "number | null")]
+    pub github_review_id: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PrGateDto {
+    pub id: String,
+    pub run_id: String,
+    pub ticket_id: String,
+    pub repo_slug: String,
+    pub branch: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub pr_number: Option<u32>,
+    pub pr_url: Option<String>,
+    pub status: PrGateStatus,
+    pub scope_violations: Vec<String>,
+    pub revise_rounds: u32,
+    pub auto_merge_armed: bool,
+    pub reviews: Vec<PrReviewDto>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PauseStateDto {
+    pub paused: bool,
+    pub reason: Option<String>,
+    pub updated_at: String,
 }

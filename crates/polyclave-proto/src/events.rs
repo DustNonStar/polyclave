@@ -13,6 +13,9 @@ pub enum ChangeTopic {
     Memory,
     HubReceipt,
     Inbox,
+    Council,
+    PrGate,
+    Pause,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]

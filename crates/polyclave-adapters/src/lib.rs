@@ -73,6 +73,8 @@ fn default_vendor_source(vendor: Vendor) -> Option<PathBuf> {
         Vendor::Claude => std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| user_home_dir().map(|h| h.join(".claude"))),
+        // Stage 2 adapters (Item 2A.3) are not wired yet.
+        Vendor::Agy | Vendor::Dsh => None,
     }
 }
 
@@ -96,10 +98,13 @@ pub fn prepare_isolated_home_from(
     let vendor_name = match vendor {
         Vendor::Codex => "codex",
         Vendor::Claude => "claude",
+        // Stage 2 adapters (Item 2A.3) are not wired yet.
+        Vendor::Agy | Vendor::Dsh => return Err(Error::Invalid),
     };
     let entries: &[&str] = match vendor {
         Vendor::Codex => &["auth.json", "skills"],
         Vendor::Claude => &[".credentials.json", "skills"],
+        Vendor::Agy | Vendor::Dsh => return Err(Error::Invalid),
     };
     let parent = state_dir.join("isolated-homes");
     let isolated = parent.join(vendor_name);

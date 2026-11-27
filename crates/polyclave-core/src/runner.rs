@@ -362,6 +362,8 @@ impl TurnRunner {
                     let ev = match vendor {
                         Vendor::Codex => parse_codex(&text),
                         Vendor::Claude => parse_claude(&text),
+                        // Stage 2 adapters (Item 2A.3) are not wired yet.
+                        Vendor::Agy | Vendor::Dsh => None,
                     };
                     if let Some(ev) = ev {
                         if events.send(ev).is_err() {
@@ -449,6 +451,8 @@ impl TurnRunner {
             executable: match work.run.vendor {
                 Vendor::Codex => &self.codex,
                 Vendor::Claude => &self.claude,
+                // Stage 2 adapters (Item 2A.3) are not wired yet.
+                Vendor::Agy | Vendor::Dsh => return Err(polyclave_adapters::Error::Invalid),
             },
             state_dir: &self.state,
             worktree: &work.workspace.cwd,
@@ -464,6 +468,7 @@ impl TurnRunner {
         match work.run.vendor {
             Vendor::Codex => codex_worker(&ctx),
             Vendor::Claude => claude_worker(&ctx, Uuid::new_v4(), self.confinement.as_deref()),
+            Vendor::Agy | Vendor::Dsh => Err(polyclave_adapters::Error::Invalid),
         }
     }
 

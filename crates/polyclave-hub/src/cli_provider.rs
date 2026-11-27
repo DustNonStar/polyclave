@@ -126,6 +126,8 @@ fn args(
             ]);
             a
         }
+        // Unreachable: `SupervisedCli::execute` refuses Stage 2 vendors before spawning.
+        Vendor::Agy | Vendor::Dsh => Vec::new(),
     }
 }
 
@@ -337,6 +339,10 @@ impl CliTransport for SupervisedCli {
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::CancelledBeforeStart);
         }
+        // Stage 2 vendors (Item 2A.3) have no Hub CLI transport yet.
+        if !matches!(self.vendor, Vendor::Codex | Vendor::Claude) {
+            return Err(Error::NotStarted);
+        }
         let url = reqwest::Url::parse(&self.mcp_url).map_err(|_| Error::NotStarted)?;
         if url.scheme() != "http"
             || url.host_str() != Some("127.0.0.1")
@@ -514,6 +520,7 @@ impl CliTransport for SupervisedCli {
             let event = match self.vendor {
                 Vendor::Codex => polyclave_adapters::parse_codex(&line),
                 Vendor::Claude => polyclave_adapters::parse_claude(&line),
+                Vendor::Agy | Vendor::Dsh => None,
             };
             match event {
                 Some(AgentEvent::Session { id }) => {

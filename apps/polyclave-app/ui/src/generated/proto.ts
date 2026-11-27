@@ -3,7 +3,7 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [key:
 
 export type SessionRole = "hub" | "manager" | "worker";
 
-export type Vendor = "codex" | "claude";
+export type Vendor = "codex" | "claude" | "agy" | "dsh";
 
 export type MessageSource = "user" | "agent" | "host";
 
@@ -53,7 +53,29 @@ export type MemoryItemDto = { id: string, scope: MemoryScope, repo_cwd: string |
 
 export type ProviderProfileDto = { id: string, display_name: string, kind: ProviderKind, models: Array<string>, configured: boolean, created_at: string, };
 
-export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox";
+export type CouncilLevel = "direction" | "detail";
+
+export type PlanningPreference = "thorough" | "balanced" | "conservative";
+
+export type CouncilStatus = "running" | "awaiting_user" | "decided" | "cancelled" | "failed";
+
+export type ProposalPayload = { summary: string, approach: string, touched_paths: Array<string>, public_interface_changes: boolean, new_dependencies: Array<string>, security_sensitive: boolean, beyond_request: boolean, open_questions: Array<string>, pros: Array<string>, cons: Array<string>, };
+
+export type CouncilProposalDto = { label: string, payload: ProposalPayload, vendor: Vendor | null, model: string | null, };
+
+export type CouncilDto = { id: string, ticket_id: string | null, repo_cwd: string, level: CouncilLevel, status: CouncilStatus, prompt: string, escalation_reasons: Array<string>, chosen_label: string | null, decision_note: string | null, proposals: Array<CouncilProposalDto>, created_at: string, decided_at: string | null, };
+
+export type PrGateStatus = "pending" | "scope_violation" | "reviewing" | "revise_requested" | "approved" | "auto_merge_armed" | "merged" | "escalated" | "paused" | "failed";
+
+export type ReviewVerdict = "approve" | "revise";
+
+export type PrReviewDto = { id: string, pr_gate_id: string, reviewer_vendor: Vendor, reviewer_model: string, reviewed_sha: string, verdict: ReviewVerdict, comments: string, github_review_id: number | null, created_at: string, };
+
+export type PrGateDto = { id: string, run_id: string, ticket_id: string, repo_slug: string, branch: string, base_sha: string, head_sha: string, pr_number: number | null, pr_url: string | null, status: PrGateStatus, scope_violations: Array<string>, revise_rounds: number, auto_merge_armed: boolean, reviews: Array<PrReviewDto>, updated_at: string, };
+
+export type PauseStateDto = { paused: boolean, reason: string | null, updated_at: string, };
+
+export type ChangeTopic = "message" | "turn" | "ticket" | "run" | "attempt" | "memory" | "hub_receipt" | "inbox" | "council" | "pr_gate" | "pause";
 
 export type SseEnvelope = { seq: number, topic: ChangeTopic, entity_id: string, payload: JsonValue, created_at: string, };
 
