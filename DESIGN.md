@@ -7,7 +7,7 @@
   - **Adapters & Credentials:** `Antigravity (agy)` and `DeepSeek Harness (dsh)` added to Worker dispatch; Settings documents distinct OS Keychain `Polyclave.GitHub` (`bot_token` / `reviewer_token`) bindings.
 - **Stage 3 additions:**
   - **Mobile Entrypoint (`apps/polyclave-app/src-tauri/src/lib.rs`):** Target-gated `mobile_entry_point` for iOS / Android alongside desktop `main.rs`.
-  - **Devices & 10-min QR Pairing:** Zero-dependency inline SVG QR generator (`views/qr.ts`), paired device list with instant `Revoke`, and dual-identity verification over Tailscale / AgentMesh.
+  - **Devices & 10-min QR Pairing:** Standard QR code (ISO/IEC 18004, byte mode, error correction M, smallest fitting version; the daemon's 69-byte URI is version 5) drawn as inline SVG by `views/qr.ts` with the bundled `qrcode-generator` encoder (no external requests). The symbol is black on a white 112 × 112 px tile with `--r-sm` corners; its 4-module quiet zone is part of the SVG viewBox, so the tile has no extra padding. Paired device list with instant `Revoke`, and dual-identity verification over Tailscale / AgentMesh.
   - **AgentMesh Nodes & Private Notifications:** Deny-by-default mesh node visibility/revocation and private self-hosted `ntfy` / UnifiedPush wakeup configuration in Settings.
 - **Stage 4 additions:**
   - **CUA Desktop Mutex & Reclaim:** Statusbar lock indicator + 1-click `Reclaim desktop` control in Settings.

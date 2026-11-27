@@ -71,7 +71,7 @@ dialog::backdrop { background: var(--scrim); }
 .q[data-vendor="deepseek"] { --vendor: var(--v-deepseek); }
 .q .q-val { font-size: 10.5px; }
 .qr-box { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-.qr-svg { width: 112px; height: 112px; flex: none; background: #fff; color: #000; padding: 6px; border-radius: var(--r-sm); }
+.qr-svg { width: 112px; height: 112px; flex: none; background: #fff; color: #000; border-radius: var(--r-sm); }
 .qr-svg rect { fill: currentColor; }
 
 @media (max-width: 859px) {

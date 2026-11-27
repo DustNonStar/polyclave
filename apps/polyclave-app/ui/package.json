@@ -6,10 +6,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs --clean && tsc && node build.mjs",
-    "test:browser": "node tests/offline-browser.mjs"
+    "test:browser": "node tests/offline-browser.mjs && node tests/qr-roundtrip.mjs"
   },
   "devDependencies": {
+    "jsqr": "1.4.0",
     "playwright": "1.56.1",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4"
   }
 }
