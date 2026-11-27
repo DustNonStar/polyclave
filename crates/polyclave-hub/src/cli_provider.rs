@@ -66,10 +66,11 @@ fn args(
             a.extend([
                 "-c".into(),
                 format!("mcp_servers.host.url={}", json!(mcp_url)).into(),
-                "--model".into(),
-                model.into(),
-                "--".into(),
             ]);
+            if model != "default" {
+                a.extend(["--model".into(), model.into()]);
+            }
+            a.push("--".into());
             if let Some(t) = thread {
                 a.push(t.into());
             }
@@ -95,7 +96,9 @@ fn args(
             .map(OsString::from)
             .to_vec();
             a.push(config.into());
-            a.extend(["--model".into(), model.into()]);
+            if model != "default" {
+                a.extend(["--model".into(), model.into()]);
+            }
             if let Some(t) = thread {
                 a.extend(["--resume".into(), t.into()]);
             }

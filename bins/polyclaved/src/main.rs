@@ -1,4 +1,5 @@
 mod auth;
+mod hub_api;
 mod routes;
 
 use polyclave_adapters::mcp::Mcp;
@@ -59,7 +60,7 @@ async fn serve() -> io::Result<()> {
     let runner = TurnRunner::new(
         runs.clone(),
         &state,
-        host,
+        host.clone(),
         RunnerConfig {
             supervisor: std::env::current_exe()?,
             mcp_url: format!("http://{endpoint}/mcp"),
@@ -74,6 +75,21 @@ async fn serve() -> io::Result<()> {
     )
     .map_err(io::Error::other)?;
     runner.recover().map_err(io::Error::other)?;
+    store.hub_recover_inputs().map_err(io::Error::other)?;
+    store.builtin_profiles().map_err(io::Error::other)?;
+    let hub = hub_api::Hub::new(
+        store.clone(),
+        runs.clone(),
+        runner.clone(),
+        host,
+        state.clone(),
+        stream.clone(),
+    )
+    .await?;
+    for id in store.hub_idle_sessions().map_err(io::Error::other)? {
+        hub.kick(id);
+    }
+    let stop_hub = hub.clone();
     let token = Uuid::new_v4().simple().to_string();
     let token_file = state.join("local-auth.token");
     remove_if_present(&token_file)?;
@@ -84,13 +100,15 @@ async fn serve() -> io::Result<()> {
             runs,
             runner,
             stream,
+            hub: Some(hub),
         },
         auth::LocalAuth::new(token.clone(), port),
     );
     println!("http://127.0.0.1:{port}/#token={token}");
     let result = axum::serve(api, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            stop_hub.close();
         })
         .await;
     mcp.abort();

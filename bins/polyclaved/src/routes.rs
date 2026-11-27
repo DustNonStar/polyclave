@@ -28,9 +28,11 @@ pub struct App {
     pub runs: RunManager,
     pub runner: TurnRunner,
     pub stream: broadcast::Sender<(String, AgentEvent)>,
+    pub hub: Option<crate::hub_api::Hub>,
 }
 
 pub fn router(app: App, auth: LocalAuth) -> Router {
+    let extension = app.hub.clone().map(crate::hub_api::router);
     let api = Router::new()
         .route("/sessions", get(sessions).post(register))
         .route("/runs", get(runs).post(accept))
@@ -41,8 +43,13 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
         .route("/runs/{id}/resolve", post(resolve))
         .route("/events", get(events))
         .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::from_fn_with_state(auth, auth::require))
         .with_state(app);
+    let api = if let Some(extension) = extension {
+        api.merge(extension)
+    } else {
+        api
+    };
+    let api = api.layer(middleware::from_fn_with_state(auth, auth::require));
     Router::new()
         .nest("/api", api)
         .route("/", get(|| async { "Polyclave local daemon" }))
@@ -118,8 +125,12 @@ async fn accept(State(app): State<App>, Json(req): Json<RunRequest>) -> Reply {
         blocking(move || {
             let (run, new) = app.runs.accept(req)?;
             if new {
-                app.runner
-                    .schedule(&run.id, TurnMode::Start, run.instructions.clone())?;
+                let attempt =
+                    app.runner
+                        .schedule(&run.id, TurnMode::Start, run.instructions.clone())?;
+                if let Some(hub) = &app.hub {
+                    hub.track(run.id.clone(), attempt);
+                }
             }
             Ok(run)
         })
@@ -301,6 +312,7 @@ mod tests {
                 runs,
                 runner,
                 stream,
+                hub: None,
             },
             LocalAuth::new("test-only".into(), 4310),
         );

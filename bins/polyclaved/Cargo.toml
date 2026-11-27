@@ -12,6 +12,7 @@ polyclave-adapters = { path = "../../crates/polyclave-adapters" }
 polyclave-core = { path = "../../crates/polyclave-core" }
 polyclave-os = { path = "../../crates/polyclave-os" }
 polyclave-proto = { path = "../../crates/polyclave-proto" }
+polyclave-hub = { path = "../../crates/polyclave-hub" }
 polyclave-store = { path = "../../crates/polyclave-store" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

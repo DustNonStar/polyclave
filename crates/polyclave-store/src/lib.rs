@@ -1,7 +1,7 @@
 //! SQLite is owned by this crate; mutation jobs are serialized on one writer.
 mod hub;
 mod memory;
-pub use hub::{HubCompletion, HubMessage, HubTurn, ThreadDelta};
+pub use hub::{HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
 mod writer;
 
 pub use memory::{CandidateMemory, Curator, MemoryAction, MemoryFilter};

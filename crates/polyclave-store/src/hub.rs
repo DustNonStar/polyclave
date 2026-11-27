@@ -130,7 +130,7 @@ impl Store {
             if !matches!(role.as_str(),"hub"|"manager"){return Err(Error::ConflictError);}
             if db.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=?1 AND status='running' AND run_id IS NULL AND mode!='consult')",
                 [&session],|r|r.get::<_,bool>(0))?{return Err(Error::BusyError);}
-            let input:Option<i64>=db.query_row("SELECT id FROM messages WHERE session_id=?1 AND source='user' AND queued=1
+            let input:Option<i64>=db.query_row("SELECT id FROM messages WHERE session_id=?1 AND source IN ('user','host') AND queued=1
                 AND turn_id IS NULL ORDER BY id LIMIT 1",[&session],|r|r.get(0)).optional()?;
             let Some(input)=input else{return Ok(None);};
             let key=uuid::Uuid::new_v4().simple().to_string();
@@ -346,6 +346,214 @@ impl Store {
                 VALUES(?1,?2,'manager',?3,?4,?5,?6,?7)",
                 params![id,name,vendor,repo,profile,model,now(db)?])?;
             Ok(id)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TicketIntent {
+    pub id: String,
+    pub hub: String,
+    pub repo: String,
+    pub used: u32,
+    pub limit: u32,
+    pub status: String,
+}
+impl Store {
+    pub fn hub_ticket(
+        &self,
+        hub: &str,
+        source: i64,
+        title: &str,
+        mandate: Value,
+        max: u32,
+    ) -> Result<TicketIntent> {
+        if !(1..=20).contains(&max)
+            || title.trim().is_empty()
+            || title.len() > 256
+            || mandate.to_string().len() > 16_384
+        {
+            return Err(Error::Invalid("invalid Ticket mandate"));
+        }
+        let (hub, title) = (hub.to_owned(), title.to_owned());
+        self.write(move|db|{
+            let repo:String=db.query_row("SELECT s.repo_cwd FROM sessions s JOIN messages m ON m.session_id=s.id
+                WHERE s.id=?1 AND s.role='hub' AND m.id=?2 AND m.source='user'",params![hub,source],|r|r.get(0)).optional()?.ok_or(Error::ConflictError)?;
+            let existing:Option<(String,String,String,u32)>=db.query_row("SELECT id,title,mandate_json,max_runs FROM tickets WHERE basis_msg_id=?1",
+                [source],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            let data=mandate.to_string();
+            if let Some((id,prior_title,prior_data,prior_budget))=existing{
+                if prior_title!=title || prior_data!=data || prior_budget!=max{return Err(Error::ConflictError);}
+                return load_ticket(db,&id);
+            }
+            let id=crate::new_id('t');
+            let stamp=now(db)?;
+            db.execute("INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,basis_msg_id,max_runs,status,created_at,updated_at)
+                VALUES(?1,?2,?3,?4,?5,'explicit_user',?6,?7,'active',?8,?8)",params![id,hub,repo,title,data,source,max,stamp])?;
+            publish_ticket(db,&id)
+        })
+    }
+    pub fn hub_ticket_for_dispatch(
+        &self,
+        hub: &str,
+        ticket: &str,
+        repo: &str,
+    ) -> Result<TicketIntent> {
+        let (hub, ticket, repo) = (hub.to_owned(), ticket.to_owned(), repo.to_owned());
+        let checked = self.write(move |db| {
+            let t = load_ticket(db, &ticket)?;
+            if t.hub != hub || t.status != "active" {
+                return Ok(None);
+            }
+            if t.repo != repo || t.used >= t.limit {
+                db.execute(
+                    "UPDATE tickets SET status='blocked_on_user',updated_at=?2 WHERE id=?1",
+                    params![ticket, now(db)?],
+                )?;
+                publish_ticket(db, &ticket)?;
+                return Ok(None);
+            }
+            Ok(Some(t))
+        })?;
+        checked.ok_or(Error::ConflictError)
+    }
+    pub fn hub_close_ticket_budget(&self, ticket: &str) -> Result<()> {
+        let ticket = ticket.to_owned();
+        self.write(move |db| {
+            let t = load_ticket(db, &ticket)?;
+            if t.status == "active" && t.used >= t.limit {
+                db.execute(
+                    "UPDATE tickets SET status='blocked_on_user',updated_at=?2 WHERE id=?1",
+                    params![ticket, now(db)?],
+                )?;
+                publish_ticket(db, &ticket)?;
+            }
+            Ok(())
+        })
+    }
+    pub fn hub_ticket_mandate(&self, id: &str) -> Result<(TicketIntent, Value)> {
+        self.read(|db| {
+            let t = load_ticket(db, id)?;
+            let mandate =
+                db.query_row("SELECT mandate_json FROM tickets WHERE id=?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })?;
+            Ok((t, serde_json::from_str(&mandate)?))
+        })
+    }
+    /// Consume only a first, canonical terminal Run receipt. External input never
+    /// supplies the receipt body or gets to select a different Ticket.
+    pub fn hub_worker_receipt(&self, run: &str) -> Result<Option<String>> {
+        let run = run.to_owned();
+        self.write(move|db|{
+            let row:Option<(String,String,String,Option<String>)>=db.query_row(
+                "SELECT hub_session_id,ticket_id,status,result_sha FROM runs WHERE id=?1
+                 AND status IN ('done','failed','needs_review','interrupted')",
+                 [&run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            let Some((hub,ticket,status,sha))=row else{return Ok(None);};
+            let changed=db.execute("INSERT OR IGNORE INTO hub_consumed_receipts(run_id,status) VALUES(?1,?2)",params![run,status])?;
+            if changed==0{return Ok(None);}
+            let payload=json!({"kind":"worker_receipt","run_id":run,"ticket_id":ticket,"status":status,"sha":sha});
+            db.execute("INSERT INTO messages(session_id,source,text,metadata_json,created_at,queued)
+                VALUES(?1,'host','Host verified Worker status',?2,?3,1)",params![hub,payload.to_string(),now(db)?])?;
+            publish(db,db.last_insert_rowid())?;
+            Ok(Some(hub))
+        })
+    }
+    pub fn hub_inference_policy(&self, repo: &str) -> Result<(String, Vec<String>, Vec<String>)> {
+        self.read(|db|{
+            let saved:Option<(String,String,String)>=db.query_row(
+                "SELECT inferred_mode,bot_actors_json,human_actors_json FROM admission_policies WHERE repo_cwd=?1",
+                [repo],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            let Some((mode,bots,humans))=saved else{return Ok(("observe".into(),vec![],vec![]));};
+            Ok((mode,serde_json::from_str(&bots)?,serde_json::from_str(&humans)?))
+        })
+    }
+
+    pub fn hub_scope(&self, session: &str) -> Result<(String, String, String)> {
+        self.read(|db|db.query_row("SELECT s.role,s.repo_cwd,p.kind FROM sessions s JOIN provider_profiles p ON s.profile_id=p.id
+            WHERE s.id=?1 AND s.role IN ('hub','manager')",[session],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+            .optional()?.ok_or(Error::NotFound))
+    }
+    pub fn hub_idle_sessions(&self) -> Result<Vec<String>> {
+        self.read(|db|{
+            let mut q=db.prepare("SELECT DISTINCT m.session_id FROM messages m
+                 JOIN sessions s ON s.id=m.session_id WHERE m.queued=1 AND m.turn_id IS NULL AND s.role IN ('hub','manager')")?;
+            let v=q.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+    }
+    pub fn hub_tool_scope(
+        &self,
+        credential: &str,
+        instance: &str,
+    ) -> Result<Option<(i64, String, String, String)>> {
+        self.read(|db|Ok(db.query_row("SELECT t.id,s.id,s.role,s.repo_cwd FROM turns t JOIN sessions s ON t.session_id=s.id
+            WHERE t.host_instance_id=?1 AND t.mcp_token=?2 AND t.status='running' AND t.phase='authorized'
+            AND t.mcp_revoked=0 AND t.run_id IS NULL AND t.mode=s.role AND s.role IN ('hub','manager')",
+            params![instance,credential],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?))
+    }
+}
+fn load_ticket(db: &Connection, id: &str) -> Result<TicketIntent> {
+    db.query_row(
+        "SELECT id,hub_session_id,repo_cwd,runs_used,max_runs,status FROM tickets WHERE id=?1",
+        [id],
+        |r| {
+            Ok(TicketIntent {
+                id: r.get(0)?,
+                hub: r.get(1)?,
+                repo: r.get(2)?,
+                used: r.get(3)?,
+                limit: r.get(4)?,
+                status: r.get(5)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or(Error::NotFound)
+}
+fn publish_ticket(db: &Connection, id: &str) -> Result<TicketIntent> {
+    let t = load_ticket(db, id)?;
+    Store::append_change(db, ChangeTopic::Ticket, id, &serde_json::to_value(&t)?)?;
+    Ok(t)
+}
+
+impl Store {
+    pub fn builtin_profiles(&self) -> Result<()> {
+        self.write(|db|{
+            for (id,label,kind,base,account,models) in [
+                ("builtin-hub","Codex CLI","codex_cli",None,None,"[\"default\"]"),
+                ("claude-cli","Claude CLI","claude_cli",None,None,"[\"default\"]"),
+                ("deepseek-api","DeepSeek API","openai_compat",Some("https://api.deepseek.com"),Some("deepseek"),"[\"deepseek-v4.1\"]"),
+            ] {
+                db.execute("INSERT OR IGNORE INTO provider_profiles(id,display_name,kind,base_url,keyring_account,models_json,created_at)
+                    VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,label,kind,base,account,models,now(db)?])?;
+            }
+            Ok(())
+        })
+    }
+    pub fn hub_profiles(&self) -> Result<Vec<Value>> {
+        self.read(|db|{
+            let mut q=db.prepare("SELECT id,display_name,kind,models_json FROM provider_profiles ORDER BY id")?;
+            let rows=q.query_map([],|r|{
+                let models:Vec<String>=crate::parse_json(r.get(3)?,3)?;
+                Ok(json!({"id":r.get::<_,String>(0)?,"display_name":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"models":models}))
+            })?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+    pub fn hub_switch_profile(&self, session: &str, profile: &str, model: &str) -> Result<()> {
+        let (session, profile, model) = (session.to_owned(), profile.to_owned(), model.to_owned());
+        self.write(move|db|{
+            let models:String=db.query_row("SELECT models_json FROM provider_profiles WHERE id=?1",[&profile],|r|r.get(0))
+                .optional()?.ok_or(Error::NotFound)?;
+            if !serde_json::from_str::<Vec<String>>(&models)?.contains(&model){return Err(Error::ConflictError);}
+            let running=db.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=?1 AND status='running')",
+                [&session],|r|r.get::<_,bool>(0))?;
+            if running {return Err(Error::BusyError);}
+            if db.execute("UPDATE sessions SET profile_id=?2,provider_model=?3 WHERE id=?1 AND role IN ('hub','manager')",
+                params![session,profile,model])?!=1{return Err(Error::NotFound);}
+            Ok(())
         })
     }
 }

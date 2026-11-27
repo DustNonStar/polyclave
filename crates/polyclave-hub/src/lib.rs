@@ -4,6 +4,7 @@ pub mod cli_provider;
 pub mod curation;
 pub mod provider;
 pub mod repo_tools;
+pub mod triage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

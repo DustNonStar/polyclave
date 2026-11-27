@@ -926,6 +926,7 @@ dependencies = [
  "http-body-util",
  "polyclave-adapters",
  "polyclave-core",
+ "polyclave-hub",
  "polyclave-os",
  "polyclave-proto",
  "polyclave-store",

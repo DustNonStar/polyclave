@@ -78,7 +78,14 @@ impl Store {
                     FOREIGN KEY(session_id,profile_id) REFERENCES hub_provider_threads(session_id,profile_id),
                     PRIMARY KEY(session_id,profile_id,message_id));")?;
             migration.pragma_update(None, "user_version", 3)?;
-        } else if version != 3 {
+        }
+        if version <= 3 {
+            migration.execute_batch("
+                CREATE TABLE hub_consumed_receipts(run_id TEXT NOT NULL REFERENCES runs(id),status TEXT NOT NULL,
+                    PRIMARY KEY(run_id,status));
+                ALTER TABLE admission_policies ADD COLUMN human_actors_json TEXT NOT NULL DEFAULT '[]';")?;
+            migration.pragma_update(None, "user_version", 4)?;
+        } else if version != 4 {
             return Err(Error::Invalid("unsupported database schema"));
         }
         migration.commit()?;
