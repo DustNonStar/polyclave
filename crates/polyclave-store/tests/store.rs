@@ -914,3 +914,56 @@ fn run_origin_snapshot_migrates_from_v9_keeps_the_first_snapshot_and_survives_re
     let store = Store::open(&path).unwrap();
     assert_eq!(store.run_origin_snapshot("run").unwrap(), Some(first));
 }
+
+#[test]
+fn mesh_concurrency_column_upgrades_an_existing_ledger_with_default_three() {
+    use polyclave_proto::MeshNodeStatus;
+    use polyclave_store::stage3::NewMeshNode;
+    let (dir, store) = fixture();
+    let path = dir.path().join("state.sqlite");
+    store
+        .upsert_mesh_node(NewMeshNode {
+            id: "node-a".into(),
+            name: "Node A".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            os_family: "linux".into(),
+            allowed_repos: vec!["repo".into()],
+            allowed_actions: vec!["worker_run".into()],
+            status: MeshNodeStatus::Online,
+        })
+        .unwrap();
+    drop(store);
+    // An install from before the cap has neither the column nor the table.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "DROP TABLE mesh_admissions;
+             ALTER TABLE mesh_nodes DROP COLUMN max_concurrent_runs;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let limit = store.mesh_node_limit("node-a").unwrap();
+    assert_eq!((limit.max_concurrent_runs, limit.active_runs), (3, 0));
+
+    // The owner's value persists across reopen; out-of-range values are refused.
+    assert!(matches!(
+        store.set_mesh_node_concurrency("node-a", 0),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.set_mesh_node_concurrency("node-a", 17),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.set_mesh_node_concurrency("node-missing", 2),
+        Err(Error::NotFound)
+    ));
+    store.set_mesh_node_concurrency("node-a", 16).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.mesh_node_limit("node-a").unwrap().max_concurrent_runs,
+        16
+    );
+}

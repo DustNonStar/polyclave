@@ -60,6 +60,7 @@ mod tests {
             PairedDeviceDto,
             MeshNodeStatus,
             MeshNodeDto,
+            MeshNodeLimitDto,
             NotificationChannelKind,
             NotificationChannelDto,
             CuaLockDto,

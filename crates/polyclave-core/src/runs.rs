@@ -20,6 +20,15 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// An extra condition on admitting a new Run, such as a per-node cap.
+pub trait AdmissionGuard: Send + Sync + 'static {
+    /// Read-only early refusal, before any mirror work is done.
+    fn check(&self, db: &Connection) -> Result<()>;
+    /// Runs inside the admission transaction after the Run row is written.
+    /// An error rolls the whole admission back.
+    fn admitted(&self, db: &Connection, run_id: &str) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub struct RunManager {
     pub store: Store,
@@ -79,6 +88,19 @@ impl RunManager {
 
     /// Returns the original Run when a client repeats the same admission key.
     pub fn accept(&self, request: RunRequest) -> Result<(RunDto, bool)> {
+        self.accept_guarded(request, None)
+    }
+
+    /// Like [`RunManager::accept`], with an extra admission check. A repeated
+    /// admission key returns the original Run before the guard is consulted.
+    /// For a new Run the guard is checked before the mirror baseline is made
+    /// and again inside the transaction that writes the Run, under the same
+    /// admission gate, so two concurrent admissions cannot both pass it.
+    pub fn accept_guarded(
+        &self,
+        request: RunRequest,
+        guard: Option<Arc<dyn AdmissionGuard>>,
+    ) -> Result<(RunDto, bool)> {
         let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
         if request.request_id.trim().is_empty()
             || request.request_id.len() > 256
@@ -114,6 +136,9 @@ impl RunManager {
                 return Err(Error::ConflictError);
             }
             return Ok((saved, false));
+        }
+        if let Some(guard) = &guard {
+            self.store.read(|db| guard.check(db))?;
         }
         let repo = canonical_real_path(&request.repo_cwd)
             .map_err(|_| Error::Invalid("repository is unavailable"))?;
@@ -169,6 +194,7 @@ impl RunManager {
                 params![id,ticket,request.hub_session_id,worker,request.request_id,repo_text,vendor,
                         request.model,request.instructions,path_text(&run_git.mirror)?,request.base_branch,run_git.base,stamp])?;
             insert_run_origin_snapshot(db,&id,&origin)?;
+            if let Some(guard)=&guard { guard.admitted(db,&id)?; }
             change(db,ChangeTopic::Ticket,&ticket,&ticket_state(db,&ticket)?)?;
             change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
             Ok((load_run(db,&id)?,true))

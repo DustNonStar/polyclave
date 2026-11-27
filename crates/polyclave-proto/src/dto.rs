@@ -484,6 +484,14 @@ pub struct MeshNodeDto {
     pub created_at: String,
 }
 
+/// Receiver-side concurrency cap for Runs one mesh node may have active here.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct MeshNodeLimitDto {
+    pub node_id: String,
+    pub max_concurrent_runs: u32,
+    pub active_runs: u32,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationChannelKind {

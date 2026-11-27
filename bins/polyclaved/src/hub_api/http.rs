@@ -111,6 +111,8 @@ pub fn router(hub: Hub) -> Router {
             axum::routing::get(mesh_nodes).post(upsert_mesh_node),
         )
         .route("/mesh/nodes/{id}/revoke", post(revoke_mesh_node))
+        .route("/mesh/limits", axum::routing::get(mesh_limits))
+        .route("/mesh/nodes/{id}/concurrency", post(set_mesh_concurrency))
         .route(
             "/notifications/channels",
             axum::routing::get(notification_channels).post(upsert_notification_channel),
@@ -778,6 +780,31 @@ async fn revoke_mesh_node(State(hub): State<Hub>, Path(id): Path<String>) -> Rep
     Ok(Json(json!(node)))
 }
 
+async fn mesh_limits(State(hub): State<Hub>) -> Reply {
+    let list = run_blocking(move || hub.store.mesh_node_limits().map_err(HttpError::from)).await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeshConcurrencyBody {
+    max_concurrent_runs: u32,
+}
+
+async fn set_mesh_concurrency(
+    State(hub): State<Hub>,
+    Path(id): Path<String>,
+    Json(body): Json<MeshConcurrencyBody>,
+) -> Reply {
+    let limit = run_blocking(move || {
+        hub.store
+            .set_mesh_node_concurrency(&id, body.max_concurrent_runs)
+            .map_err(HttpError::from)
+    })
+    .await?;
+    Ok(Json(json!(limit)))
+}
+
 async fn notification_channels(State(hub): State<Hub>) -> Reply {
     let list = run_blocking(move || {
         hub.store
@@ -1206,36 +1233,87 @@ async fn mesh_worker_run(
     };
     let model = req.model.clone().filter(|m| !m.trim().is_empty());
     let base_branch = req.base_branch_or_default().to_owned();
+    let node = node_id.clone();
     let admitted = run_blocking(move || {
-        let session = mesh_hub_session(&hub.store, repo_text).map_err(HttpError::from)?;
-        let request = RunRequest {
-            hub_session_id: session,
-            request_id,
-            vendor,
-            model,
-            repo_cwd: repo,
-            instructions: req.instructions,
-            base_branch,
-            ticket_id: None,
-        };
-        let (run, new) = hub.runs.accept(request).map_err(HttpError::from)?;
-        if !new {
-            return Ok(run);
-        }
-        let worker = hub
-            .runner
-            .schedule(&run.id, TurnMode::Start, run.instructions.clone())
-            .map_err(HttpError::from)?;
-        // The Worker thread finishes on its own and records its outcome in this
-        // node's ledger. No local Hub turn is woken: the primary polls `run_status`
-        // and keeps R1 verification of the result for itself.
-        drop(worker);
-        hub.runs.get(&run.id).map_err(HttpError::from)
+        Ok((move || {
+            let session = mesh_hub_session(&hub.store, repo_text)
+                .map_err(|e| MeshAdmission::Refused(HttpError::from(e)))?;
+            let request = RunRequest {
+                hub_session_id: session,
+                request_id,
+                vendor,
+                model,
+                repo_cwd: repo,
+                instructions: req.instructions,
+                base_branch,
+                ticket_id: None,
+            };
+            // At most N Runs from this node may be pending or running here; a resend
+            // of an admitted request_id still returns its Run, even at the limit.
+            let guard: Arc<dyn polyclave_core::runs::AdmissionGuard> =
+                Arc::new(MeshNodeCapacity(node));
+            let (run, new) = match hub.runs.accept_guarded(request, Some(guard)) {
+                Ok(admitted) => admitted,
+                Err(polyclave_store::Error::ConcurrencyLimit(limit)) => {
+                    return Err(MeshAdmission::AtLimit(limit))
+                }
+                Err(err) => return Err(MeshAdmission::Refused(HttpError::from(err))),
+            };
+            if !new {
+                return Ok(run);
+            }
+            let worker = hub
+                .runner
+                .schedule(&run.id, TurnMode::Start, run.instructions.clone())
+                .map_err(|e| MeshAdmission::Refused(HttpError::from(e)))?;
+            // The Worker thread finishes on its own and records its outcome in this
+            // node's ledger. No local Hub turn is woken: the primary polls `run_status`
+            // and keeps R1 verification of the result for itself.
+            drop(worker);
+            hub.runs
+                .get(&run.id)
+                .map_err(|e| MeshAdmission::Refused(HttpError::from(e)))
+        })())
     })
     .await;
     match admitted {
-        Ok(run) => remote_worker_result(node_id, run),
-        Err(err) => err.into_response(),
+        Ok(Ok(run)) => remote_worker_result(node_id, run),
+        Ok(Err(MeshAdmission::AtLimit(limit))) => mesh_at_limit(limit),
+        Ok(Err(MeshAdmission::Refused(err))) | Err(err) => err.into_response(),
+    }
+}
+
+/// Why a mesh admission was not made.
+enum MeshAdmission {
+    AtLimit(u32),
+    Refused(HttpError),
+}
+
+/// Retryable refusal: nothing was admitted or queued, so the sender may resend
+/// the same `request_id` once a slot frees.
+fn mesh_at_limit(limit: u32) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, "30")],
+        Json(json!({
+            "code": "mesh_concurrency_limit",
+            "message": "This node already has its maximum number of active mesh Runs; retry the same request_id later.",
+            "limit": limit,
+            "retryable": true,
+        })),
+    )
+        .into_response()
+}
+
+/// Per-node concurrency cap, checked and recorded inside the admission.
+struct MeshNodeCapacity(String);
+
+impl polyclave_core::runs::AdmissionGuard for MeshNodeCapacity {
+    fn check(&self, db: &rusqlite::Connection) -> polyclave_store::Result<()> {
+        polyclave_store::mesh_limits::check_mesh_capacity(db, &self.0)
+    }
+    fn admitted(&self, db: &rusqlite::Connection, run_id: &str) -> polyclave_store::Result<()> {
+        polyclave_store::mesh_limits::record_mesh_admission(db, &self.0, run_id)
     }
 }
 

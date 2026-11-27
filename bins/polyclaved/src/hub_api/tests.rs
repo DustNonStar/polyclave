@@ -2179,3 +2179,301 @@ async fn dispatch_remote_worker_run_without_request_id_is_refused_before_sending
     srv.abort();
     primary.close().await;
 }
+
+/// Waits until the Worker of `run_id` has finished on its own: no turn is still
+/// running and the Run left `pending`/`running`. Bounded by a timeout.
+async fn mesh_run_settled(hub: &Hub, run_id: &str) {
+    let wait = async {
+        loop {
+            let id = run_id.to_owned();
+            let busy: bool = hub
+                .store
+                .read(move |db| {
+                    Ok(db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running')
+                            OR EXISTS(SELECT 1 FROM runs WHERE id=?1 AND status IN ('pending','running'))",
+                        [&id],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            if !busy {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), wait)
+        .await
+        .expect("mesh Worker did not finish");
+}
+
+/// Sets a Run's status directly, after its Worker finished, to model a Run that
+/// still holds (`running`) or has released (`done`) its concurrency slot.
+fn force_run_status(hub: &Hub, run_id: &str, status: &'static str) {
+    let id = run_id.to_owned();
+    hub.store
+        .write(move |db| {
+            db.execute("UPDATE runs SET status=?2 WHERE id=?1", params![id, status])?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+struct MeshCapFixture {
+    _dir: tempfile::TempDir,
+    remote: Hub,
+    repo: String,
+    request: Box<dyn Fn(&str) -> Value + Send + Sync>,
+}
+
+async fn mesh_cap_fixture() -> MeshCapFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = mesh_worker_hub(dir.path()).await;
+    remote.set_mesh_key(b"0123456789abcdef0123456789abcdef".to_vec());
+    let repo = mesh_git_repo(&dir.path().join("repo"));
+    remote
+        .store
+        .upsert_mesh_node(mesh_node("node-win", "http://127.0.0.1:1".into(), &[&repo]))
+        .unwrap();
+    let token = remote
+        .mesh_policy()
+        .issue(polyclave_mesh::MeshScope {
+            node_id: "node-win".into(),
+            allowed_repos: vec![repo.clone()],
+            allowed_actions: vec!["worker_run".into()],
+            expires_at_epoch: polyclave_mesh::current_epoch_secs() + 600,
+        })
+        .unwrap();
+    let repo_for_request = repo.clone();
+    let request = Box::new(move |request_id: &str| {
+        let mut req = polyclave_mesh::RemoteDispatchRequest::new(
+            &repo_for_request,
+            "worker_run",
+            "Add a CHANGELOG entry.",
+            token.clone(),
+        );
+        req.request_id = Some(request_id.to_owned());
+        json!(req)
+    });
+    MeshCapFixture {
+        _dir: dir,
+        remote,
+        repo,
+        request,
+    }
+}
+
+/// Admits `request_id` and leaves its Run holding a slot (`running`).
+async fn admit_running(f: &MeshCapFixture, request_id: &str) -> String {
+    let (code, body) = post_mesh_dispatch(&f.remote, (f.request)(request_id)).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let run_id = body["run_id"].as_str().unwrap().to_owned();
+    mesh_run_settled(&f.remote, &run_id).await;
+    force_run_status(&f.remote, &run_id, "running");
+    run_id
+}
+
+#[tokio::test]
+async fn mesh_worker_run_refuses_a_fourth_concurrent_run_and_admits_after_a_slot_frees() {
+    let f = mesh_cap_fixture().await;
+    let limit = f.remote.store.mesh_node_limit("node-win").unwrap();
+    assert_eq!((limit.max_concurrent_runs, limit.active_runs), (3, 0));
+
+    let first = admit_running(&f, "req-cap-1").await;
+    admit_running(&f, "req-cap-2").await;
+    admit_running(&f, "req-cap-3").await;
+    assert_eq!(
+        f.remote
+            .store
+            .mesh_node_limit("node-win")
+            .unwrap()
+            .active_runs,
+        3
+    );
+
+    // A 4th concurrent Run is refused with a retryable 429 and nothing is admitted.
+    let (code, body) = post_mesh_dispatch(&f.remote, (f.request)("req-cap-4")).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "mesh_concurrency_limit");
+    assert_eq!(body["retryable"], true);
+    assert_eq!(body["limit"], 3);
+    assert_eq!(f.remote.runs.list().unwrap().len(), 3);
+
+    // A resend of an admitted request_id still returns its Run at the limit.
+    let (code, body) = post_mesh_dispatch(&f.remote, (f.request)("req-cap-1")).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["run_id"], first);
+    assert_eq!(f.remote.runs.list().unwrap().len(), 3);
+
+    // Runs that need review or were interrupted hold no Worker and no slot.
+    force_run_status(&f.remote, &first, "needs_review");
+    assert_eq!(
+        f.remote
+            .store
+            .mesh_node_limit("node-win")
+            .unwrap()
+            .active_runs,
+        2
+    );
+    force_run_status(&f.remote, &first, "running");
+
+    // When one finishes, the slot frees and the same request_id is admitted.
+    force_run_status(&f.remote, &first, "done");
+    let (code, body) = post_mesh_dispatch(&f.remote, (f.request)("req-cap-4")).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let fourth = body["run_id"].as_str().unwrap().to_owned();
+    assert_eq!(f.remote.runs.list().unwrap().len(), 4);
+    mesh_run_settled(&f.remote, &fourth).await;
+
+    // It is a concurrency cap, not a total: more Runs follow as slots free.
+    force_run_status(&f.remote, &fourth, "failed");
+    admit_running(&f, "req-cap-5").await;
+    assert_eq!(f.remote.runs.list().unwrap().len(), 5);
+
+    f.remote.close().await;
+}
+
+#[tokio::test]
+async fn mesh_worker_run_concurrent_admissions_cannot_both_take_the_last_slot() {
+    let f = mesh_cap_fixture().await;
+    admit_running(&f, "req-race-1").await;
+    admit_running(&f, "req-race-2").await;
+
+    let (a, b) = tokio::join!(
+        post_mesh_dispatch(&f.remote, (f.request)("req-race-a")),
+        post_mesh_dispatch(&f.remote, (f.request)("req-race-b")),
+    );
+    let mut codes = [a.0, b.0];
+    codes.sort();
+    assert_eq!(
+        codes,
+        [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS],
+        "{} / {}",
+        a.1,
+        b.1
+    );
+    assert_eq!(f.remote.runs.list().unwrap().len(), 3);
+    let winner = if a.0 == StatusCode::OK { &a.1 } else { &b.1 };
+    mesh_run_settled(&f.remote, winner["run_id"].as_str().unwrap()).await;
+
+    f.remote.close().await;
+}
+
+#[tokio::test]
+async fn mesh_concurrency_setting_persists_through_the_local_api_and_is_enforced() {
+    let f = mesh_cap_fixture().await;
+    let store = f.remote.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: f.remote.runs.clone(),
+            runner: f.remote.runner.clone(),
+            stream: f.remote.stream.clone(),
+            hub: Some(f.remote.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+    let call = |method: &str, uri: &str, body: Option<Value>, auth: bool| {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(axum::http::header::HOST, "127.0.0.1:4310")
+            .header(axum::http::header::CONTENT_TYPE, "application/json");
+        if auth {
+            req = req.header(axum::http::header::AUTHORIZATION, "Bearer cap-token");
+        }
+        req.body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
+            .unwrap()
+    };
+    let send = |req: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+
+    // The route is authenticated.
+    let (code, _) = send(call(
+        "POST",
+        "/api/mesh/nodes/node-win/concurrency",
+        Some(json!({"max_concurrent_runs": 1})),
+        false,
+    ))
+    .await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        store
+            .mesh_node_limit("node-win")
+            .unwrap()
+            .max_concurrent_runs,
+        3
+    );
+
+    // The default is 3; out-of-range values and unknown nodes are refused.
+    let (code, list) = send(call("GET", "/api/mesh/limits", None, true)).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        list,
+        json!([{"node_id": "node-win", "max_concurrent_runs": 3, "active_runs": 0}])
+    );
+    for bad in [0, 17] {
+        let (code, _) = send(call(
+            "POST",
+            "/api/mesh/nodes/node-win/concurrency",
+            Some(json!({"max_concurrent_runs": bad})),
+            true,
+        ))
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (code, _) = send(call(
+        "POST",
+        "/api/mesh/nodes/node-missing/concurrency",
+        Some(json!({"max_concurrent_runs": 2})),
+        true,
+    ))
+    .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+
+    let (code, body) = send(call(
+        "POST",
+        "/api/mesh/nodes/node-win/concurrency",
+        Some(json!({"max_concurrent_runs": 1})),
+        true,
+    ))
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["max_concurrent_runs"], 1);
+
+    // Re-registering the node keeps the owner's setting.
+    store
+        .upsert_mesh_node(mesh_node(
+            "node-win",
+            "http://127.0.0.1:1".into(),
+            &[&f.repo],
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .mesh_node_limit("node-win")
+            .unwrap()
+            .max_concurrent_runs,
+        1
+    );
+
+    // It is enforced: with 1 Run active, the next one is refused.
+    admit_running(&f, "req-set-1").await;
+    let (code, body) = post_mesh_dispatch(&f.remote, (f.request)("req-set-2")).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["limit"], 1);
+    assert_eq!(f.remote.runs.list().unwrap().len(), 1);
+
+    f.remote.close().await;
+}

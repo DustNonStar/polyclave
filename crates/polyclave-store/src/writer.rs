@@ -126,6 +126,9 @@ impl Store {
         } else if version != 10 {
             return Err(Error::Invalid("unsupported database schema"));
         }
+        // Additive upgrades that check the live schema instead of user_version,
+        // so they apply once to every v10 ledger, new or existing.
+        crate::mesh_limits::upgrade(&migration)?;
         migration.commit()?;
         let (tx, rx) = mpsc::sync_channel::<Job>(128);
         let thread = std::thread::Builder::new()

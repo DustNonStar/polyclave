@@ -83,6 +83,8 @@ export type MeshNodeStatus = "online" | "offline" | "revoked";
 
 export type MeshNodeDto = { id: string, name: string, endpoint: string, os_family: string, allowed_repos: Array<string>, allowed_actions: Array<string>, status: MeshNodeStatus, last_heartbeat_at: string | null, created_at: string, };
 
+export type MeshNodeLimitDto = { node_id: string, max_concurrent_runs: number, active_runs: number, };
+
 export type NotificationChannelKind = "ntfy" | "unified_push";
 
 export type NotificationChannelDto = { id: string, kind: NotificationChannelKind, label: string, endpoint: string, topic: string, enabled: boolean, created_at: string, };

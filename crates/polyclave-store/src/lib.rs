@@ -1,6 +1,7 @@
 //! SQLite is owned by this crate; mutation jobs are serialized on one writer.
 mod hub;
 mod memory;
+pub mod mesh_limits;
 mod publish;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
 pub use publish::{insert_run_origin_snapshot, OriginSnapshot};
@@ -24,6 +25,8 @@ pub enum Error {
     ConflictError,
     #[error("ticket budget is exhausted")]
     BudgetExceededError,
+    #[error("mesh node is at its concurrency limit of {0} Runs")]
+    ConcurrencyLimit(u32),
     #[error("entity not found")]
     NotFound,
     #[error("invalid request: {0}")]
