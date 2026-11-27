@@ -296,7 +296,7 @@ impl Hub {
                     HubCompletion {
                         text: reply.text,
                         reasoning: Some(reply.reasoning),
-                        metadata: Some(json!({"tool_calls":tool_log})),
+                        metadata: Some(json!({"tool_calls":tool_log,"usage":reply.usage})),
                         ..Default::default()
                     },
                 )
@@ -558,7 +558,9 @@ pub fn router(hub: Hub) -> Router {
         .route("/sessions/{id}/messages", post(enqueue).get(messages))
         .route("/sessions/{id}/tickets", post(ticket))
         .route("/sessions/{id}/manager", post(manager))
-        .route("/sessions/{id}/memory", post(memory))
+        .route("/sessions/{id}/repo-file", post(repo_file))
+        .route("/usage", axum::routing::get(usage))
+        .route("/sessions/{id}/memory", post(memory).get(memories))
         .with_state(hub)
 }
 
@@ -618,6 +620,12 @@ async fn manager(State(hub): State<Hub>, Path(id): Path<String>, Json(req): Json
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Memory {
+    DraftRun {
+        run_id: String,
+        kind: MemoryKind,
+        title: String,
+        content: String,
+    },
     Draft {
         message_id: i64,
         kind: MemoryKind,
@@ -637,8 +645,17 @@ enum Memory {
 }
 async fn memory(State(hub): State<Hub>, Path(id): Path<String>, Json(req): Json<Memory>) -> Web {
     let (_, repo, _) = hub.store.hub_scope(&id).map_err(store_status)?;
-    let c = MemoryCurator::for_host(hub.store, repo, Curator::User);
+    let c = MemoryCurator::for_host(hub.store.clone(), repo.clone(), Curator::User);
     let result = match req {
+        Memory::DraftRun {
+            run_id,
+            kind,
+            title,
+            content,
+        } => hub
+            .store
+            .draft_run_correction(&repo, &run_id, kind, &title, &content)
+            .map_err(|_| polyclave_hub::Error::Policy),
         Memory::Draft {
             message_id,
             kind,
@@ -694,5 +711,41 @@ async fn tickets(State(hub): State<Hub>) -> Web {
     Ok(Json(json!(hub
         .store
         .hub_tickets()
+        .map_err(store_status)?)))
+}
+
+async fn memories(State(hub): State<Hub>, Path(id): Path<String>) -> Web {
+    let (_, repo, _) = hub.store.hub_scope(&id).map_err(store_status)?;
+    Ok(Json(json!(hub
+        .store
+        .find_memory(MemoryFilter {
+            repo: Some(&repo),
+            limit: Some(50),
+            ..Default::default()
+        })
+        .map_err(store_status)?)))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileQuery {
+    path: String,
+}
+async fn repo_file(
+    State(hub): State<Hub>,
+    Path(id): Path<String>,
+    Json(query): Json<FileQuery>,
+) -> Web {
+    let (_, repo, _) = hub.store.hub_scope(&id).map_err(store_status)?;
+    let scope =
+        RepoScope::from_registered(FsPath::new(&repo)).map_err(|_| StatusCode::FORBIDDEN)?;
+    let text = scope
+        .read_repo_file(FsPath::new(&query.path), None, None)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    Ok(Json(json!({"text":text})))
+}
+async fn usage(State(hub): State<Hub>) -> Web {
+    Ok(Json(json!(hub
+        .store
+        .hub_local_usage()
         .map_err(store_status)?)))
 }

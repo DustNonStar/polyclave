@@ -50,9 +50,13 @@ pub fn router(app: App, auth: LocalAuth) -> Router {
         api
     };
     let api = api.layer(middleware::from_fn_with_state(auth, auth::require));
-    Router::new()
-        .nest("/api", api)
-        .route("/", get(|| async { "Polyclave local daemon" }))
+    let directory = std::env::var_os("POLYCLAVE_UI_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("apps/polyclave-app/ui/dist"));
+    Router::new().nest("/api",api).fallback_service(tower_http::set_header::SetResponseHeader::overriding(
+        tower_http::services::ServeDir::new(directory),axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+    ))
 }
 
 type Reply = std::result::Result<Json<Value>, HttpError>;

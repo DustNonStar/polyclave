@@ -569,3 +569,22 @@ impl Store {
         })
     }
 }
+impl Store {
+    pub fn hub_local_usage(&self) -> Result<Vec<Value>> {
+        self.read(|db|{
+            let mut q=db.prepare("SELECT CASE WHEN provider_label LIKE '%deepseek%' THEN 'DeepSeek'
+                    WHEN provider_label LIKE '%claude%' THEN 'Claude' ELSE 'Codex' END AS vendor,
+                sum(json_extract(metadata_json,'$.usage.total_tokens')),
+                sum(json_extract(metadata_json,'$.usage.cost')),
+                max(json_extract(metadata_json,'$.usage.prompt_tokens')),
+                count(*)
+                FROM messages WHERE metadata_json IS NOT NULL AND json_type(metadata_json,'$.usage')='object'
+                    AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day')
+                GROUP BY vendor")?;
+            let rows=q.query_map([],|r|Ok(json!({"vendor":r.get::<_,String>(0)?,
+                "tokens":r.get::<_,Option<i64>>(1)?,"cost":r.get::<_,Option<f64>>(2)?,"context":r.get::<_,Option<i64>>(3)?,
+                "turns":r.get::<_,i64>(4)? })))?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+}

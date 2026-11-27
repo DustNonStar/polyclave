@@ -222,3 +222,42 @@ fn publish_memory(db: &Connection, id: &str) -> Result<MemoryItemDto> {
     Store::append_change(db, ChangeTopic::Memory, id, &serde_json::to_value(&item)?)?;
     Ok(item)
 }
+
+impl Store {
+    pub fn draft_run_correction(
+        &self,
+        repo: &str,
+        run: &str,
+        kind: MemoryKind,
+        title: &str,
+        content: &str,
+    ) -> Result<MemoryItemDto> {
+        if !matches!(
+            kind,
+            MemoryKind::Constraint | MemoryKind::Preference | MemoryKind::Pitfall
+        ) || title.trim().is_empty()
+            || title.len() > 256
+            || content.trim().is_empty()
+            || content.len() > 4096
+        {
+            return Err(Error::Invalid("invalid correction draft"));
+        }
+        let (repo, run, title, content) = (
+            repo.to_owned(),
+            run.to_owned(),
+            title.to_owned(),
+            content.to_owned(),
+        );
+        self.write(move|db|{
+            use rusqlite::OptionalExtension;
+            let decision:Option<String>=db.query_row("SELECT resolution FROM runs WHERE id=?1 AND repo_cwd=?2
+                AND resolution IN ('fail','allow_retry')",params![run,repo],|r|r.get(0)).optional()?;
+            let Some(decision)=decision else{return Err(Error::NotFound);};
+            let id=new_id('m');
+            db.execute("INSERT INTO memory_items(id,scope,repo_cwd,kind,title,content,evidence_json,status,created_by,
+                source_run_id,created_at,updated_at) VALUES(?1,'project',?2,?3,?4,?5,?6,'candidate','user',?7,?8,?8)",
+                params![id,repo,enum_value(kind)?,title,content,json!({"run_id":run,"resolution":decision,"requires_user_confirmation":true}).to_string(),run,now(db)?])?;
+            publish_memory(db,&id)
+        })
+    }
+}

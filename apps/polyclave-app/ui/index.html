@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light"><title>Polyclave</title>
+  <link rel="stylesheet" href="/styles/tokens.css"><link rel="stylesheet" href="/styles/layout.css">
+</head>
+<body>
+  <canvas id="aurora" aria-hidden="true"></canvas><div id="afterglow" aria-hidden="true"></div>
+  <div id="app" class="workspace" data-pane="chat">
+    <header class="mobile-nav" aria-label="Workspace areas">
+      <button data-pane="work" type="button">Workspace</button><button data-pane="chat" type="button" aria-pressed="true">Hub</button><button data-pane="inspect" type="button">Inspect</button>
+    </header>
+    <aside class="navigation" aria-label="Workspace and agents">
+      <div class="brand"><span class="diamond" aria-hidden="true">◈</span><span>Polyclave<small>LOCAL WORKSPACE</small></span></div>
+      <div class="section-label"><span>PROJECTS &amp; SESSIONS</span><button id="register" type="button" title="Register a project" aria-label="Register a project">＋</button></div>
+      <nav id="sessions" aria-label="Sessions"></nav>
+      <div class="section-label">WORKER RUNS</div><div id="worker-runs"></div>
+      <footer class="workspace-actions"><button id="usage" type="button">Settings · Usage &amp; limits</button><button id="theme" type="button">Light theme</button></footer>
+    </aside>
+    <main class="conversation" aria-label="Conversation">
+      <header class="conversation-head"><div><p class="eyebrow">CANONICAL HUB</p><h1 id="title">Workspace Hub</h1></div><label>Provider <select id="provider" aria-label="Model provider"></select></label></header>
+      <div class="history-scroll" id="history-scroll"><div id="history" role="log" aria-label="Conversation messages"></div><div id="stream" aria-live="off"></div></div>
+      <footer class="compose-area">
+        <div class="pet-dock"><canvas id="pet-stage" aria-hidden="true"></canvas><span class="small-prism" aria-hidden="true">✦ ◈ ✦</span></div>
+        <form id="compose" class="composer">
+          <label class="sr" for="prompt">Message</label><textarea id="prompt" maxlength="16384" rows="2" placeholder="Ask the Hub, or describe the work you want…"></textarea>
+          <div class="toolbar"><div><button id="auto" type="button" aria-pressed="true">◆ Auto</button><button id="cancel" type="button" hidden>Stop turn</button></div>
+          <span class="vial-wrap" title="Context window"><canvas id="composer-vial" aria-hidden="true"></canvas><small>512K</small></span>
+          <button type="submit" class="send" aria-label="Send message">↑</button></div>
+        </form>
+      </footer>
+    </main>
+    <aside class="inspector" aria-label="Inspector">
+      <header><p class="eyebrow">PROJECT SIGNALS</p><h2>Inspector</h2></header>
+      <nav id="inspect-tabs" role="tablist" aria-label="Inspector tabs"></nav><div id="inspect" role="tabpanel" tabindex="0"></div>
+    </aside>
+    <footer class="statusbar"><span><i></i> <span id="connection" role="status">Connecting to local daemon</span></span><div id="quota" aria-label="Provider quotas"></div></footer>
+  </div>
+  <dialog id="modal"><div id="dialog-content"></div></dialog><div id="announcement" class="sr" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

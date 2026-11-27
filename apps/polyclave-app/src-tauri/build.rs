@@ -2,6 +2,14 @@ fn main() {
     #[cfg(any(target_os = "macos", windows))]
     {
         make_icon();
+        println!("cargo:rerun-if-changed=../ui/dist");
+        if std::path::Path::new("../ui/dist/index.html").is_file()
+            && std::env::var_os("TAURI_CONFIG").is_none()
+        {
+            let config = r#"{"build":{"frontendDist":"../ui/dist"}}"#;
+            std::env::set_var("TAURI_CONFIG", config);
+            println!("cargo:rustc-env=TAURI_CONFIG={config}");
+        }
         tauri_build::build();
     }
 }

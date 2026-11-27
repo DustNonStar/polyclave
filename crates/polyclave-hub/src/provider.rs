@@ -76,6 +76,7 @@ pub struct HubReply {
     pub text: String,
     pub reasoning: String,
     pub calls: Vec<ToolCall>,
+    pub usage: Option<Value>,
     pub native_thread: Option<String>,
 }
 

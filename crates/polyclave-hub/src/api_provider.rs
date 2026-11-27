@@ -265,6 +265,14 @@ impl Accumulated {
         if v.get("error").is_some() {
             return Err(Error::Transport);
         }
+        if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
+            self.reply.usage = Some(json!({
+                "total_tokens":usage["total_tokens"].as_u64(),
+                "prompt_tokens":usage["prompt_tokens"].as_u64(),
+                "completion_tokens":usage["completion_tokens"].as_u64(),
+                "cost":usage["cost"].as_f64().filter(|v|*v>=0.)
+            }));
+        }
         let choices = v["choices"].as_array().ok_or(Error::Protocol)?;
         if choices.is_empty() {
             return Ok(());
