@@ -41,7 +41,10 @@ function send(kind,text){for(const c of clients)c.write(makeEvent(kind,text));}
 const engines=[['chromium',chromium],...(process.env.POLYCLAVE_WEBKIT==='1'?[['webkit',webkit]]:[])];
 try{
  for(const [engine,type] of engines){
-  const browser=await type.launch(engine==='chromium'&&process.env.POLYCLAVE_CHROMIUM?{executablePath:process.env.POLYCLAVE_CHROMIUM}:{});
+  const {POLYCLAVE_CHROMIUM, POLYCLAVE_BROWSER_CHANNEL}=process.env;
+  const options=engine==='chromium'?
+    (POLYCLAVE_CHROMIUM?{executablePath:POLYCLAVE_CHROMIUM}:POLYCLAVE_BROWSER_CHANNEL==='chrome'?{channel:'chrome'}:{}):{};
+  const browser=await type.launch(options);
   try{
    for(const dims of [[1440,900],[375,812]]){
     const [width,height]=dims;

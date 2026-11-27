@@ -30,6 +30,11 @@ jobs:
       - name: Build local UI for the desktop shell
         working-directory: apps/polyclave-app/ui
         run: npm run build
+      - name: Offline UI browser checks
+        working-directory: apps/polyclave-app/ui
+        env:
+          POLYCLAVE_BROWSER_CHANNEL: chrome
+        run: npm run test:browser
       - name: Rust toolchain
         shell: bash
         run: |
@@ -49,18 +54,3 @@ jobs:
           git rev-parse --verify origin/main^{commit}
           git log --format=%H origin/main..HEAD >/dev/null
           scripts/privacy-scan.sh
-
-      - name: Install browser test runners
-        shell: bash
-        working-directory: apps/polyclave-app/ui
-        run: |
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            npx --no-install playwright install chromium webkit
-          else
-            npx --no-install playwright install chromium
-          fi
-      - name: Offline UI browser checks
-        working-directory: apps/polyclave-app/ui
-        env:
-          POLYCLAVE_WEBKIT: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
-        run: npm run test:browser
