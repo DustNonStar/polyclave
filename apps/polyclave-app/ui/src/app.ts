@@ -1,3 +1,4 @@
+import './motion/index.js';
 import { bootstrap,follow,native,request } from './api/sse.js';
 import type { Connection,Frame } from './api/sse.js';
 import type { MemoryItemDto,MessageDto,RunDto,SessionDto } from './generated/proto.js';
@@ -200,6 +201,13 @@ function settings():void{
   const canvas=el('canvas');canvas.id='settings-vial';usageRow.append(canvas);
   const chart=el('div','No recorded cost data','file-output');chart.id='cost-ledger';usageRow.append(chart);
   body.append(usageRow);
+  const motion=el('label','Motion');const intensity=el('select');
+  for(const value of ['off','subtle','standard','ultra'])intensity.add(new Option(value,value));
+  intensity.value=localStorage.getItem('pc-motion')??'standard';
+  intensity.addEventListener('change',()=>{localStorage.setItem('pc-motion',intensity.value);
+    document.dispatchEvent(new CustomEvent('pc-intensity',{detail:intensity.value}));});
+  motion.append(intensity);body.append(motion);
+
   const rt=native();const apiProfile=profiles.find(p=>p.kind==='openai_compat');
   if(rt&&apiProfile){
      const api=field('Replace provider key','','password');const status=el('small','Checking native keychain');
@@ -213,6 +221,8 @@ function settings():void{
   }
   open('Settings · Usage & limits',body);
   document.dispatchEvent(new Event('pc-settings'));
+  const observed=usage.reduce((n,item)=>Math.max(n,item.context??0),0);
+  document.dispatchEvent(new CustomEvent('pc-context',{detail:observed/512000}));
 }
 byId('usage').addEventListener('click',()=>{
   void host<ProviderUsage[]>('/api/usage').then(values=>{usage=values;renderQuotas();}).catch(()=>{}).finally(settings);
