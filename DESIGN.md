@@ -551,3 +551,16 @@ All glyphs are inline SVG, `viewBox="0 0 14 14"`, rendered at 14px (10px inside 
 - Focus rings follow each element's own radius (no radius override); the search field shows the silver edge on focus.
 - The waiting ring's dash is 2.88 + 2.88 so it repeats evenly round the circle with no seam.
 - Faint edges (composer, pills, running-arc track) are decorative; every control that relies on its edge alone also changes fill on hover and shows the focus ring.
+
+## v5 optical workspace (Phase 1B)
+
+This section governs the Rust/Tauri client. Earlier dark industrial and phone review notes above describe the archived Node UI. The pinned OpenPencil document is the source for the visual direction; all shipping styles, shaders, sprites and icons are original implementation.
+
+- **Layout:** 276 px navigation, a shrinkable chat pane, 432 px inspector and a 34 px shared status bar. Below 860 px, use three large Workspace, Hub and Inspect tabs and retain all inspector functions, with no horizontal scroll. Status is spoken through a live region; text is renderer-escaped by DOM construction.
+- **Palette:** Deep Obsidian uses `#0D0D10`, `#08080B`, `#141418` and `#23252F`. Daylight Crystal uses `#F4F7FB`, `#E8EEF6`, `#FFFFFF` and `#0F172A`. Keep active/review cues in narrow colored rails and low-alpha spill rather than bright borders. The prism composer uses a fine multicolor rim, software-driven caret and independent send control.
+- **Inspection and memory:** Topology starts with the Hub and its Worker runs; Review shows host evidence and accepts only the displayed SHA; Files uses the registered repository access boundary. Remember this rule opens a draft from a real user message or eligible Run decision and only the explicit confirmation promotes it. Versioning preserves superseded records.
+- **Usage:** 5-hour outer and weekly inner rings are independent fields. Provider quota and monetary fields are unavailable when not reported; do not replace missing observations with made-up percentages. Local token observations are not external subscriptions. Keep context occupancy distinct from quota.
+- **Motion:** One animation clock controls interactive bursts, approximately 30 fps steady state, and idle sleep. The WebGL2 aurora spans the full viewport; Canvas 2D and CSS provide fallbacks. Custom highlight rules set foreground colors with alpha at 16%, 38%, 62%, 84% and 100% (not the unsupported standalone opacity property on highlights). Reduced motion preserves plain streaming text and a static view. The 24-node vial and four original pixel pets subscribe to the same clock; Deepy has no feet.
+- **Boundaries:** The browser has only the authenticated loopback connection. No external fonts, scripts, SDKs, posters, analytics or provider fetches run in the renderer. Native credential status exposes only configuration state and a masked tail.
+
+The official DeepSeek API profile lists `deepseek-flash` first (its default) and `deepseek-v4-pro` second. This is not a global provider switch; existing selections and custom profiles stay independent.

@@ -12,11 +12,24 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+    timeout-minutes: 25
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Install UI development dependencies
+        working-directory: apps/polyclave-app/ui
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: UI tsc --noEmit
+        working-directory: apps/polyclave-app/ui
+        run: npm run typecheck
+      - name: Build local UI for the desktop shell
+        working-directory: apps/polyclave-app/ui
+        run: npm run build
       - name: Rust toolchain
         shell: bash
         run: |
@@ -36,3 +49,18 @@ jobs:
           git rev-parse --verify origin/main^{commit}
           git log --format=%H origin/main..HEAD >/dev/null
           scripts/privacy-scan.sh
+
+      - name: Install browser test runners
+        shell: bash
+        working-directory: apps/polyclave-app/ui
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            npx --no-install playwright install chromium webkit
+          else
+            npx --no-install playwright install chromium
+          fi
+      - name: Offline UI browser checks
+        working-directory: apps/polyclave-app/ui
+        env:
+          POLYCLAVE_WEBKIT: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
+        run: npm run test:browser

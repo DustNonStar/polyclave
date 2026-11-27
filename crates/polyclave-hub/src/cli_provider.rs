@@ -217,10 +217,10 @@ impl CliHubProvider {
         let reply = match result {
             Ok(reply) => reply,
             Err(e) => {
-                let reason = if matches!(e, Error::NotStarted) {
-                    "never_started"
-                } else {
-                    "exit"
+                let reason = match e {
+                    Error::NotStarted | Error::CancelledBeforeStart => "never_started",
+                    Error::Cancelled => "cancel",
+                    _ => "exit",
                 };
                 self.store
                     .hub_end_without_reply(claim.id, reason)
@@ -315,6 +315,7 @@ pub struct SupervisedCli {
     pub tmp: PathBuf,
     pub mcp_url: String,
     pub manager: bool,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 impl CliTransport for SupervisedCli {
     fn execute(
@@ -323,6 +324,10 @@ impl CliTransport for SupervisedCli {
         conversation: &Conversation,
         events: broadcast::Sender<ProviderEvent>,
     ) -> Result<HubReply> {
+        use std::sync::atomic::Ordering;
+        if self.stop.load(Ordering::Acquire) {
+            return Err(Error::CancelledBeforeStart);
+        }
         let url = reqwest::Url::parse(&self.mcp_url).map_err(|_| Error::NotStarted)?;
         if url.scheme() != "http"
             || url.host_str() != Some("127.0.0.1")
@@ -404,6 +409,11 @@ impl CliTransport for SupervisedCli {
             .hub_authorize(claim.id, Some((identity.pid, identity.started_at)))
             .map_err(|_| Error::NotStarted)?;
         let prompt = serde_json::to_vec(&conversation.history).map_err(|_| Error::NotStarted)?;
+        if self.stop.load(Ordering::Acquire) {
+            let _ = child.cancel();
+            let _ = child.wait();
+            return Err(Error::CancelledBeforeStart);
+        }
         child.go(&prompt).map_err(|_| Error::Transport)?;
         if let Some(mut stderr) = child.take_stderr() {
             std::thread::spawn(move || {
@@ -411,22 +421,40 @@ impl CliTransport for SupervisedCli {
             });
         }
         let mut output = child.take_stdout().ok_or(Error::Transport)?;
+        let (send, receive) = std::sync::mpsc::sync_channel(64);
+        std::thread::spawn(move || loop {
+            let mut line = String::new();
+            match (&mut output).take(1024 * 1024).read_line(&mut line) {
+                Ok(0) => break,
+                Ok(n) if n < 1024 * 1024 => {
+                    if send.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    let _ = send.send(Err(Error::Protocol));
+                    break;
+                }
+            }
+        });
         let mut result = HubReply::default();
         let mut done = false;
         let mut refused_thread = false;
         let mut saw_activity = false;
         let mut size = 0usize;
         loop {
-            let mut line = String::new();
-            let n = (&mut output)
-                .take(1024 * 1024)
-                .read_line(&mut line)
-                .map_err(|_| Error::Transport)?;
-            if n == 0 {
-                break;
+            if self.stop.load(Ordering::Acquire) {
+                let _ = child.cancel();
+                let _ = child.wait();
+                return Err(Error::Cancelled);
             }
-            size += n;
-            if size > 4 * 1024 * 1024 || n == 1024 * 1024 {
+            let line = match receive.recv_timeout(std::time::Duration::from_millis(25)) {
+                Ok(line) => line?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            size += line.len();
+            if size > 4 * 1024 * 1024 {
                 return Err(Error::Limit);
             }
             if line.contains(claim.turn_credential()) {

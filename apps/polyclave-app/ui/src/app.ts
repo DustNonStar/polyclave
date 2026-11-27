@@ -8,7 +8,7 @@ import { withFocusPreserved } from './state/focus.js';
 type Saved=Pick<MessageDto,'id'|'source'|'text'|'queued'>;
 type Profile={id:string;display_name:string;models:string[];kind:string};
 type Review={run:RunDto;commit:{files:string;commits:string}|null};
-type ProviderUsage={vendor:string;five_hour?:number;weekly?:number;cost?:number;context?:number;balance?:number};
+type ProviderUsage={vendor:string;five_hour?:number;weekly?:number;cost?:number;context?:number;balance?:number;tokens?:number;turns?:number;series?:number[]};
 type Inspector='Topology'|'Review'|'Files'|'Memory';
 const dialog=byId<HTMLDialogElement>('modal');
 const content=byId('dialog-content');
@@ -17,7 +17,7 @@ const current=new AbortController();
 let connection:Connection|null=null;
 let sessions:SessionDto[]=[];let runs:RunDto[]=[];let saved:Saved[]=[];let profiles:Profile[]=[];let usage:ProviderUsage[]=[];
 let selected:string|null=null;let activeRun:string|null=null;let panel:Inspector='Topology';
-let live='';let pendingSync=false;
+let live='';let pendingSync=false;let reviewing=false;
 const host=<T>(path:string,body?:unknown)=>connection?request<T>(connection,path,body):Promise.reject(Error('Connect to the local daemon first'));
 const sessionPath=()=>'/api/sessions/'+encodeURIComponent(selected??'');
 const tell=(message:string)=>{byId('announcement').textContent=message;byId('connection').textContent=message;};
@@ -68,7 +68,7 @@ function renderChat():void{
   const model=name?name.profile_id+'|'+name.provider_model:'';
   if(!select.matches(':focus')){
     select.replaceChildren(new Option('Choose model',''));
-    for(const p of profiles)for(const m of p.models)select.add(new Option(p.display_name+(m==='default'?'':' · '+m),p.id+'|'+m));
+    for(const p of profiles)for(const m of p.models)select.add(new Option(p.display_name+(m==='default'?'':' · '+m+(p.id==='deepseek-api'&&m==='deepseek-flash'?' (default)':'')),p.id+'|'+m));
     select.value=model;
   }
   const scrolling=byId('history-scroll');
@@ -94,6 +94,10 @@ async function sync():Promise<void>{
   selected??=sessions.find(s=>s.role==='hub')?.id??null;
   saved=selected?await host<Saved[]>(sessionPath()+'/messages'):[];
   updateSidebar();renderChat();await renderInspector();renderQuotas();
+  const nextReview=runs.some(r=>r.hub_session_id===selected&&r.status==='needs_review');
+  if(nextReview&&!reviewing){document.dispatchEvent(new Event('pc-review'));}
+  if(!nextReview&&reviewing){document.dispatchEvent(new Event('pc-idle'));}
+  reviewing=nextReview;
 }
 function queueSync():void{
   if(pendingSync)return;pendingSync=true;
@@ -105,8 +109,8 @@ async function frame(f:Frame):Promise<void>{
   if(f.event==='agent'){
     const e=f.data as {run_id:string;message:{kind:string;text?:string}};
     if(e.run_id!==selected)return;
-    if(e.message.kind==='text_delta'&&e.message.text){live+=e.message.text;byId('stream').textContent=live;document.dispatchEvent(new Event('pc-stream'));}
-    if(e.message.kind==='finished'){live='';byId('stream').textContent='';queueSync();document.dispatchEvent(new Event('pc-idle'));}
+    if(e.message.kind==='text_delta'&&e.message.text){byId('cancel').hidden=false;live+=e.message.text;byId('stream').textContent=live;document.dispatchEvent(new Event('pc-stream'));}
+    if(e.message.kind==='finished'){byId('cancel').hidden=true;live='';byId('stream').textContent='';queueSync();document.dispatchEvent(new Event('pc-idle'));}
   }
 }
 async function renderInspector():Promise<void>{
@@ -127,7 +131,7 @@ async function renderInspector():Promise<void>{
     for(const r of runs.filter(v=>v.hub_session_id===selected)){
       const item=card(r.vendor+' · '+r.id,r.instructions.slice(0,180),r.status);
       item.append(button('Review '+r.id,()=>{activeRun=r.id;panel='Review';void renderInspector().catch(problem);}));
-      list.append(item);
+      item.classList.add('dag-edge');list.append(item);
     }
   }else if(which==='Review'&&run){
     const result=await host<Review>('/api/runs/'+run.id).catch(()=>null);
@@ -187,6 +191,8 @@ function renderQuotas():void{
     const data=usage.find(v=>v.vendor.toLowerCase()===vendor.toLowerCase());
     const ring=el('span',undefined,'quota-ring');ring.dataset.vendor=vendor.toLowerCase();
     ring.title=data?(vendor+' · 5 hr '+(data.five_hour??'unknown')+' · weekly '+(data.weekly??'unknown')):vendor+' · quota data unavailable';
+    if(data?.five_hour!==undefined&&Number.isFinite(data.five_hour)){ring.style.setProperty('--five',String(Math.max(0,Math.min(100,data.five_hour)))+'%');ring.classList.add('has-five');}
+    if(data?.weekly!==undefined&&Number.isFinite(data.weekly)){ring.style.setProperty('--week',String(Math.max(0,Math.min(100,data.weekly)))+'%');ring.classList.add('has-week');}
     ring.setAttribute('aria-label',ring.title);ring.append(el('span',vendor.slice(0,1)));node.append(ring);
   }
 }
@@ -199,7 +205,26 @@ function settings():void{
   }
   const usageRow=card('512K Context','Context capacity is displayed separately from provider quota.');
   const canvas=el('canvas');canvas.id='settings-vial';usageRow.append(canvas);
-  const chart=el('div','No recorded cost data','file-output');chart.id='cost-ledger';usageRow.append(chart);
+  const chart=el('div',undefined,'cost-ledger');chart.id='cost-ledger';
+  const observed=usage.filter(u=>typeof u.tokens==='number');
+  if(observed.length===0)chart.append(el('p','No recorded usage data','section-detail'));
+  else {
+    const count=observed.reduce((n,u)=>n+(u.tokens??0),0);
+    chart.append(el('p',count.toLocaleString()+' reported tokens in the last 24 hours','section-detail'));
+    for(const u of observed){
+      const row=el('div',undefined,'ledger-row');row.append(el('span',u.vendor),el('strong',(u.tokens??0).toLocaleString()));
+      const meter=el('progress');meter.max=Math.max(1,count);meter.value=u.tokens??0;meter.setAttribute('aria-label',u.vendor+' local tokens');row.append(meter);chart.append(row);
+    }
+    const series=observed.flatMap(u=>u.series??[]);
+    if(series.length){
+      const bars=el('div',undefined,'cost-bars');const max=Math.max(...series,1);
+      for(const point of series.slice(-24)){
+        const bar=el('i');bar.style.setProperty('--amount',(100*point/max).toFixed(1)+'%');bar.title=point.toLocaleString()+' tokens';bars.append(bar);
+      }
+      chart.append(el('h3','24-hour activity'),bars);
+    }
+  }
+  usageRow.append(chart);
   body.append(usageRow);
   const motion=el('label','Motion');const intensity=el('select');
   for(const value of ['off','subtle','standard','ultra'])intensity.add(new Option(value,value));
@@ -221,8 +246,8 @@ function settings():void{
   }
   open('Settings · Usage & limits',body);
   document.dispatchEvent(new Event('pc-settings'));
-  const observed=usage.reduce((n,item)=>Math.max(n,item.context??0),0);
-  document.dispatchEvent(new CustomEvent('pc-context',{detail:observed/512000}));
+  const context=usage.reduce((n,item)=>Math.max(n,item.context??0),0);
+  document.dispatchEvent(new CustomEvent('pc-context',{detail:context/512000}));
 }
 byId('usage').addEventListener('click',()=>{
   void host<ProviderUsage[]>('/api/usage').then(values=>{usage=values;renderQuotas();}).catch(()=>{}).finally(settings);
@@ -242,9 +267,10 @@ byId('compose').addEventListener('submit',event=>{
   event.preventDefault();const user=byId<HTMLTextAreaElement>('prompt');const text=user.value.trim();if(!text||!selected)return;
   if(!connection){tell('Connect to the local daemon first');return;}
   void host(sessionPath()+'/messages',{request_id:crypto.randomUUID(),text}).then(()=>{
-    if(user.value.trim()===text)user.value='';document.dispatchEvent(new Event('pc-start'));queueSync();
+    if(user.value.trim()===text)user.value='';byId('cancel').hidden=false;document.dispatchEvent(new Event('pc-start'));queueSync();
   }).catch(problem);
 });
+byId('cancel').addEventListener('click',()=>{if(selected)void host(sessionPath()+'/cancel',{}).catch(problem);});
 byId('auto').addEventListener('click',()=>{const b=byId('auto');const automatic=b.getAttribute('aria-pressed')!=='true';b.setAttribute('aria-pressed',String(automatic));b.textContent=automatic?'◆ Auto':'◇ Manual';});
 function tokenDialog():void{
   const token=field('Local daemon token','','password');

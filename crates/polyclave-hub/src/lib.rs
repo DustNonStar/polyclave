@@ -14,6 +14,10 @@ pub enum Error {
     Credential,
     #[error("the provider thread is unavailable")]
     MissingThread,
+    #[error("the user stopped the Hub turn")]
+    Cancelled,
+    #[error("the user stopped the Hub turn before release")]
+    CancelledBeforeStart,
     #[error("the provider did not start")]
     NotStarted,
     #[error("provider could not complete the request")]

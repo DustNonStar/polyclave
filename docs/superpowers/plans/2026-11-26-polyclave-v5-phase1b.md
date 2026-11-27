@@ -15,7 +15,7 @@
 - **文件：** `crates/polyclave-hub/Cargo.toml`、`crates/polyclave-hub/src/lib.rs`、`crates/polyclave-hub/src/provider.rs`、`crates/polyclave-hub/src/api_provider.rs`
 - **核心实现：**
   - 从系统钥匙串读取绑定在固定 `provider_profiles.base_url` 的 API Key（严禁会话级改写 URL）。
-  - 支持 DeepSeek `deepseek-v4.1` 等 OpenAI-compat SSE 流式解析 `reasoning_content` 与原生 `tool_calls`，增量 delta 推入 `tokio::sync::broadcast`。
+  - 支持 DeepSeek `deepseek-flash`（默认）或 `deepseek-v4-pro` 等 OpenAI-compat SSE 流式解析 `reasoning_content` 与原生 `tool_calls`，增量 delta 推入 `tokio::sync::broadcast`。
   - 静态前缀拼装：`[系统角色指令 + <project_memory_brief> (≤2000 tokens)] → [rolling_summary] → [已固化历史轮次]`，末尾附动态 `Ticket / Run` 状态快照。
 - **提交信息：** `feat(hub): add HubModelProvider trait and ApiHubProvider streaming`
 

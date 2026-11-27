@@ -130,6 +130,13 @@ impl Store {
             if !matches!(role.as_str(),"hub"|"manager"){return Err(Error::ConflictError);}
             if db.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=?1 AND status='running' AND run_id IS NULL AND mode!='consult')",
                 [&session],|r|r.get::<_,bool>(0))?{return Err(Error::BusyError);}
+            // The persisted Run spans gaps between its correction turns.
+            // Do not release the user's queued continuation into that gap.
+            if role=="hub" && db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE hub_session_id=?1 AND status IN ('pending','running'))",
+                [&session],|r|r.get::<_,bool>(0))?{
+                return Ok(None);
+            }
             let input:Option<i64>=db.query_row("SELECT id FROM messages WHERE session_id=?1 AND source IN ('user','host') AND queued=1
                 AND turn_id IS NULL ORDER BY id LIMIT 1",[&session],|r|r.get(0)).optional()?;
             let Some(input)=input else{return Ok(None);};
@@ -524,10 +531,18 @@ impl Store {
             for (id,label,kind,base,account,models) in [
                 ("builtin-hub","Codex CLI","codex_cli",None,None,"[\"default\"]"),
                 ("claude-cli","Claude CLI","claude_cli",None,None,"[\"default\"]"),
-                ("deepseek-api","DeepSeek API","openai_compat",Some("https://api.deepseek.com"),Some("deepseek"),"[\"deepseek-v4.1\"]"),
+                ("deepseek-api","DeepSeek API","openai_compat",Some("https://api.deepseek.com"),Some("deepseek"),"[\"deepseek-flash\",\"deepseek-v4-pro\"]"),
             ] {
                 db.execute("INSERT OR IGNORE INTO provider_profiles(id,display_name,kind,base_url,keyring_account,models_json,created_at)
                     VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,label,kind,base,account,models,now(db)?])?;
+            }
+            let upgraded=db.execute("UPDATE provider_profiles SET models_json=?1
+                WHERE id='deepseek-api' AND kind='openai_compat' AND base_url='https://api.deepseek.com'
+                AND keyring_account='deepseek' AND models_json=?2",
+                ["[\"deepseek-flash\",\"deepseek-v4-pro\"]","[\"deepseek-v4.1\"]"])?;
+            if upgraded==1 {
+                db.execute("UPDATE sessions SET provider_model='deepseek-flash'
+                    WHERE profile_id='deepseek-api' AND provider_model='deepseek-v4.1'",[])?;
             }
             Ok(())
         })
@@ -586,5 +601,71 @@ impl Store {
                 "turns":r.get::<_,i64>(4)? })))?.collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         })
+    }
+}
+
+#[cfg(test)]
+mod provider_inventory_tests {
+    use super::*;
+    #[test]
+    fn stock_deepseek_prefers_flash_and_only_upgrades_the_unchanged_stock_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path().join("inventory.db")).unwrap();
+        store.builtin_profiles().unwrap();
+        let lookup = || {
+            store
+                .hub_profiles()
+                .unwrap()
+                .into_iter()
+                .find(|p| p["id"] == "deepseek-api")
+                .unwrap()
+        };
+        assert_eq!(
+            lookup()["models"],
+            json!(["deepseek-flash", "deepseek-v4-pro"])
+        );
+        store.write(|db|{
+            db.execute_batch("
+                UPDATE provider_profiles SET models_json='[\"deepseek-v4.1\"]' WHERE id='deepseek-api';
+                INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                    VALUES('fixture','Fixture','hub','project','deepseek-api','deepseek-v4.1','now');
+                INSERT INTO provider_profiles(id,display_name,kind,base_url,keyring_account,models_json,created_at)
+                    VALUES('custom','Custom','openai_compat','https://custom.example.invalid','fixture','[\"deepseek-v4.1\"]','now');
+            ")?;
+            Ok(())
+        }).unwrap();
+        store.builtin_profiles().unwrap();
+        store.builtin_profiles().unwrap();
+        assert_eq!(
+            lookup()["models"],
+            json!(["deepseek-flash", "deepseek-v4-pro"])
+        );
+        store
+            .read(|db| {
+                let chosen: String = db.query_row(
+                    "SELECT provider_model FROM sessions WHERE id='fixture'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let custom: String = db.query_row(
+                    "SELECT models_json FROM provider_profiles WHERE id='custom'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(chosen, "deepseek-flash");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&custom).unwrap(),
+                    json!(["deepseek-v4.1"])
+                );
+                Ok(())
+            })
+            .unwrap();
+        store.write(|db|{
+            db.execute("UPDATE provider_profiles SET base_url='https://custom.example.invalid',models_json='[\"deepseek-v4.1\"]'
+                WHERE id='deepseek-api'",[])?;
+            Ok(())
+        }).unwrap();
+        store.builtin_profiles().unwrap();
+        assert_eq!(lookup()["models"], json!(["deepseek-v4.1"]));
     }
 }

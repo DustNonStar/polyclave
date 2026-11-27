@@ -45,7 +45,7 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
 4. **主控会话本地主权原则（Canonical Hub Ledger）**（2026-11-26 用户决定）：
    - **主控会话（`role = hub`）永远留在本项目的 `polyclave.sqlite` 中**，作为项目开发进度、架构讨论、设计决策与上下文摘要的唯一权威真相源。
    - 主控会话允许切换两类模型驱动方式（实现统一的 `HubModelProvider` trait）：
-     - **原生 API 接入（如通过 DeepSeek API 调用 `deepseek-v4.1`）**：由 `polyclaved` 直接发起流式 HTTPS API 请求，保存思维链与工具调用记录。
+     - **原生 API 接入（如通过 DeepSeek API 调用 `deepseek-flash`（默认）或 `deepseek-v4-pro`）**：由 `polyclaved` 直接发起流式 HTTPS API 请求，保存思维链与工具调用记录。
      - **借用 `codex` 或 `claude` CLI 作为主控模型提供方（增量续接 + 双写归档）**：允许利用本地已登录的 Codex 或 Claude Code CLI 执行主控推理，在 `isolated-homes/<vendor>/` 下持久保留各家 CLI 的原生线程与记忆，通过 `hub_provider_threads` 表记录 `(session_id, profile_id, agent_thread_id, last_synced_msg_id)`：连续使用同一 CLI 时直接 `--resume` 仅发送增量消息（吃满原生记忆与 Prompt Cache）；跨模型/API 切回原 CLI 时继续 `--resume` 并只补齐其缺席期间的差量消息；同时**绝不让外部 Agent 独享主控状态**，每轮结束后把 CLI 的回复全文、推理摘要与调度意图完整双写归档回 `polyclave.sqlite` 的 `messages` 表（一旦外部 CLI 线程损坏或丢失，宿主随时基于 `rolling_summary` 与近期 `messages` 无损重建）。
 5. **中枢集中调度（信息流开放、控制流收口）**（2026-11-26 用户决定）：平时子智能体完成后，宿主核证结果并将交付摘要自动回传给主控会话，由主控会话在 `Ticket` 预算（`max_runs`）内决定下一步派谁（前序产物路径、SHA 与摘要通过 `context_refs` 传给后续智能体）；除 `council` 盲评阶段外不强制隔绝信息，但子智能体绝不相互私自派活。
 6. **主控升级为“主动值守的个人管家 Bot（Personal Superagent）” + 纯私有 Tailscale 触达**（2026-11-26 用户决定）：主控不仅是被动聊天框，而是具备统一事件收件箱（Event Triage Loop）、准入策略（`Admission Policy`）与 `Ticket / Mandate` 预算控制的主动大脑中枢；所有交互与通知严格限定在自研 Tauri 客户端与 Tailscale 私有网自托管开源通知渠道内，不依赖任何第三方聊天软件。
@@ -105,7 +105,7 @@ polyclave/
   - 交付 `polyclave-proto`、`polyclave-os`、`polyclave-store`（含 `memory_items` + FTS5 检索与 `hub_provider_threads` 表结构）、`polyclave-adapters`（Codex + Claude 每轮流式 Worker 适配 + 记忆 MCP 工具）、`polyclave-core`（宿主本地裸镜像、每仓库互斥锁、Worktree、R1 核证与崩溃恢复）、`polyclaved`（HTTP/SSE + 本机 Token 鉴权与浏览器 `#token=` 引导）；持久保留 `isolated-homes/<vendor>/` 原生记忆，清理 `<state-dir>/tmp/` 临时 MCP 令牌文件。
   - 同步更新 `scripts/privacy-scan.sh`（对 `Cargo.lock` 豁免 400 KB 体积上限，保留路径与密钥正则扫描）与开发协作文档命令；迁移并跑通 `legacy-node/tests/` 全部核心幂等、竞态、启动握手、Worktree/R1 核证与崩溃恢复不变量测试，以及 GitHub Actions `macos-latest` + `windows-latest` 双平台 CI（含 `polyclave-proto` `ts-rs` 导出一致性检验）；完成真实 CLI 探针门禁（`POLYCLAVE_REAL_CODEX=1`、`POLYCLAVE_REAL_CLAUDE=1`）后移除 `legacy-node/`。
 - **阶段 1B（主动管家主控引擎 + 常驻顾问 + Tauri v2 轻量 TS 桌面端）**：
-  - 交付 `polyclave-hub`（`ApiHubProvider` 支持 DeepSeek `deepseek-v4.1` 等 + `CliHubProvider` 基于 `hub_provider_threads` 增量续接回写 + 只读看仓工具 + `Admission / Ticket` 预算分诊循环 + `<project_memory_brief>` 注入与 `memory_commit` / `memory_supersede` 策展 + `manager` 常驻顾问会话）。
+  - 交付 `polyclave-hub`（`ApiHubProvider` 支持 DeepSeek `deepseek-flash`（默认）或 `deepseek-v4-pro` 等 + `CliHubProvider` 基于 `hub_provider_threads` 增量续接回写 + 只读看仓工具 + `Admission / Ticket` 预算分诊循环 + `<project_memory_brief>` 注入与 `memory_commit` / `memory_supersede` 策展 + `manager` 常驻顾问会话）。
   - 交付 `apps/polyclave-app`（Tauri v2 原生外壳 + 沿用 `DESIGN.md` 与 `Web Animations API` 动效的轻量 TS 界面，含跨项目与单项目「记忆 Memory」管理视图，启用 UI `tsc --noEmit` CI 门禁），并在无头浏览器（1440px 与 375px）完成全部 UI/交互与动画验证。
 
 ---
@@ -146,7 +146,7 @@ CREATE TABLE sessions (
   vendor          TEXT,                          -- manager/worker 对应厂商：'codex' | 'claude' | ...
   repo_cwd        TEXT NOT NULL,                 -- 默认关联仓库路径（worker 的文件写入严格限在 attempt worktree）
   profile_id      TEXT NOT NULL REFERENCES provider_profiles(id),
-  provider_model  TEXT NOT NULL,                 -- 例如 deepseek-v4.1 / gpt-5-codex / claude-sonnet-4
+  provider_model  TEXT NOT NULL,                 -- 例如 deepseek-flash / deepseek-v4-pro / gpt-5-codex / claude-sonnet-4
   rolling_summary TEXT NOT NULL DEFAULT '',      -- 本地滚动压缩摘要（供 API 模式及 CLI 线程重建时组装上下文）
   agent_thread_id TEXT,                          -- 用于 worker/manager 续接参考；hub 多提供方映射见 hub_provider_threads
   created_at      TEXT NOT NULL
@@ -169,7 +169,7 @@ CREATE TABLE messages (
   turn_id         INTEGER REFERENCES turns(id),
   source          TEXT NOT NULL CHECK (source IN ('user', 'agent', 'host')),
   client_kind     TEXT CHECK (client_kind IN ('desktop', 'web', 'ios', 'android', 'cli')),
-  provider_label  TEXT,                          -- 实际产出条目的提供方/模型，如 "deepseek-api/deepseek-v4.1"
+  provider_label  TEXT,                          -- 实际产出条目的提供方/模型，如 "deepseek-api/deepseek-flash"
   reasoning       TEXT,                          -- 模型思考过程（reasoning_content 或思考摘要）
   text            TEXT NOT NULL,
   metadata_json   TEXT,                          -- 工具调用摘要、Ticket/Run/SHA 卡片数据
@@ -385,7 +385,7 @@ CREATE TABLE change_log (
 
 #### `HubModelProvider` 双模接口与增量续接上下文拼装
 
-- **原生 API 模式（`ApiHubProvider`，首选默认）**：支持绑定在 `provider_profiles` 上的兼容端点（内置 DeepSeek `https://api.deepseek.com` / `deepseek-v4.1` 等），从系统钥匙串读 Key；流式解析 `reasoning_content` 与原生 Tool Call；上下文按 **`[系统角色指令 + <project_memory_brief>] → [rolling_summary] → [已固化历史轮次]`** 稳定前缀拼装，将动态 `Ticket / Run` 状态快照与本轮最新输入置于末尾。
+- **原生 API 模式（`ApiHubProvider`，首选默认）**：支持绑定在 `provider_profiles` 上的兼容端点（内置 DeepSeek `https://api.deepseek.com` / `deepseek-flash`（默认）或 `deepseek-v4-pro` 等），从系统钥匙串读 Key；流式解析 `reasoning_content` 与原生 Tool Call；上下文按 **`[系统角色指令 + <project_memory_brief>] → [rolling_summary] → [已固化历史轮次]`** 稳定前缀拼装，将动态 `Ticket / Run` 状态快照与本轮最新输入置于末尾。
 - **借用 CLI 模式（`CliHubProvider`，增量续接 + 双写归档）**：
   - 在 `<state-dir>/isolated-homes/<vendor>/` 持久保留各家 CLI 的会话历史与原生记忆，并通过 `hub_provider_threads` 表维护 `(session_id, profile_id, agent_thread_id, last_synced_msg_id)`：
     - **同提供方连续对话**：直接 `--resume <agent_thread_id>` 仅喂入上次之后的增量消息，保留原生记忆并最大化命中厂商 Prompt Cache；

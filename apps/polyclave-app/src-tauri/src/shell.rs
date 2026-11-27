@@ -1,4 +1,3 @@
-use crate::keyring::{key_status, save_key};
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::Value;
@@ -151,8 +150,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             local_connection,
-            key_status,
-            save_key
+            crate::keyring::key_status,
+            crate::keyring::save_key
         ])
         .setup(move |app| {
             let open = MenuItem::with_id(app, "open", "Open Polyclave", true, None::<&str>)?;

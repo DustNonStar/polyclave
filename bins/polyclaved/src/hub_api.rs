@@ -43,6 +43,7 @@ pub struct Hub {
     state: PathBuf,
     mcp: String,
     closed: Arc<AtomicBool>,
+    active: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
     stream: broadcast::Sender<(String, AgentEvent)>,
 }
 impl Hub {
@@ -66,6 +67,7 @@ impl Hub {
             state,
             mcp: format!("http://{addr}/mcp"),
             closed: Arc::new(AtomicBool::new(false)),
+            active: Default::default(),
             stream,
         };
         let app = Router::new()
@@ -119,17 +121,38 @@ impl Hub {
                     let _ = me.store.hub_end_without_reply(turn, "dispatch_closed");
                     break;
                 }
-                if let Err(error) = me.process(claim).await {
+                let stop = Arc::new(AtomicBool::new(false));
+                if let Ok(mut active) = me.active.lock() {
+                    active.insert(session.clone(), stop.clone());
+                }
+                let result = me.process(claim, stop).await;
+                if let Ok(mut active) = me.active.lock() {
+                    active.remove(&session);
+                }
+                if let Err(error) = result {
+                    use polyclave_hub::Error;
                     let not_started = matches!(
                         error,
-                        polyclave_hub::Error::NotStarted
-                            | polyclave_hub::Error::Profile
-                            | polyclave_hub::Error::Credential
+                        Error::NotStarted
+                            | Error::Profile
+                            | Error::Credential
+                            | Error::CancelledBeforeStart
                     );
-                    let _ = me.store.hub_end_without_reply(
-                        turn,
-                        if not_started { "never_started" } else { "exit" },
-                    );
+                    let cancelled = matches!(error, Error::Cancelled | Error::CancelledBeforeStart);
+                    let reason = if not_started {
+                        "never_started"
+                    } else if cancelled {
+                        "cancel"
+                    } else {
+                        "exit"
+                    };
+                    let _ = me.store.hub_end_without_reply(turn, reason);
+                    let _ = me
+                        .stream
+                        .send((session.clone(), AgentEvent::Finished { success: false }));
+                    if cancelled {
+                        break;
+                    }
                     // A persistent configuration failure cannot spin a durable queue.
                     if not_started {
                         break;
@@ -139,7 +162,7 @@ impl Hub {
         });
     }
 
-    async fn process(&self, claim: HubTurn) -> polyclave_hub::Result<()> {
+    async fn process(&self, claim: HubTurn, stop: Arc<AtomicBool>) -> polyclave_hub::Result<()> {
         use polyclave_hub::Error;
         let (role, _, kind) = self
             .store
@@ -200,6 +223,7 @@ impl Hub {
                 tmp: self.state.join("tmp"),
                 mcp_url: self.mcp.clone(),
                 manager: role == "manager",
+                stop: stop.clone(),
             };
             let p = Arc::new(CliHubProvider::new(self.store.clone(), Arc::new(transport)));
             let model = claim.model.clone();
@@ -255,16 +279,15 @@ impl Hub {
             let mut tool_log = vec![];
             let mut final_reply = None;
             for _ in 0..8 {
-                let reply = provider
-                    .complete(
-                        HubRequest {
-                            model: claim.model.clone(),
-                            messages: messages.clone(),
-                            tools: tools.clone(),
-                        },
-                        events.clone(),
-                    )
-                    .await?;
+                let request = HubRequest {
+                    model: claim.model.clone(),
+                    messages: messages.clone(),
+                    tools: tools.clone(),
+                };
+                let reply = tokio::select! {
+                    result=provider.complete(request,events.clone())=>result?,
+                    _=wait_stop(&stop)=>return Err(Error::Cancelled)
+                };
                 if reply.calls.is_empty() {
                     final_reply = Some(reply);
                     break;
@@ -556,6 +579,7 @@ pub fn router(hub: Hub) -> Router {
         .route("/profiles", axum::routing::get(profiles))
         .route("/sessions/{id}/profile", post(profile))
         .route("/sessions/{id}/messages", post(enqueue).get(messages))
+        .route("/sessions/{id}/cancel", post(cancel))
         .route("/sessions/{id}/tickets", post(ticket))
         .route("/sessions/{id}/manager", post(manager))
         .route("/sessions/{id}/repo-file", post(repo_file))
@@ -748,4 +772,19 @@ async fn usage(State(hub): State<Hub>) -> Web {
         .store
         .hub_local_usage()
         .map_err(store_status)?)))
+}
+
+async fn wait_stop(stop: &AtomicBool) {
+    while !stop.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+async fn cancel(State(hub): State<Hub>, Path(id): Path<String>) -> Web {
+    let active = hub
+        .active
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let flag = active.get(&id).ok_or(StatusCode::CONFLICT)?;
+    flag.store(true, Ordering::Release);
+    Ok(Json(json!({"accepted":true})))
 }
