@@ -629,3 +629,98 @@ fn scm_cursor_upserts_and_change_log_rejects_github_tokens() {
         assert!(matches!(rejected, Err(Error::Invalid(_))));
     }
 }
+
+#[test]
+fn stage3_pairing_revocation_mesh_and_notifications_are_durable() {
+    use polyclave_proto::{ClientKind, MeshNodeStatus, NotificationChannelKind};
+    use polyclave_store::stage3::{NewMeshNode, NewNotificationChannel};
+
+    let (_dir, store) = fixture();
+    let (ticket, secret) = store
+        .create_pairing_ticket(ClientKind::Ios, "Dust iPhone", 600)
+        .unwrap();
+    assert!(ticket.used_at.is_none());
+
+    // Exchange once succeeds; replay fails with ConflictError.
+    let (device, raw_token) = store
+        .exchange_pairing_ticket(&secret, Some("dust@tailnet".into()))
+        .unwrap();
+    assert!(matches!(
+        store.exchange_pairing_ticket(&secret, Some("dust@tailnet".into())),
+        Err(Error::ConflictError)
+    ));
+
+    // Dual-identity check: matching peer passes, mismatched peer fails.
+    assert!(store
+        .verify_device_token(&raw_token, Some("dust@tailnet"))
+        .unwrap()
+        .is_some());
+    assert!(store
+        .verify_device_token(&raw_token, Some("other@tailnet"))
+        .unwrap()
+        .is_none());
+
+    // Expired ticket is rejected.
+    let (exp_ticket, exp_secret) = store
+        .create_pairing_ticket(ClientKind::Android, "Expired Phone", 60)
+        .unwrap();
+    store
+        .write(move |db| {
+            db.execute(
+                "UPDATE pairing_tickets SET expires_at='2020-01-01T00:00:00.000Z' WHERE id=?1",
+                [&exp_ticket.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        store.exchange_pairing_ticket(&exp_secret, None),
+        Err(Error::ConflictError)
+    ));
+
+    // Instant revocation invalidates token and emits ChangeTopic::Device without secrets.
+    let revoked = store.revoke_paired_device(&device.id).unwrap();
+    assert!(revoked.revoked_at.is_some());
+    assert!(store
+        .verify_device_token(&raw_token, Some("dust@tailnet"))
+        .unwrap()
+        .is_none());
+
+    // Mesh node & notification channel CRUD.
+    let node = store
+        .upsert_mesh_node(NewMeshNode {
+            id: "node-win".into(),
+            name: "Win Workstation".into(),
+            endpoint: "http://100.64.0.12:4311".into(),
+            os_family: "windows".into(),
+            allowed_repos: vec!["/repo".into()],
+            allowed_actions: vec!["worker_run".into()],
+            status: MeshNodeStatus::Online,
+        })
+        .unwrap();
+    assert_eq!(store.list_mesh_nodes().unwrap().len(), 1);
+    let rev_node = store.revoke_mesh_node(&node.id).unwrap();
+    assert_eq!(rev_node.status, MeshNodeStatus::Revoked);
+    assert!(rev_node.allowed_actions.is_empty());
+
+    let ch = store
+        .upsert_notification_channel(NewNotificationChannel {
+            id: None,
+            kind: NotificationChannelKind::Ntfy,
+            label: "Private ntfy".into(),
+            endpoint: "http://127.0.0.1:8090".into(),
+            topic: "polyclave".into(),
+            enabled: true,
+        })
+        .unwrap();
+    assert_eq!(store.list_notification_channels().unwrap().len(), 1);
+    store.delete_notification_channel(&ch.id).unwrap();
+    assert!(store.list_notification_channels().unwrap().is_empty());
+
+    let Changes::Events(events) = store.changes(Some(0)).unwrap() else {
+        panic!("events");
+    };
+    let serialized = serde_json::to_string(&events).unwrap();
+    assert!(!serialized.contains(&secret));
+    assert!(!serialized.contains(&raw_token));
+}

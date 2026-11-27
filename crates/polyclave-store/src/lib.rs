@@ -3,6 +3,7 @@ mod hub;
 mod memory;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
 mod stage2;
+pub mod stage3;
 mod writer;
 
 pub use memory::{CandidateMemory, Curator, MemoryAction, MemoryFilter};
