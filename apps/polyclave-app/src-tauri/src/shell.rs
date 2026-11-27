@@ -9,10 +9,12 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use zeroize::Zeroizing;
