@@ -235,3 +235,79 @@ fn change_log_rejects_secret_fields_and_resyncs_at_pruned_or_future_cursor() {
     assert_eq!(events.first().unwrap().seq, 3);
     assert_eq!(events.last().unwrap().seq, 10_002);
 }
+
+#[test]
+fn fts_multi_word_nul_safety_tag_bounds_and_hub_receipt_edge_cases() {
+    let (_dir, store) = fixture();
+    store.builtin_profiles().unwrap();
+    store
+        .write(|db| {
+            db.execute("INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at) VALUES('s1','hub','hub','repo','builtin-hub','default','now')", [])?;
+            db.execute("INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at) VALUES('w1','worker','worker','repo','builtin-hub','default','now')", [])?;
+            db.execute("INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,runs_used,status,created_at,updated_at) VALUES('t1','s1','repo','title','{}','explicit_user',3,0,'active','now','now')", [])?;
+            db.execute("INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,vendor,instructions,repo_cwd,base_branch,base_sha,mirror_remote,status,current_attempt,max_attempts,created_at,updated_at) VALUES('r1','t1','s1','w1','req1','codex','do','repo','main','base','mirror','interrupted',1,3,'now','now')", [])?;
+            db.execute("INSERT INTO attempts(id,run_id,attempt_no,branch,worktree_path,status,created_at) VALUES(91,'r1',1,'b','wt','interrupted','now')", [])?;
+            db.execute("INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at) VALUES(91,'w1','r1',91,'start','running','authorized','h','b','tok','now')", [])?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Tag bounds
+    let too_many_tags = CandidateMemory {
+        kind: MemoryKind::Constraint,
+        title: "Title".into(),
+        content: "Body".into(),
+        tags: (0..33).map(|i| format!("t{i}")).collect(),
+    };
+    assert!(matches!(
+        store.propose_memory(91, too_many_tags),
+        Err(Error::Invalid(_))
+    ));
+
+    // FTS multi-word & embedded NUL safety
+    store
+        .write(|db| {
+            Store::record_run_memory(db, "r1", "repo", "alpha middle omega", Some("sha"))?;
+            Ok(())
+        })
+        .unwrap();
+    let found = store
+        .find_memory(MemoryFilter {
+            query: Some("alpha\0omega"),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(found.len(), 1);
+
+    // Wrong repo must not block active ticket
+    assert!(matches!(
+        store.hub_ticket_for_dispatch("s1", "t1", "other-repo"),
+        Err(Error::ConflictError)
+    ));
+    assert!(store.hub_ticket_for_dispatch("s1", "t1", "repo").is_ok());
+
+    // Retried attempts ending in same status still emit hub_worker_receipt,
+    // and never_started re-queues host receipts.
+    assert_eq!(
+        store.hub_worker_receipt("r1").unwrap().as_deref(),
+        Some("s1")
+    );
+    store
+        .write(|db| {
+            db.execute("UPDATE runs SET current_attempt=2 WHERE id='r1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store.hub_worker_receipt("r1").unwrap().as_deref(),
+        Some("s1")
+    );
+
+    let turn = store.hub_claim("s1", "h", "b").unwrap().unwrap();
+    assert_eq!(turn.input.source, "host");
+    store
+        .hub_end_without_reply(turn.id, "never_started")
+        .unwrap();
+    let reclaimed = store.hub_claim("s1", "h", "b").unwrap().unwrap();
+    assert_eq!(reclaimed.input.id, turn.input.id);
+}

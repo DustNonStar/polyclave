@@ -305,3 +305,14 @@ fn restart_does_not_replay_pending_run_or_clean_current_release_evidence() {
         1
     );
 }
+
+#[test]
+fn recovery_clears_zombie_running_run_without_running_turn() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let _work = rm.begin(&r.id, TurnMode::Start).unwrap();
+    assert_eq!(rm.get(&r.id).unwrap().status, RunStatus::Running);
+    assert_eq!(runner.recover().unwrap(), 0);
+    let recovered = rm.get(&r.id).unwrap();
+    assert_eq!(recovered.status, RunStatus::Interrupted);
+}

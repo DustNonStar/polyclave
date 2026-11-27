@@ -287,7 +287,7 @@ impl MirrorManager {
 
     /// Must run for submit, exit and Recovery (even without a receipt).
     pub fn reconcile(&self, a: &AttemptGit) -> BranchCheck {
-        self.with_repo(&a.run.repo, |repo| {
+        let staged = self.with_repo(&a.run.repo, |repo| {
             self.validate_run(&a.run, repo)?;
             validate_attempt(a)?;
             let stage = self.staging_path(a);
@@ -304,6 +304,18 @@ impl MirrorManager {
                 }
             }
             self.check_under_lock(a)
+        });
+        if let Ok(check) = staged {
+            return check;
+        }
+        self.with_repo(&a.run.repo, |repo| {
+            self.validate_run(&a.run, repo)?;
+            validate_attempt(a)?;
+            if self.ref_tip(&a.run.mirror, &a.full_ref())?.is_some() {
+                self.check_under_lock(a)
+            } else {
+                Ok(BranchCheck::Unreadable)
+            }
         })
         .unwrap_or(BranchCheck::Unreadable)
     }

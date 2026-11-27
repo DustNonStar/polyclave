@@ -21,19 +21,27 @@ impl Process {
     }
 
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
-        self.child
+        let status = self
+            .child
             .as_mut()
             .ok_or_else(|| io::Error::other("missing supervisor"))?
-            .try_wait()
-            .map(|s| s.map(exit_code))
+            .try_wait()?
+            .map(exit_code);
+        if status.is_some() {
+            self.child = None;
+        }
+        Ok(status)
     }
 
     pub(crate) fn wait(&mut self) -> io::Result<i32> {
-        self.child
+        let status = self
+            .child
             .as_mut()
             .ok_or_else(|| io::Error::other("missing supervisor"))?
             .wait()
-            .map(exit_code)
+            .map(exit_code)?;
+        self.child = None;
+        Ok(status)
     }
 
     pub(crate) fn reap_on_drop(&mut self) {
@@ -174,8 +182,11 @@ pub(crate) fn finish_parent_guard() -> io::Result<()> {
                         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
                     }
                 }
-                if group_members(group).is_ok_and(|p| p.is_empty()) {
-                    return Ok(());
+                for _ in 0..10 {
+                    if group_members(group).is_ok_and(|p| p.is_empty()) {
+                        return Ok(());
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(25));
                 }
                 signal_group(group, libc::SIGKILL)?;
                 std::thread::park();
@@ -189,10 +200,12 @@ pub(crate) fn finish_parent_guard() -> io::Result<()> {
 }
 
 fn group_members(group: i32) -> io::Result<Vec<i32>> {
-    let command = if cfg!(target_os = "macos") {
+    let command = if Path::new("/bin/ps").is_file() {
         "/bin/ps"
-    } else {
+    } else if Path::new("/usr/bin/ps").is_file() {
         "/usr/bin/ps"
+    } else {
+        "ps"
     };
     let output = Command::new(command)
         .env("LC_ALL", "C")
@@ -267,7 +280,7 @@ pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
         };
         if read <= 0 {
             return match io::Error::last_os_error().raw_os_error() {
-                Some(0 | libc::ESRCH | libc::ENOENT) => Ok(None),
+                Some(0 | libc::ESRCH | libc::ENOENT | libc::EPERM) => Ok(None),
                 _ => Err(io::Error::last_os_error()),
             };
         }

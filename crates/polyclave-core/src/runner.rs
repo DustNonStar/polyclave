@@ -126,6 +126,19 @@ impl TurnRunner {
             Ok(thread) => Ok(thread),
             Err(_) => {
                 jobs.remove(id);
+                let rid = id.to_owned();
+                let _ = self.runs.store.write(move |db| {
+                    let changed = db.execute(
+                        "UPDATE runs SET status='interrupted',detail='failed to spawn worker thread',updated_at=?2
+                         WHERE id=?1 AND status='running'
+                         AND NOT EXISTS (SELECT 1 FROM turns WHERE run_id=?1 AND status='running')",
+                        params![rid, now(db)?],
+                    )?;
+                    if changed > 0 {
+                        change(db, ChangeTopic::Run, &rid, &load_run(db, &rid)?)?;
+                    }
+                    Ok(())
+                });
                 Err(Error::Closed)
             }
         }
@@ -149,62 +162,98 @@ impl TurnRunner {
                 "Run: {}\nAttempt branch: {}\nOnly git push polyclave-staging {refspec}:{refspec}. Commit with Run-Id: {} in every commit, then use the host submit_result tool.\n\n{prompt}",
                 work.run.id,work.attempt.branch,work.run.id);
             let turn = self.prepare(&work, mode, &token)?;
-            let outcome = self.run_process(&work, turn, &token, input, cancel);
-            if let Some(detail) = outcome.detail {
-                let rid = work.run.id.clone();
-                self.runs.store.write(move |db| {
-                    change(
-                        db,
-                        ChangeTopic::Inbox,
-                        &rid,
-                        &serde_json::json!({"warning":detail}),
-                    )
-                })?;
-            }
-            let released = self.release_present(turn)?;
-            let end = if !released {
-                EndReason::NeverStarted
-            } else if outcome.cancelled {
-                EndReason::Cancel
-            } else if outcome.code.is_some_and(|code| code >= 0) {
-                EndReason::Exit
-            } else {
-                EndReason::HostLost
-            };
-            let writer = if released && end != EndReason::Exit && !hard_stop_excludes_writers() {
-                WriterCheck::Possible
-            } else {
-                WriterCheck::Excluded
-            };
-            if end == EndReason::Exit
-                && matches!(
-                    mode,
-                    TurnMode::Start | TurnMode::Retry | TurnMode::Correction
-                )
-            {
-                self.revoke(turn)?;
-                let verdict = self.runs.verdict(&work, writer)?;
-                let retryable =
-                    verdict.detail.as_deref() == Some(crate::classify::RETRYABLE_DETAIL);
-                if retryable && work.attempt.corrections < 2 && !cancel.load(Ordering::Acquire) {
-                    let id = work.attempt.id;
-                    let exit = outcome.code;
-                    self.runs.store.write(move |db|{
-                        let stamp=now(db)?;
-                        db.execute("UPDATE turns SET status=?2,end_reason='exit',writer_check='excluded',exit_code=?3,ended_at=?4 WHERE id=?1",
-                            params![turn,if exit==Some(0){"completed"}else{"failed"},exit,stamp])?;
-                        db.execute("UPDATE attempts SET corrections=corrections+1 WHERE id=?1",[id])?;
-                        change(db,ChangeTopic::Turn,&turn.to_string(),&load_turn(db,turn)?)?;
-                        change(db,ChangeTopic::Attempt,&id.to_string(),&load_attempt(db,id)?)
+            let step = (|| -> Result<Option<RunDto>> {
+                let outcome = self.run_process(&work, turn, &token, input, cancel);
+                if let Some(detail) = outcome.detail {
+                    let rid = work.run.id.clone();
+                    self.runs.store.write(move |db| {
+                        change(
+                            db,
+                            ChangeTopic::Inbox,
+                            &rid,
+                            &serde_json::json!({"warning":detail}),
+                        )
                     })?;
-                    self.remove_turn_files(turn)?;
-                    work = self.runs.old_work(&work.run.id, id)?;
+                }
+                let released = self.release_present(turn)?;
+                let end = if !released {
+                    EndReason::NeverStarted
+                } else if outcome.cancelled {
+                    EndReason::Cancel
+                } else if outcome.code.is_some_and(|code| code >= 0) {
+                    EndReason::Exit
+                } else {
+                    EndReason::HostLost
+                };
+                let writer = if released && end != EndReason::Exit && !hard_stop_excludes_writers()
+                {
+                    WriterCheck::Possible
+                } else {
+                    WriterCheck::Excluded
+                };
+                if end == EndReason::Exit
+                    && matches!(
+                        mode,
+                        TurnMode::Start | TurnMode::Retry | TurnMode::Correction
+                    )
+                {
+                    self.revoke(turn)?;
+                    let verdict = self.runs.verdict(&work, writer)?;
+                    let retryable =
+                        verdict.detail.as_deref() == Some(crate::classify::RETRYABLE_DETAIL);
+                    if retryable && work.attempt.corrections < 2 && !cancel.load(Ordering::Acquire)
+                    {
+                        let id = work.attempt.id;
+                        let exit = outcome.code;
+                        self.runs.store.write(move |db|{
+                            let stamp=now(db)?;
+                            db.execute("UPDATE turns SET status=?2,end_reason='exit',writer_check='excluded',exit_code=?3,ended_at=?4 WHERE id=?1",
+                                params![turn,if exit==Some(0){"completed"}else{"failed"},exit,stamp])?;
+                            db.execute("UPDATE attempts SET corrections=corrections+1 WHERE id=?1",[id])?;
+                            change(db,ChangeTopic::Turn,&turn.to_string(),&load_turn(db,turn)?)?;
+                            change(db,ChangeTopic::Attempt,&id.to_string(),&load_attempt(db,id)?)
+                        })?;
+                        self.remove_turn_files(turn)?;
+                        return Ok(None);
+                    }
+                }
+                self.finish(turn, Some(&work), end, writer, outcome.code)
+                    .map(Some)
+            })();
+            match step {
+                Ok(Some(run)) => return Ok(run),
+                Ok(None) => {
+                    work = self.runs.old_work(&work.run.id, work.attempt.id)?;
                     mode = TurnMode::Correction;
                     prompt="The host did not see a result. Finish the requested changes, push to your staging branch, and submit the exact commit.".into();
                     continue;
                 }
+                Err(err) => {
+                    let _ = self.revoke(turn);
+                    let rid = work.run.id.clone();
+                    let aid = work.attempt.id;
+                    let _ = self.runs.store.write(move |db| {
+                        let stamp = now(db)?;
+                        db.execute(
+                            "UPDATE turns SET status='interrupted',end_reason='host_lost',writer_check='excluded',mcp_revoked=1,ended_at=?2
+                             WHERE id=?1 AND status='running'",
+                            params![turn, stamp],
+                        )?;
+                        change(db, ChangeTopic::Turn, &turn.to_string(), &load_turn(db, turn)?)?;
+                        db.execute(
+                            "UPDATE attempts SET status='interrupted',ended_at=COALESCE(ended_at,?2) WHERE id=?1 AND status='running'",
+                            params![aid, stamp],
+                        )?;
+                        db.execute(
+                            "UPDATE runs SET status='interrupted',detail='host error during turn finalization',updated_at=?2
+                             WHERE id=?1 AND status='running'",
+                            params![rid, stamp],
+                        )?;
+                        change(db, ChangeTopic::Run, &rid, &load_run(db, &rid)?)
+                    });
+                    return Err(err);
+                }
             }
-            return self.finish(turn, Some(&work), end, writer, outcome.code);
         }
     }
 
@@ -292,14 +341,20 @@ impl TurnRunner {
         let (events, receiver) = std::sync::mpsc::sync_channel(256);
         let vendor = work.run.vendor;
         let secret = token.to_owned();
-        if let Some(mut stdout) = stdout {
-            std::thread::spawn(move || {
+        let reader_thread = if let Some(mut stdout) = stdout {
+            Some(std::thread::spawn(move || {
                 let mut text = String::new();
                 loop {
                     text.clear();
                     let read = (&mut stdout).take(1024 * 1024 + 1).read_line(&mut text);
-                    if !matches!(read, Ok(1..=1048576)) {
-                        break;
+                    match read {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) if n > 1024 * 1024 && !text.ends_with('\n') => {
+                            let mut byte = [0_u8; 1];
+                            while matches!(stdout.read(&mut byte), Ok(1)) && byte[0] != b'\n' {}
+                            continue;
+                        }
+                        Ok(_) => {}
                     }
                     if text.contains(&secret) {
                         continue;
@@ -314,10 +369,11 @@ impl TurnRunner {
                         }
                     }
                 }
-            });
+            }))
         } else {
             drop(events);
-        }
+            None
+        };
         if let Some(mut stderr) = stderr {
             // CLI diagnostics can contain credentials; do not log or persist them.
             std::thread::spawn(move || {
@@ -339,7 +395,10 @@ impl TurnRunner {
             }
             match wrapper.try_wait() {
                 Ok(Some(code)) => {
-                    while let Ok(ev) = receiver.recv_timeout(Duration::from_millis(15)) {
+                    if let Some(handle) = reader_thread {
+                        let _ = handle.join();
+                    }
+                    while let Ok(ev) = receiver.try_recv() {
                         self.emit(work, &secretless(ev, token));
                     }
                     return Exit {

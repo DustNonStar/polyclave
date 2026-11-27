@@ -333,3 +333,28 @@ fn body_only_trailers_empty_ranges_wrong_bases_and_unreadable_refs_never_certify
         }
     );
 }
+
+#[test]
+fn reconcile_preserves_mirror_on_damaged_stage() {
+    let (_tmp, repo, m) = fixture();
+    let run = m.admit(&repo, ID, "main").unwrap();
+    let a = AttemptGit { run, number: 1 };
+    let w = m.prepare_attempt(&a).unwrap();
+    let sha = commit(&w.cwd, "valid mirror commit", Some(ID));
+    push(&w.cwd, &a.full_ref());
+    assert_eq!(
+        m.reconcile(&a),
+        BranchCheck::Present {
+            tip: sha.clone(),
+            problem: None
+        }
+    );
+    std::fs::remove_dir_all(&w.staging).unwrap();
+    assert_eq!(
+        m.reconcile(&a),
+        BranchCheck::Present {
+            tip: sha,
+            problem: None
+        }
+    );
+}

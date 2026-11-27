@@ -357,14 +357,12 @@ fn end_without_reply(db: &Connection, turn: i64, reason: &str, recovered: bool) 
             params![turn,status,reason,now(db)?])?;
     }
     if matches!(reason, "never_started" | "dispatch_closed") {
-        let input: Option<i64> = db
-            .query_row(
-                "SELECT id FROM messages WHERE turn_id=?1 AND source='user'",
-                [turn],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = input {
+        let mut q =
+            db.prepare("SELECT id FROM messages WHERE turn_id=?1 AND source IN ('user','host')")?;
+        let ids = q
+            .query_map([turn], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in ids {
             db.execute(
                 "UPDATE messages SET queued=1,turn_id=NULL WHERE id=?1",
                 [id],
@@ -375,7 +373,7 @@ fn end_without_reply(db: &Connection, turn: i64, reason: &str, recovered: bool) 
         db.execute("INSERT OR IGNORE INTO hub_thread_ack(session_id,profile_id,message_id)
             SELECT t.session_id,p.profile_id,m.id FROM turns t JOIN hub_turn_profiles p ON p.turn_id=t.id
             JOIN hub_provider_threads h ON h.session_id=t.session_id AND h.profile_id=p.profile_id
-            JOIN messages m ON m.turn_id=t.id AND m.source='user' WHERE t.id=?1",[turn])?;
+            JOIN messages m ON m.turn_id=t.id AND m.source IN ('user','host') WHERE t.id=?1",[turn])?;
         db.execute("INSERT INTO messages(session_id,turn_id,source,text,metadata_json,created_at)
             SELECT session_id,id,'host','The prior conversation was interrupted.',?2,?3 FROM turns WHERE id=?1",
             params![turn,json!({"kind":"hub_interrupted"}).to_string(),now(db)?])?;
@@ -476,7 +474,10 @@ impl Store {
             if t.hub != hub || t.status != "active" {
                 return Ok(None);
             }
-            if t.repo != repo || t.used >= t.limit {
+            if t.repo != repo {
+                return Ok(None);
+            }
+            if t.used >= t.limit {
                 db.execute(
                     "UPDATE tickets SET status='blocked_on_user',updated_at=?2 WHERE id=?1",
                     params![ticket, now(db)?],
@@ -517,12 +518,13 @@ impl Store {
     pub fn hub_worker_receipt(&self, run: &str) -> Result<Option<String>> {
         let run = run.to_owned();
         self.write(move|db|{
-            let row:Option<(String,String,String,Option<String>)>=db.query_row(
-                "SELECT hub_session_id,ticket_id,status,result_sha FROM runs WHERE id=?1
+            let row:Option<(String,String,String,Option<String>,u32)>=db.query_row(
+                "SELECT hub_session_id,ticket_id,status,result_sha,current_attempt FROM runs WHERE id=?1
                  AND status IN ('done','failed','needs_review','interrupted')",
-                 [&run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-            let Some((hub,ticket,status,sha))=row else{return Ok(None);};
-            let changed=db.execute("INSERT OR IGNORE INTO hub_consumed_receipts(run_id,status) VALUES(?1,?2)",params![run,status])?;
+                 [&run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+            let Some((hub,ticket,status,sha,attempt))=row else{return Ok(None);};
+            let receipt_key=format!("{status}:a{attempt}");
+            let changed=db.execute("INSERT OR IGNORE INTO hub_consumed_receipts(run_id,status) VALUES(?1,?2)",params![run,receipt_key])?;
             if changed==0{return Ok(None);}
             let payload=json!({"kind":"worker_receipt","run_id":run,"ticket_id":ticket,"status":status,"sha":sha});
             db.execute("INSERT INTO messages(session_id,source,text,metadata_json,created_at,queued)

@@ -93,10 +93,21 @@ impl Drop for Supervised {
 pub fn spawn_supervised(spec: &SpawnSpec) -> io::Result<Supervised> {
     let handle = platform::spawn(spec)?;
     let mut process = handle.process;
+    let mut control = Some(handle.control);
     let result = (|| {
         let mut output = BufReader::new(handle.stdout);
-        let mut ready = String::new();
-        (&mut output).take(2048).read_line(&mut ready)?;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("supervisor-ready".into())
+            .spawn(move || {
+                let mut ready = String::new();
+                let res = (&mut output).take(2048).read_line(&mut ready);
+                let _ = tx.send((output, ready, res));
+            })?;
+        let (output, ready, read_res) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "supervisor ready timed out"))?;
+        read_res?;
         let ready = ready.trim_end_matches(['\r', '\n']);
         let ready = ready.strip_prefix("ready\t").ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid supervisor ready")
@@ -115,14 +126,15 @@ pub fn spawn_supervised(spec: &SpawnSpec) -> io::Result<Supervised> {
     let (output, identity) = match result {
         Ok(v) => v,
         Err(error) => {
-            drop(handle.control);
+            control.take();
+            let _ = process.cancel();
             process.reap_on_drop();
             return Err(error);
         }
     };
     Ok(Supervised {
         process,
-        control: Some(handle.control),
+        control,
         output: Some(output),
         stderr: Some(handle.stderr),
         identity,

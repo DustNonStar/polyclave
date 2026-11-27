@@ -74,7 +74,12 @@ impl Process {
         ok(unsafe { GetExitCodeProcess(raw(&self.child), &mut code) })?;
         // No background descendant should outlive the authorized turn.
         self.job.take();
-        Ok(code as i32)
+        let exit = if code >= 0x8000_0000 {
+            (code & 0x7fff_ffff).max(1) as i32
+        } else {
+            code as i32
+        };
+        Ok(exit)
     }
 
     pub(crate) fn reap_on_drop(&mut self) {
@@ -283,7 +288,14 @@ pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid)
     }) {
         Ok(handle) => handle,
-        Err(e) if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => return Ok(None),
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(x) if x == ERROR_INVALID_PARAMETER as i32 || x == ERROR_ACCESS_DENIED as i32
+            ) =>
+        {
+            return Ok(None)
+        }
         Err(e) => return Err(e),
     };
     if unsafe { WaitForSingleObject(raw(&handle), 0) } == WAIT_SIGNALED {

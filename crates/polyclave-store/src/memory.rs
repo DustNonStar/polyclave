@@ -52,6 +52,8 @@ impl Store {
             || input.content.trim().is_empty()
             || input.content.len() > 16_384
             || input.title.len() > 256
+            || input.tags.len() > 32
+            || input.tags.iter().any(|t| t.len() > 64)
         {
             return Err(Error::Invalid("invalid memory content"));
         }
@@ -95,11 +97,23 @@ impl Store {
     }
 
     pub fn find_memory(&self, filter: MemoryFilter<'_>) -> Result<Vec<MemoryItemDto>> {
-        let query = filter.query.map(|q| q.trim()).filter(|q| !q.is_empty());
-        if query.is_some_and(|q| q.len() > 2048) {
+        let clean = filter
+            .query
+            .map(|q| q.replace('\0', " "))
+            .unwrap_or_default();
+        let query = clean.trim();
+        if query.len() > 2048 {
             return Err(Error::Invalid("memory query too long"));
         }
-        let query = query.map(|q| format!("\"{}\"", q.replace('"', "\"\"")));
+        let query = (!query.is_empty())
+            .then(|| {
+                query
+                    .split_whitespace()
+                    .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|q| !q.is_empty());
         let kinds = serde_json::to_string(filter.kinds)?;
         let scope = filter.scope.map(enum_value).transpose()?;
         let limit = filter.limit.unwrap_or(20).clamp(1, 100) as u32;

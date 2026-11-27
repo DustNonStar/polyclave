@@ -227,6 +227,18 @@ impl RunManager {
                 staging: self.git.staging_path(&git),
                 branch: attempt.branch.clone(),
             };
+            let rid = run.id.clone();
+            let run = self.store.write(move |db| {
+                let changed = db.execute(
+                    "UPDATE runs SET status='running',updated_at=?2 WHERE id=?1 AND status!='running'",
+                    params![rid, now(db)?],
+                )?;
+                let updated = load_run(db, &rid)?;
+                if changed > 0 {
+                    change(db, ChangeTopic::Run, &rid, &updated)?;
+                }
+                Ok(updated)
+            })?;
             return Ok(RunWork {
                 run,
                 attempt,
@@ -317,6 +329,16 @@ impl RunManager {
         if !matches!(run.status, RunStatus::NeedsReview | RunStatus::Interrupted) {
             return Err(Error::ConflictError);
         }
+        let busy = self.store.read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running')",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })?;
+        if busy {
+            return Err(Error::BusyError);
+        }
         let a = self.attempt_git(&run, run.current_attempt)?;
         let tip = match decision {
             Resolution::Accept => match self.git.reconcile(&a) {
@@ -337,20 +359,26 @@ impl RunManager {
             if db.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running')",[&id],|r|r.get::<_,bool>(0))? {
                 return Err(Error::BusyError);
             }
-            let (status,resolution,source)=match decision {
-                Resolution::Accept=>("done","accept",Some("user")),
-                Resolution::Fail=>("failed","fail",None),
+            let (status,resolution,source,accepted_id)=match decision {
+                Resolution::Accept=>{
+                    if let Some(a)=&attempt {
+                        db.execute("UPDATE attempts SET status='completed',ended_at=COALESCE(ended_at,?2) WHERE id=?1",params![a.id,stamp])?;
+                        change(db,ChangeTopic::Attempt,&a.id.to_string(),&load_attempt(db,a.id)?)?;
+                    }
+                    ("done","accept",Some("user"),attempt.as_ref().map(|a|a.id))
+                }
+                Resolution::Fail=>("failed","fail",None,None),
                 Resolution::AllowRetry=>{
                     if r.current_attempt>=r.max_attempts{return Err(Error::BudgetExceededError);}
                     if let Some(a)=&attempt {
                         db.execute("UPDATE attempts SET status='superseded',ended_at=COALESCE(ended_at,?2) WHERE id=?1",params![a.id,stamp])?;
                         change(db,ChangeTopic::Attempt,&a.id.to_string(),&load_attempt(db,a.id)?)?;
                     }
-                    ("interrupted","allow_retry",None)
+                    ("interrupted","allow_retry",None,None)
                 }
             };
-            db.execute("UPDATE runs SET status=?2,result_sha=?3,result_source=?4,resolution=?5,detail=NULL,updated_at=?6 WHERE id=?1",
-                params![id,status,tip,source,resolution,stamp])?;
+            db.execute("UPDATE runs SET status=?2,result_sha=?3,result_source=?4,resolution=?5,accepted_attempt_id=COALESCE(?6,accepted_attempt_id),detail=NULL,updated_at=?7 WHERE id=?1",
+                params![id,status,tip,source,resolution,accepted_id,stamp])?;
             Store::record_run_memory(db,&id,&r.repo_cwd,&note,tip.as_deref())?;
             let result=load_run(db,&id)?;
             change(db,ChangeTopic::Run,&id,&result)?;

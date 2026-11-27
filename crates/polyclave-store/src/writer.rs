@@ -164,34 +164,34 @@ impl Store {
 
     pub fn changes(&self, since: Option<i64>) -> Result<Changes> {
         self.read(|db| {
-            let mut stmt = db.prepare(
-                "SELECT seq,topic,entity_id,payload_json,created_at,
-                 MIN(seq) OVER(), MAX(seq) OVER() FROM change_log ORDER BY seq",
-            )?;
-            let mut rows = stmt.query([])?;
-            let mut all = Vec::new();
-            let mut bounds = None;
-            while let Some(r) = rows.next()? {
-                let seq = r.get::<_, i64>(0)?;
-                let (min, max) = (r.get::<_, i64>(5)?, r.get::<_, i64>(6)?);
-                if bounds.is_none() {
-                    bounds = Some((min, max));
-                    if since.is_some_and(|s| s < min - 1 || s > max) {
-                        return Ok(Changes::ResyncRequired);
-                    }
-                }
-                if since.is_none_or(|s| seq > s) {
-                    all.push(SseEnvelope {
-                        seq,
-                        topic: crate::decode_enum(&r.get::<_, String>(1)?)?,
-                        entity_id: r.get(2)?,
-                        payload: crate::parse_json(r.get(3)?, 3)?,
-                        created_at: r.get(4)?,
-                    });
-                }
-            }
-            if bounds.is_none() && since.is_some_and(|s| s != 0) {
+            let (min, max): (Option<i64>, Option<i64>) =
+                db.query_row("SELECT MIN(seq), MAX(seq) FROM change_log", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?;
+            let (Some(min), Some(max)) = (min, max) else {
+                return Ok(if since.is_some_and(|s| s != 0) {
+                    Changes::ResyncRequired
+                } else {
+                    Changes::Events(Vec::new())
+                });
+            };
+            if since.is_some_and(|s| s < min - 1 || s > max) {
                 return Ok(Changes::ResyncRequired);
+            }
+            let mut stmt = db.prepare(
+                "SELECT seq,topic,entity_id,payload_json,created_at
+                 FROM change_log WHERE seq > ?1 ORDER BY seq",
+            )?;
+            let mut rows = stmt.query([since.unwrap_or(0)])?;
+            let mut all = Vec::new();
+            while let Some(r) = rows.next()? {
+                all.push(SseEnvelope {
+                    seq: r.get(0)?,
+                    topic: crate::decode_enum(&r.get::<_, String>(1)?)?,
+                    entity_id: r.get(2)?,
+                    payload: crate::parse_json(r.get(3)?, 3)?,
+                    created_at: r.get(4)?,
+                });
             }
             Ok(Changes::Events(all))
         })
