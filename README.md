@@ -1,71 +1,149 @@
 # Polyclave
 
-A local host that runs coding agents from several vendors (Codex first; Claude, Antigravity and DeepSeek Harness later) as sessions it owns: it starts and resumes them, collects their results through its own MCP tool, records everything in SQLite, and after a crash can say what finished, what can be retried, and what needs a human look. You talk to it from a local web page (later from phones over Tailscale).
+Polyclave is a local daemon that runs coding agents from several vendors and checks their work itself. A Hub session (the manager you talk to) plans the work and hands coding tasks to Worker Runs. A Worker can be Codex, Claude Code, Antigravity (`agy`) or DeepSeek Harness (`dsh`). Polyclave does not take an agent's word that a task is done. A Run is `done` only when the host's own Git mirror agrees with the agent's signed receipt.
 
-**Status:** Phase 1 implemented (local Codex host, SQLite store, crash recovery, HTTP/SSE API, and local web UI).
+This is v5: a Rust daemon (`polyclaved`), a Tauri v2 desktop shell, and a TypeScript UI. The Node v4 prototype was removed from the tree in `01c8645`; see the last entry of `HANDOFF.md` for what that removal does and does not prove.
 
-## Starting the host
+The governing design is `docs/superpowers/specs/2026-11-26-polyclave-v5-rust-design.md`.
 
-The Polyclave host requires macOS, Node.js 26.x, pnpm, `git`, and the signed-in `codex` CLI on `PATH`. CI runs on macOS with Node.js 26.x only.
+## Layout
 
-```sh
-pnpm install
-pnpm start
-```
+| Path | What it is |
+|---|---|
+| `bins/polyclaved` | The daemon: HTTP and SSE API on `127.0.0.1`, host MCP server, Hub, PR gate, mesh routes |
+| `crates/polyclave-proto` | Shared data types; exports `apps/polyclave-app/ui/src/generated/proto.ts` |
+| `crates/polyclave-os` | Process supervision, locks and private files on macOS and Windows |
+| `crates/polyclave-store` | The SQLite (WAL) store, FTS5 memory, change log |
+| `crates/polyclave-adapters` | Worker adapters for `codex`, `claude`, `agy`, `dsh`, and the host MCP server |
+| `crates/polyclave-core` | Mirrors, Attempt worktrees, Run classification, turn runner, recovery |
+| `crates/polyclave-hub` | Hub providers (API and CLI), council, PR gate, SCM observer, triage, memory curation, evolution |
+| `crates/polyclave-mesh` | Deny-by-default mesh dispatch between machines |
+| `apps/polyclave-app/src-tauri` | Tauri v2 desktop shell (tray, keychain, starts the daemon) |
+| `apps/polyclave-app/ui` | The page, in TypeScript, served by the daemon from `ui/dist` |
 
-Open the URL printed on stdout (default `http://127.0.0.1:4310`). Target repositories for runs must be git work trees whose `origin` remote configures `receive.denyDeletes=true` and `receive.denyNonFastForwards=true`.
+## Build and run
 
-### Flags
+You need Rust stable, Node.js 26 (for the UI build, as in CI), and `git`. Worker and CLI Hub runs also need the vendor CLI on `PATH` and signed in: `codex`, `claude`, `agy` or `dsh`.
 
-`node src/main.ts` (or `pnpm start -- ...`) accepts:
-
-- `--state-dir <dir>` — directory holding host state (default `~/.polyclave`). Only one live host process can own a state directory at a time.
-- `--port <n>` — loopback port to bind on `127.0.0.1` (default `4310`; pass `0` for an ephemeral port).
-- `--codex <cmd...>` — command used to invoke Codex (default `codex`).
-
-## State directory layout
-
-Under `--state-dir` (for example `~/.polyclave`):
-
-- `polyclave.sqlite` — SQLite (WAL) database of sessions, turns, messages, runs, accepted/rejected `submit_result` records, and raw agent JSONL events.
-- `host.pid` — lock file containing `{ pid, startedAt, instanceId }`; prevents a second host from starting on the same state directory.
-- `codex-home/` — isolated `CODEX_HOME` (`0700`) created by the host with symlinks only to your user `~/.codex/auth.json` and `~/.codex/skills` (never user `config.toml` or MCP servers), so agent turns only reach the host's own MCP server (`host`).
-- `worktrees/` — isolated per-run git worktrees (`worktrees/<runId>` on branch `agent/<runId>`).
-
-## Status meanings
-
-- **`frozen` (Session locked)** — An agent turn ended abnormally (`cancel`, `timeout`, `error`, or host crash/loss) while an agent process may still have been writing. Dispatch on that session stops; new runs return `409`, and chat messages wait in the queue until you unlock the session.
-- **`needs review` (`needs_review`)** — A task run did not cleanly finish or cannot be trusted automatically (for example, the host stopped while a turn was running, branch checks found unexpected changes, or retries were exhausted). It waits for an explicit human decision.
-- **`delivered (verified)` (`done`)** — Both git checks on the target remote (`agent/<runId>` is a fast-forward descendant of `baseSha` with commits carrying the `Run-Id: <runId>` trailer) and a matching `submit_result` payload (verified directly on the remote, or accepted by you) agree.
-
-## How to resolve locks and reviews
-
-1. **Unfreeze a locked session:** Check your machine (or `ps`) to confirm no stray agent or git/test child processes remain, then click **Remove lock…** in the right-hand **Needs you** panel (or `POST /api/sessions/:id/unfreeze` with `{ "note": "..." }`). The note is recorded in the session stream and queued chat messages resume in receipt order.
-2. **Resolve a `needs review` run:** Open the run in **Needs you** (or `POST /api/runs/:id/resolve` with `{ "decision": "...", "sha"?: "...", "note": "..." }`) and choose:
-   - **Accept** (`accept`) — verify the observed commit on the target remote (supplying `sha` or accepting the current remote tip) and mark the run `done`.
-   - **Mark failed** (`fail`) — record the note and mark the run `failed`.
-   - **Allow retry** (`allow_retry`) — transition the run back to `interrupted` so you can click **Retry** (`POST /api/runs/:id/retry`).
-
-## Verification
-
-Run typechecking and the automated test suite (uses a deterministic fake-Codex fixture):
+Build the UI first:
 
 ```sh
-pnpm check
+cd apps/polyclave-app/ui
+npm ci --ignore-scripts
+npm run build
 ```
 
-Run the gated real-Codex acceptance test (requires a working local `codex` installation with `~/.codex/auth.json`, network access, and explicit opt-in):
+Then build the daemon and the desktop shell from the repository root:
 
 ```sh
-POLYCLAVE_REAL_CODEX=1 pnpm test tests/real-codex.spec.ts
+cargo build --locked -p polyclaved -p polyclave-app
 ```
+
+Run the daemon on its own:
+
+```sh
+cargo run --locked -p polyclaved
+```
+
+It prints one line, `http://127.0.0.1:<port>/#token=<token>`. Open that URL in a browser. The token in the fragment is the local client key.
+
+Or run the desktop shell (`target/debug/polyclave-app`). It looks for a running daemon. If none answers on port 4310, it starts the `polyclaved` binary that sits next to its own executable. Closing the window does not stop the daemon.
+
+### Settings
+
+`polyclaved` takes no command-line flags. It reads two environment variables:
+
+- `POLYCLAVE_STATE_DIR`: the state directory. Default: the platform local data directory plus `polyclave`, which is `~/Library/Application Support/polyclave` on macOS and `%LOCALAPPDATA%\polyclave` on Windows.
+- `POLYCLAVE_PORT`: the loopback port. Default `4310`; `0` picks a free port. The desktop shell always uses `4310`.
+
+Only one daemon can own a state directory at a time.
+
+Vendor CLIs keep their normal login. The adapters read it from `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `AGY_HOME` (or `GEMINI_HOME`) and `DSH_HOME`, falling back to `~/.codex`, `~/.claude`, `~/.gemini` and `~/.dsh`.
+
+### State directory
+
+| Entry | What it holds |
+|---|---|
+| `polyclave.sqlite` | The only durable state: sessions, Runs, Attempts, turns, messages, memory, Hub ledger, pairing, mesh |
+| `host.lock` | Empty file; the daemon holds an OS lock on it while it runs |
+| `local-auth.token` | The local client key for this daemon instance; removed on a clean exit |
+| `mirrors/<hash>.git` | The host-owned bare mirror for each repository (`receive.denyDeletes`, `receive.denyNonFastForwards`) |
+| `staging/<runId>-a<n>.git` | The bare repository each Attempt pushes to; never an R1 target |
+| `worktrees/<runId>-a<n>/` | The checkout each Attempt works in |
+| `isolated-homes/<vendor>/` | Private vendor homes. They link only the login files and `skills` from your own home, and keep vendor history across Runs |
+| `tmp/` | Per-turn MCP config files (`mcp-turn-<id>.json`) and release markers; cleared when a turn ends, is cancelled, or is recovered |
+| `hub-read-only/` | Scratch space for the Hub's read-only repository tools |
+| `mesh-root.key` | This node's mesh signing key |
+| `empty-hooks/` | An empty hooks directory used for host Git commands |
+
+## Platforms
+
+macOS and Windows are the supported hosts. CI (`.github/workflows/check.yml`) runs on `macos-latest` and `windows-latest`: UI typecheck, build and offline browser checks, `cargo fmt`, Clippy with warnings denied, `cargo test --locked --workspace`, the generated `proto.ts` check, and the privacy scan.
+
+Linux is not in CI. The desktop shell prints a message and exits on Linux. A Claude Worker needs verified write confinement: on macOS this is Seatbelt; on every other platform the Claude Worker refuses to start.
+
+## Runs and Attempts
+
+A Run is one coding task on one repository. Its status is one of:
+
+- `pending`: admitted, not started yet.
+- `running`: an Attempt is working.
+- `interrupted`: stopped, and safe to retry (nothing was pushed, or the mirror could not be read).
+- `needs_review`: the host cannot decide by itself. It waits for you to `accept` (with the SHA you saw), `fail`, or `allow_retry`.
+- `done`: verified. The agent's signed receipt names a SHA, the Attempt branch tip in the host mirror equals that SHA, the Run base is its ancestor, and every commit in the range carries a `Run-Id: <runId>` trailer.
+- `failed`: closed without a result.
+
+`done` means the branch matches the accepted receipt. It does not mean the work meets the request.
+
+Each Run works through numbered Attempts. Attempt `n` has its own worktree, its own staging repository, and the branch `agent/<runId>/a<n>`. When a turn is cancelled or the host crashes:
+
+- If the host can prove the Worker can no longer write (Windows Job Objects; a Worker that never got the start signal), the Attempt can continue or retry in place.
+- If it cannot (a macOS Worker that was already running), that Attempt is marked `cancelled` or `superseded`. The next try starts a new Attempt `n+1` from a clean checkout of the Run base. Nothing from the old worktree is reused.
+
+Only the affected Run is held. Other Runs and sessions keep going. Hub and manager sessions are read-only, so stopping one of their turns never holds anything. This replaces v4's whole-session freeze (v5 §4.3).
+
+Once a Run is `done`, the host fetches the verified SHA into your repository as `refs/heads/polyclave/<runId>`.
+
+## Verification status
+
+What the records show today. "Offline" means tests with fake CLIs, fake HTTP servers and local bare repositories. Native CI last passed on `3dec8e4` (the current `origin/main`). The commits merged locally after it (PR gate fixes, pairing QR, publish target, mesh `request_id`) were checked on macOS only; Windows CI has not run on them.
+
+Nothing below has passed a real-environment acceptance. The pending list is in `HANDOFF.md` under "v5 Phase 1B Hub and optical desktop review handoff" (hand checks 1 to 5) and "v5 Phase 1B review: passed, merged".
+
+| Capability | Offline tests and CI | Pending real-environment acceptance |
+|---|---|---|
+| Worker Run, Codex | Adapter, handshake, staging import, R1 and recovery tests; native CI on macOS and Windows ("v5 Phase 1A Rust host and native checks") | Real `codex` Worker probe (Phase 1B hand check 4) |
+| Worker Run, Claude Code | Adapter and stream tests; refusal without confinement; macOS Seatbelt isolation (`78b9a13`), which has no HANDOFF report | Real `claude` Worker probe on macOS (hand check 4); the refusal elsewhere is not a passed probe |
+| Worker Run, Antigravity and DeepSeek Harness | Adapter tests with fake scripts only (`69ca86d`); no HANDOFF report | No real run recorded. `docs/LESSONS.md` item 9 says the real `dsh headless` has no `--model` flag; `dsh_args` still passes one when a model is set |
+| CLI Hub (Codex, Claude) | Thread resume, delta continuation and dual-write tests ("v5 Phase 1B review") | Real CLI Hub probe (hand check 5) |
+| API Hub (DeepSeek) | Stream and tool-call parsing, durable reasoning replay against a local fake endpoint ("Final DeepSeek follow-up") | Live `deepseek-flash` and `deepseek-v4-pro` calls (hand check 5, "Local addendum") |
+| Desktop app and page | Offline Chrome checks at 1440×900 and 375×812 in CI | Installed WKWebView and WebView2, tray, notifications, keychain (hand checks 1 to 3) |
+| PR gate | Pushes the exact R1-verified SHA, full-range review, reviewer preflight, origin-based target, one-shot token helper; tested against local bare remotes ("PR gate fixes review", "PR push target from origin review") | Has never pushed to real GitHub. No real PR, auto-merge, or bot-token login over HTTPS |
+| Phone pairing | The pairing QR decodes back to the exact URI in Chrome (`tests/qr-roundtrip.mjs`, "Pairing QR fix review") | Never scanned by a phone. Pairing approval and revocation on a real device not checked |
+| Mesh dispatch | `worker_run` and `run_status` end to end in daemon tests, with token scope checks; `request_id` idempotency ("Mesh worker_run idempotency review") | No two-machine run. Ticket budget for remote Runs is an open `direction` item in `PLAN-ISSUES.md` |
+| Memory | FTS5 search, candidate and verified states, fused with a local vector score (store tests) | No real-use record. The vector is a 128-dimension hashed byte-trigram count, not a learned embedding |
+
+## Checks
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+scripts/privacy-scan.sh
+```
+
+UI checks, from `apps/polyclave-app/ui`: `npm run typecheck`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser`.
 
 ## Documents
 
 | What | Where |
 |---|---|
-| Current design (v4) | `docs/superpowers/specs/2026-11-25-agent-console-design-v4.md` |
-| Phase 1 implementation plan | `docs/superpowers/plans/2026-11-25-polyclave-phase1.md` |
-| Probe results (T3 rounds, direct calls, host loop, crash recovery) | `docs/superpowers/research/2026-11-24-t3-probe-results.md` |
-| Probe scripts used as references | `docs/superpowers/research/probes/` |
-| Prior-art survey | `docs/superpowers/research/2026-11-24-prior-art-and-direction.md` |
+| Design (v5) | `docs/superpowers/specs/2026-11-26-polyclave-v5-rust-design.md` |
+| Work lists | `docs/superpowers/plans/2026-11-26-polyclave-v5-phase1a.md`, `...-phase1b.md`, `2026-11-27-polyclave-v5-stage2.md`, `...-stage3.md` |
+| Test migration from v4 | `docs/superpowers/plans/2026-11-27-polyclave-v5-test-migration.md` |
+| How agents work here | `AGENTS.md`, `REVIEWER.md` |
+| Progress and verdicts | `HANDOFF.md` |
+| Open questions | `PLAN-ISSUES.md` |
+| Lessons | `docs/LESSONS.md` |
+| Product and design system | `PRODUCT.md`, `DESIGN.md` |
+| v4 design (history) | `docs/superpowers/specs/2026-11-25-agent-console-design-v4.md` |
