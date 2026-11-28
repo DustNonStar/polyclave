@@ -11,12 +11,14 @@ use std::{
 
 type Result<T> = std::result::Result<T, GitError>;
 type RepoLocks = HashMap<PathBuf, Arc<Mutex<()>>>;
+type GitOutput = dyn Fn(Command) -> Result<Output> + Send + Sync;
 
 pub struct MirrorManager {
     pub(crate) root: PathBuf,
     git: PathBuf,
     hooks: PathBuf,
-    locks: Mutex<RepoLocks>,
+    locks: Arc<Mutex<RepoLocks>>,
+    output: Option<Box<GitOutput>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,8 +67,22 @@ impl MirrorManager {
             git: resolve_cli_binary(Path::new("git"))?,
             hooks: root.join("empty-hooks"),
             root,
-            locks: Mutex::new(HashMap::new()),
+            locks: Arc::default(),
+            output: None,
         })
+    }
+
+    pub(crate) fn with_git_output(
+        &self,
+        output: impl Fn(Command) -> Result<Output> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            root: self.root.clone(),
+            git: self.git.clone(),
+            hooks: self.hooks.clone(),
+            locks: self.locks.clone(),
+            output: Some(Box::new(output)),
+        }
     }
 
     pub(crate) fn with_repo<T>(
@@ -116,7 +132,10 @@ impl MirrorManager {
             .arg("-c")
             .arg(format!("core.hooksPath={}", self.hooks.display()))
             .args(args);
-        Ok(cmd.output()?)
+        match &self.output {
+            Some(output) => output(cmd),
+            None => Ok(cmd.output()?),
+        }
     }
 
     pub(crate) fn require<I, S>(&self, dir: &Path, args: I, op: &'static str) -> Result<String>
@@ -598,6 +617,115 @@ pub fn strip_url_credentials(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::strip_url_credentials;
+
+    #[cfg(unix)]
+    #[test]
+    fn revoking_live_broker_git_releases_the_mirror_without_staging_a_commit() {
+        use super::{AttemptGit, BranchCheck, GitError, MirrorManager};
+        use std::{
+            fs::{self, OpenOptions},
+            io::Write,
+            os::unix::fs::PermissionsExt,
+            process::Command,
+            sync::mpsc,
+            time::Duration,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let mut mirror = MirrorManager::new(temp.path()).unwrap();
+        let repo = polyclave_os::canonical_real_path(&repo).unwrap();
+        mirror
+            .require(&repo, ["init", "-b", "main", "--template="], "init")
+            .unwrap();
+        mirror
+            .require(
+                &repo,
+                [
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base",
+                ],
+                "base",
+            )
+            .unwrap();
+        let run = mirror.admit(&repo, "r1234abcd", "main").unwrap();
+        let attempt = AttemptGit { run, number: 1 };
+        let workspace = mirror.prepare_attempt(&attempt).unwrap();
+        fs::write(workspace.cwd.join("allowed.txt"), "change").unwrap();
+
+        let root = &mirror.root;
+        let fifo = root.join("hold");
+        assert!(Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let mut release = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        let wrapper = root.join("stall-git");
+        let started = root.join("started");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+for arg do
+  if [ "$arg" = "--trailer" ]; then
+    dir=${0%/*}
+    : > "$dir/started"
+    read -r line < "$dir/hold"
+    break
+  fi
+done
+exec git "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        mirror.git = wrapper;
+
+        let (tx, rx) = mpsc::channel();
+        let child_attempt = attempt.clone();
+        let child_started = started.clone();
+        let job = std::thread::spawn(move || {
+            let result = mirror.commit_and_stage(
+                &child_attempt,
+                "change",
+                None,
+                &["allowed.txt".into()],
+                move || !child_started.exists(),
+            );
+            tx.send(result).unwrap();
+            mirror
+        });
+        let result = rx.recv_timeout(Duration::from_secs(15));
+        if result.is_err() {
+            writeln!(release, "unblock failed test").unwrap();
+        }
+        let mirror = job.join().unwrap();
+        assert!(started.exists());
+        assert!(matches!(
+            result.unwrap(),
+            Err(GitError::Invalid("Turn is no longer authorized to stage"))
+        ));
+        assert_eq!(mirror.reconcile(&attempt), BranchCheck::Absent);
+        assert_eq!(
+            mirror
+                .commit_stage_dir(&attempt)
+                .read_dir()
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn strips_credentials_from_remote_urls() {

@@ -112,6 +112,20 @@ impl RunManager {
         request: RunRequest,
         guard: Option<Arc<dyn AdmissionGuard>>,
     ) -> Result<(RunDto, bool)> {
+        self.accept_inner(request, guard, false)
+    }
+
+    /// Admission for the local direct-dispatch endpoint.
+    pub fn accept_local_worker(&self, request: RunRequest) -> Result<(RunDto, bool)> {
+        self.accept_inner(request, None, true)
+    }
+
+    fn accept_inner(
+        &self,
+        request: RunRequest,
+        guard: Option<Arc<dyn AdmissionGuard>>,
+        require_staging_scope: bool,
+    ) -> Result<(RunDto, bool)> {
         let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
         if request.request_id.trim().is_empty()
             || request.request_id.len() > 256
@@ -147,6 +161,13 @@ impl RunManager {
                 return Err(Error::ConflictError);
             }
             return Ok((saved, false));
+        }
+        if require_staging_scope {
+            self.check_local_worker_scope(
+                request.vendor,
+                &request.hub_session_id,
+                request.ticket_id.as_deref(),
+            )?;
         }
         if let Some(guard) = &guard {
             self.store.read(|db| guard.check(db))?;
@@ -212,6 +233,25 @@ impl RunManager {
         })
     }
 
+    /// Reused Runs from before host staging may still have an implicit Ticket.
+    pub fn check_local_worker_scope(
+        &self,
+        vendor: Vendor,
+        hub: &str,
+        ticket: Option<&str>,
+    ) -> Result<()> {
+        if uses_host_staging(vendor) {
+            let (saved, mandate) = self
+                .store
+                .hub_ticket_mandate(ticket.ok_or(STAGING_SCOPE_REQUIRED)?)?;
+            if saved.hub != hub {
+                return Err(Error::ConflictError);
+            }
+            staging_allowed_paths(&mandate)?;
+        }
+        Ok(())
+    }
+
     pub fn begin(&self, id: &str, mode: TurnMode) -> Result<RunWork> {
         let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
         let run = self.get(id)?;
@@ -265,6 +305,14 @@ impl RunManager {
         if !new {
             let attempt = previous.ok_or(Error::ConflictError)?;
             let git = self.attempt_git(&run, attempt.attempt_no)?;
+            if mode == TurnMode::WorkerChat
+                && uses_host_staging(run.vendor)
+                && !self.git.has_commit_stage_dir(&git)
+            {
+                return Err(Error::Invalid(
+                    "This Attempt has no host staging directory. Choose Allow retry, then Retry, to create a fresh Attempt.",
+                ));
+            }
             let workspace = Workspace {
                 cwd: PathBuf::from(&attempt.worktree_path),
                 staging: self.git.staging_path(&git),
@@ -622,22 +670,17 @@ impl HostTools for RunManager {
             || work.attempt.branch != scope.branch
             || work.run.base_sha != scope.base
             || work.run.repo_cwd != scope.repo
-            || !matches!(work.run.vendor, Vendor::Codex | Vendor::Claude)
+            || !uses_host_staging(work.run.vendor)
         {
             return Err(Error::ConflictError);
         }
         let (_, mandate) = self.store.hub_ticket_mandate(&work.run.ticket_id)?;
-        let allowed: Vec<String> = mandate
-            .get("allowed_paths")
-            .cloned()
-            .and_then(|paths| serde_json::from_value(paths).ok())
-            .filter(|paths: &Vec<String>| !paths.is_empty())
-            .ok_or(Error::Invalid(
-                "Host staging requires a Ticket with allowed paths",
-            ))?;
+        let allowed = staging_allowed_paths(&mandate)?;
+        let store = self.store.clone();
+        let attempt_id = scope.id;
         self.git
-            .commit_and_stage(&work.id, message, paths, &allowed, || {
-                self.store
+            .commit_and_stage(&work.id, message, paths, &allowed, move || {
+                store
                     .read(|db| {
                         Ok(db.query_row(
                             "SELECT EXISTS(SELECT 1 FROM turns t JOIN runs r ON r.id=t.run_id
@@ -648,7 +691,7 @@ impl HostTools for RunManager {
                                AND a.status='running' AND a.attempt_no=r.current_attempt
                                AND r.status='running' AND NOT EXISTS
                                    (SELECT 1 FROM results WHERE attempt_id=a.id AND accepted=1))",
-                            params![turn_id, scope.id],
+                            params![turn_id, attempt_id],
                             |row| row.get(0),
                         )?)
                     })
@@ -682,6 +725,25 @@ impl HostTools for RunManager {
             work.run.id, work.run.base_sha, work.attempt.attempt_no
         ))
     }
+}
+
+fn uses_host_staging(vendor: Vendor) -> bool {
+    matches!(vendor, Vendor::Codex | Vendor::Claude)
+}
+
+const STAGING_SCOPE_REQUIRED: Error = Error::Invalid(
+    "Host staging requires a Ticket with allowed paths. Create a scoped Ticket and dispatch from it.",
+);
+
+fn staging_allowed_paths(mandate: &serde_json::Value) -> Result<Vec<String>> {
+    mandate
+        .get("allowed_paths")
+        .cloned()
+        .and_then(|paths| serde_json::from_value(paths).ok())
+        .filter(|paths: &Vec<String>| {
+            !paths.is_empty() && paths.iter().all(|path| !path.trim().is_empty())
+        })
+        .ok_or(STAGING_SCOPE_REQUIRED)
 }
 
 pub(crate) fn path_text(p: &Path) -> Result<String> {

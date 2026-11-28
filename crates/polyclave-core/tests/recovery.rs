@@ -50,6 +50,37 @@ fn end(rm: &RunManager, turn: i64) -> (String, String) {
 }
 
 #[test]
+fn legacy_attempt_requires_explicit_retry_before_worker_chat() {
+    let (tmp, rm, _, req) = fixture();
+    let (run, _) = rm.accept(req).unwrap();
+    let old = rm.begin(&run.id, TurnMode::Start).unwrap();
+    std::fs::remove_dir(tmp.path().join("state/commit-stage").join(old.id.name())).unwrap();
+    let id = run.id.clone();
+    rm.store
+        .write(move |db| {
+            db.execute("UPDATE runs SET status='needs_review' WHERE id=?1", [&id])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        matches!(rm.begin(&run.id, TurnMode::WorkerChat), Err(Error::Invalid(message))
+        if message.contains("Allow retry"))
+    );
+    let unchanged = rm.get(&run.id).unwrap();
+    assert_eq!(unchanged.status, RunStatus::NeedsReview);
+    assert_eq!(unchanged.current_attempt, 1);
+    rm.resolve(&run.id, Resolution::AllowRetry, "prepare a fresh Attempt")
+        .unwrap();
+    let fresh = rm.begin(&run.id, TurnMode::Retry).unwrap();
+    assert_eq!(fresh.attempt.attempt_no, 2);
+    assert!(tmp
+        .path()
+        .join("state/commit-stage")
+        .join(fresh.id.name())
+        .is_dir());
+}
+
+#[test]
 fn authorized_but_not_released_is_never_started_and_cleanup_is_selective() {
     let (_tmp, rm, runner, req) = fixture();
     let (r, new) = rm.accept(req.clone()).unwrap();

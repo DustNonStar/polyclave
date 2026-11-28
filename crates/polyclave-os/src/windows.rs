@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::process::CommandExt;
 use std::path::Path;
+use std::process::{Child, Command, ExitStatus};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Security::Authorization::{
@@ -42,6 +44,54 @@ fn ok(rc: i32) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+pub(crate) struct CommandTree {
+    child: Child,
+    job: Option<OwnedHandle>,
+}
+
+impl CommandTree {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+        let job = kill_on_close_job()?;
+        let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
+        let handle = child.as_raw_handle();
+        let launch = ok(unsafe { AssignProcessToJobObject(raw(&job), handle) }).and_then(|()| {
+            // std::process exposes the process handle, but closes the initial thread handle.
+            let status = unsafe { NtResumeProcess(handle) };
+            if status < 0 {
+                Err(io::Error::from_raw_os_error(
+                    unsafe { RtlNtStatusToDosError(status) } as i32,
+                ))
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = launch {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(Self {
+            child,
+            job: Some(job),
+        })
+    }
+
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.job.take();
+        }
+        Ok(status)
+    }
+}
+
+impl Drop for CommandTree {
+    fn drop(&mut self) {
+        self.job.take();
+        let _ = self.child.wait();
     }
 }
 
@@ -217,18 +267,7 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
     }
     env.push(0);
 
-    let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
-    let mut options: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-    // No BREAKAWAY_OK or SILENT_BREAKAWAY_OK.
-    options.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    ok(unsafe {
-        SetInformationJobObject(
-            raw(&job),
-            JobObjectExtendedLimitInformation,
-            (&options as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-    })?;
+    let job = kill_on_close_job()?;
     let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
     ok(unsafe {
         CreateProcessW(
@@ -269,6 +308,21 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
         stdout: Box::new(File::from(output_host)),
         stderr: Box::new(File::from(error_host)),
     })
+}
+
+fn kill_on_close_job() -> io::Result<OwnedHandle> {
+    let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
+    let mut options: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    options.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    ok(unsafe {
+        SetInformationJobObject(
+            raw(&job),
+            JobObjectExtendedLimitInformation,
+            (&options as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    })?;
+    Ok(job)
 }
 
 pub(crate) fn guard_parent(_pipe: impl io::Read + Send + 'static) -> io::Result<()> {
@@ -334,6 +388,8 @@ pub(crate) fn kill_process_tree(id: &ProcessIdentity) -> io::Result<()> {
 #[link(name = "ntdll")]
 extern "system" {
     fn NtQuerySystemInformation(class: u32, data: *mut c_void, len: u32, used: *mut u32) -> i32;
+    fn NtResumeProcess(process: HANDLE) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
 #[repr(C)]

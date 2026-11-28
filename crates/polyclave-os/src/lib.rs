@@ -17,6 +17,36 @@ pub use platform::{
     boot_epoch, create_private_dir, desktop_idle_secs, process_identity, write_private_file,
 };
 
+/// Runs a trusted command in a managed process tree. Files in the caller's
+/// private scratch directory avoid waiting on pipes held open by descendants.
+pub fn cancellable_output(
+    mut command: Command,
+    scratch: &Path,
+    check: impl Fn() -> io::Result<()>,
+) -> io::Result<std::process::Output> {
+    use std::{fs::File, time::Duration};
+
+    check()?;
+    let stdout = scratch.join("command.stdout");
+    let stderr = scratch.join("command.stderr");
+    command
+        .stdout(File::create(&stdout)?)
+        .stderr(File::create(&stderr)?);
+    let mut child = platform::CommandTree::spawn(&mut command)?;
+    let status = loop {
+        check()?;
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::park_timeout(Duration::from_millis(10));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: std::fs::read(stdout)?,
+        stderr: std::fs::read(stderr)?,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessIdentity {
     pub pid: u32,

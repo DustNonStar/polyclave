@@ -6,7 +6,7 @@ use polyclave_os::resolve_cli_binary;
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -59,18 +59,26 @@ pub(crate) fn read_touched_paths(
         .stdin(Stdio::null())
         .arg("-C")
         .arg(mirror)
-        .args([
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-renames",
-            "--name-only",
-            "-z",
-            &range,
-            "--",
-        ])
+        .args(touched_paths_args(&range))
         .output()?;
 
+    parse_touched_paths(output)
+}
+
+pub(crate) fn touched_paths_args(range: &str) -> [&str; 8] {
+    [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        range,
+        "--",
+    ]
+}
+
+pub(crate) fn parse_touched_paths(output: Output) -> Result<Vec<String>, GitError> {
     if !output.status.success() {
         return Err(GitError::Command("diff touched paths on mirror"));
     }

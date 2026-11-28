@@ -1,15 +1,18 @@
 use crate::{
-    mirror::{AttemptGit, MirrorManager},
-    scope::{read_touched_paths, validate_touched_paths},
+    mirror::{validate_oid, AttemptGit, MirrorManager},
+    scope::{parse_touched_paths, touched_paths_args, validate_touched_paths},
     GitError,
 };
-use polyclave_os::{canonical_real_path, create_private_dir};
+use polyclave_os::{cancellable_output, canonical_real_path, create_private_dir};
 use std::{
     ffi::{OsStr, OsString},
+    io,
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, GitError>;
+const STAGING_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct CommitScratch(PathBuf);
 
@@ -24,13 +27,18 @@ impl MirrorManager {
         self.root.join("commit-stage").join(attempt.name())
     }
 
+    pub(crate) fn has_commit_stage_dir(&self, attempt: &AttemptGit) -> bool {
+        let path = self.commit_stage_dir(attempt);
+        path.is_dir() && canonical_real_path(&path).is_ok_and(|real| real == path)
+    }
+
     pub(crate) fn commit_and_stage(
         &self,
         attempt: &AttemptGit,
         message: &str,
         paths: Option<&[String]>,
         allowed_paths: &[String],
-        can_publish: impl Fn() -> bool,
+        can_publish: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<String> {
         if message.lines().any(|line| {
             line.split_once(':')
@@ -43,7 +51,6 @@ impl MirrorManager {
         }
 
         self.with_repo(&attempt.run.repo, |repo| {
-            self.validate_run(&attempt.run, repo)?;
             let workspace = self.attempt_workspace(attempt);
             let stage_dir = self.commit_stage_dir(attempt);
             for path in [&workspace.cwd, &workspace.staging, &stage_dir] {
@@ -58,25 +65,46 @@ impl MirrorManager {
             create_private_dir(&scratch)?;
             let scratch = CommitScratch(scratch);
             let admin = &scratch.0;
-            self.require(
+            let output_dir = admin.clone();
+            let deadline = Instant::now() + STAGING_TIMEOUT;
+            let broker = self.with_git_output(move |command| {
+                cancellable_output(command, &output_dir, || {
+                    if !can_publish() {
+                        Err(io::ErrorKind::Interrupted.into())
+                    } else if Instant::now() >= deadline {
+                        Err(io::ErrorKind::TimedOut.into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::Interrupted => {
+                        GitError::Invalid("Turn is no longer authorized to stage")
+                    }
+                    io::ErrorKind::TimedOut => GitError::Invalid("Host staging timed out"),
+                    _ => GitError::Io(error),
+                })
+            });
+            broker.validate_run(&attempt.run, repo)?;
+            broker.require(
                 admin,
                 ["init", "--bare", "--template="],
                 "initialize host commit",
             )?;
             let base_ref = attempt.run.base_ref();
-            self.fetch(
+            broker.fetch(
                 admin,
                 &attempt.run.mirror,
                 &format!("{base_ref}:{base_ref}"),
             )?;
             let target = attempt.full_ref();
-            let staged = self.staging_ref(&workspace.staging, &target)?;
+            let staged = broker.staging_ref(&workspace.staging, &target)?;
             let parent = if let Some(sha) = &staged {
-                self.fetch(admin, &workspace.staging, &format!("{target}:{target}"))?;
+                broker.fetch(admin, &workspace.staging, &format!("{target}:{target}"))?;
                 let mut candidate = attempt.clone();
                 candidate.run.mirror = admin.clone();
-                if self.oid(admin, &target)? != *sha
-                    || self.branch_problem(&candidate, sha)?.is_some()
+                if broker.oid(admin, &target)? != *sha
+                    || broker.branch_problem(&candidate, sha)?.is_some()
                 {
                     return Err(GitError::Invalid("Invalid prior staged commit"));
                 }
@@ -94,12 +122,12 @@ impl MirrorManager {
                     OsStr::new("--work-tree"),
                     workspace.cwd.as_os_str(),
                 ];
-                self.git(
+                broker.git(
                     &workspace.cwd,
                     prefix.into_iter().chain(args.iter().copied()),
                 )
             };
-            self.require(
+            broker.require(
                 admin,
                 ["update-ref", "HEAD", parent],
                 "set host commit parent",
@@ -144,20 +172,21 @@ impl MirrorManager {
                     if !git(&args.map(OsStr::new))?.status.success() {
                         return Err(GitError::Command("commit Attempt changes"));
                     }
-                    self.oid(admin, "HEAD")?
+                    broker.oid(admin, "HEAD")?
                 }
                 _ => return Err(GitError::Command("inspect staged changes")),
             };
-            let changed_paths = read_touched_paths(admin, &attempt.run.base, &sha)?;
+            validate_oid(&attempt.run.base)?;
+            validate_oid(&sha)?;
+            let range = format!("{}..{sha}", attempt.run.base);
+            let changed_paths =
+                parse_touched_paths(broker.git(admin, touched_paths_args(&range))?)?;
             if changed_paths.iter().any(|path| !is_literal_path(path))
                 || !validate_touched_paths(&changed_paths, allowed_paths).allowed
             {
                 return Err(GitError::Invalid(
                     "Changes are outside the Ticket path scope",
                 ));
-            }
-            if !can_publish() {
-                return Err(GitError::Invalid("Turn is no longer authorized to stage"));
             }
             let args: Vec<OsString> = ["push", "--no-verify", "--"]
                 .map(OsString::from)
@@ -167,8 +196,8 @@ impl MirrorManager {
                     format!("{sha}:{target}").into(),
                 ])
                 .collect();
-            self.require(admin, args, "publish to Attempt staging")?;
-            if self.staging_ref(&workspace.staging, &target)?.as_deref() != Some(sha.as_str()) {
+            broker.require(admin, args, "publish to Attempt staging")?;
+            if broker.staging_ref(&workspace.staging, &target)?.as_deref() != Some(sha.as_str()) {
                 return Err(GitError::Invalid(
                     "Attempt staging did not retain the committed SHA",
                 ));

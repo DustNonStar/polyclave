@@ -6,6 +6,34 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+pub(crate) struct CommandTree(Option<Child>);
+
+impl CommandTree {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+        command
+            .process_group(0)
+            .spawn()
+            .map(|child| Self(Some(child)))
+    }
+
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        let status = self.0.as_mut().expect("running command").try_wait()?;
+        if status.is_some() {
+            self.0 = None;
+        }
+        Ok(status)
+    }
+}
+
+impl Drop for CommandTree {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = signal_group(child.id() as i32, libc::SIGKILL);
+            let _ = child.wait();
+        }
+    }
+}
+
 pub(crate) struct Process {
     child: Option<Child>,
 }

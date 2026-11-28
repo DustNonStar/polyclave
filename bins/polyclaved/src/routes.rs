@@ -181,7 +181,7 @@ async fn accept(State(app): State<App>, Json(req): Json<RunRequest>) -> Reply {
     }
     Ok(Json(json!(
         blocking(move || {
-            let (run, new) = app.runs.accept(req)?;
+            let (run, new) = app.runs.accept_local_worker(req)?;
             if new {
                 let attempt =
                     app.runner
@@ -209,6 +209,8 @@ async fn chat(State(app): State<App>, Path(id): Path<String>, Json(c): Json<Chat
         if matches!(run.status, RunStatus::Done | RunStatus::Failed) {
             return Err(Error::ConflictError);
         }
+        app.runs
+            .check_local_worker_scope(run.vendor, &run.hub_session_id, Some(&run.ticket_id))?;
         let attempt = app.runner.schedule(&id, TurnMode::WorkerChat, c.text)?;
         if let Some(hub) = &app.hub {
             hub.track(id, attempt);
@@ -238,6 +240,8 @@ async fn retry(State(app): State<App>, Path(id): Path<String>) -> Reply {
     }
     blocking(move || {
         let run = app.runs.get(&id)?;
+        app.runs
+            .check_local_worker_scope(run.vendor, &run.hub_session_id, Some(&run.ticket_id))?;
         let attempt = app
             .runner
             .schedule(&id, TurnMode::Retry, run.instructions)?;
@@ -475,6 +479,42 @@ mod tests {
             LocalAuth::new("test-only".into(), 4310),
         );
         (dir, store, app)
+    }
+
+    #[tokio::test]
+    async fn direct_sandboxed_dispatch_requires_an_explicit_ticket_scope() {
+        let (dir, store, app) = fixture();
+        for vendor in ["codex", "claude"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/runs")
+                        .header("host", "127.0.0.1:4310")
+                        .header("authorization", "Bearer test-only")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "hub_session_id": "hub",
+                                "request_id": vendor,
+                                "vendor": vendor,
+                                "repo_cwd": dir.path(),
+                                "instructions": "edit the repository",
+                                "base_branch": "main"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains("Ticket with allowed paths"));
+        }
+        let count = store
+            .read(|db| Ok(db.query_row("SELECT count(*) FROM runs", [], |r| r.get::<_, u32>(0))?))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
