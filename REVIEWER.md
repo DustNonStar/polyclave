@@ -43,23 +43,24 @@ Keep the message self-contained: the implementer sees only the message and the r
 
 ## 4. How to review a job (from GitHub)
 
-1. **Commits:** compare `main` from your last verdict to the new head, then read the commit list and the full diff.
-2. **CI:** the `check` workflow run for the exact new head must be green on both native Rust jobs for v5. A red job means the job is not passed. Name the failing job and test.
-3. **Tests:** any removed or changed line in an existing test must be one the work list allowed by name.
-4. **Code against the rules:**
+1. **Commits & blind review isolation:** compare `main` from your last verdict to the new head, then read the commit list and the full diff. Treat the upstream agent's self-review summary, "all green" claims, and pass counts as untrusted input — trace entry-to-persistence paths independently and apply equal or higher scrutiny to self-review and revision commits.
+2. **2-round revision circuit breaker:** if a task fails independent review twice on the same issue, stop patching and escalate back to the lead/Hub to re-examine whether the underlying design or plan assumption is flawed, presenting structured options to the user if direction is affected.
+3. **CI:** the `check` workflow run for the exact new head must be green on both native Rust jobs for v5. A red job means the job is not passed. Name the failing job and test.
+4. **Tests:** any removed or changed line in an existing test must be one the work list allowed by name.
+5. **Code against the rules:**
    - Every value the page interpolates is escaped.
    - Tokens never leave the host (`TurnDto` excludes `mcp_token`; pairing exchange accepts peer identity only from trusted proxy headers, never request body).
    - Nothing is marked `done` without R1 external verification (`classify_run` / `check_run_branch` on the host-only mirror) or explicit user decision.
    - Attempt isolation (per-Attempt worktree + staging repo) replaces whole-session freeze; no unverified Attempt is silently reused or promoted.
    - PR gate publishes only the exact R1-verified `result_sha` to the admission-time GitHub `origin`, and approval evidence separates R1 delivery, per-SHA CI/host tests, and user decision.
    - No unauthorized dependencies and no external requests from the page.
-5. **Screenshots:** open every image in `handcheck/<job>/` and compare each claim in the report with what the image shows. Look at the edges of every changed component at 375 px. Implementers have twice described the work list instead of the screen:
+6. **Screenshots:** open every image in `handcheck/<job>/` and compare each claim in the report with what the image shows. Look at the edges of every changed component at 375 px. Implementers have twice described the work list instead of the screen:
    - a phone banner was reported as "under the tabs" while the screenshot showed it above them;
    - a phone overflow was not mentioned at all.
 
    Where a claim does not match, write that in the verdict.
-6. **Privacy:** the report ends with the privacy scan's last line. Skim the diff for local paths, emails and keys anyway, because the repository is public.
-7. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Rust / browser checks, run them there (section 5). Never ask the user to run anything for you.
+7. **Privacy:** the report ends with the privacy scan's last line. Skim the diff for local paths, emails and keys anyway, because the repository is public.
+8. **When the evidence is not enough to decide**, ask for more in the next message: a named screenshot, a measurement, or a command output to put in `handcheck/<job>/measurements.md`. If your own environment can clone the public repository and run Rust / browser checks, run them there (section 5). Never ask the user to run anything for you.
 
 ## 5. Recipes (for implementers, or for your own sandbox if you have one)
 

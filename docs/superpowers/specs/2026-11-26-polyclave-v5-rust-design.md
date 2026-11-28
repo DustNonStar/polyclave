@@ -57,6 +57,14 @@ Polyclave 的核心使命始终不变：**在本机运行的、绝对私有可�
 10. **跨设备零信任互联与多机联邦（引入 `google/agentmesh`，阶段 3 落地）**（2026-11-26 用户决定）：
    - **跨设备全自托管访问**：除 Tailscale 外，引入 `google/agentmesh`（Apache-2.0，`agentmesh-one` / `agentmesh-node`）作为 100% 自托管的零信任私有网格，支持 Mac / Windows / Linux / 移动端跨 NAT 直连或中继访问主控 `polyclaved`；
    - **跨机 Worker 与远端 MCP 联邦**：允许主控 `hub` 经 `polyclave-mesh` 将子任务安全派发至另一台设备上的 Worker（如 Mac 主控调度 Windows/Linux 机器执行构建与测试），并通过 Agent Mesh 的 `deny-by-default` 策略与离线可验证的**可衰减 Biscuit Token** 锁死远端节点的工具与仓库权限边界，同时保持主控 `polyclaved` 对 R1 Git 核证与 `polyclave.sqlite` 账本的唯一控制权。
+11. **PR 门禁按入库 `origin` 快照发布精确 R1 SHA + 合并前显式人工批准**（2026-11-27 用户决定）：Run 受理时快照去凭证的 `origin`，推送仅限精确 R1 核验的 `result_sha` 到规范 `https://github.com/<owner/repo>.git`；异构 Reviewer 通过后停在 `awaiting_human_approval` 状态，由用户在手机/桌面查看该精确 SHA 的完整镜像 diff、同 SHA 测试结果（仅匹配 `result_sha` 的 `ci`/`host_run` 可变绿，Worker 自报恒标注自报）与未决项并显式 POST 批准后才允许合并 / `enableAutoMerge`。
+12. **宿主受限 `commit_and_stage` MCP 工具**（2026-11-27 用户决定）：沙箱 Worker（Codex `workspace-write`、Claude Seatbelt）无需直接写 `.git`，改由宿主在可信侧通过 `commit_and_stage` 校验 Ticket `allowed_paths`、自动附加 `Run-Id` trailer 并推入 Attempt staging。
+13. **Mesh 跨机 `worker_run` 预算采用 A + C 方案**（2026-11-27 用户决定）：远端 Run 计入主控 Ticket `runs_used`，接收端按来源节点强制并发上限（默认 3，可配 1–16，超限返回 429 不静默排队）。
+14. **单条端到端用户故事里程碑收窄**（2026-11-27 用户决定）：在跑通“Mac 真实任务 → 中途重启恢复 → 异构 Reviewer 要求修改 → 返工提交新 SHA → 手机端查看 diff/测试/未决项并批准该精确 SHA”前，暂停 Mesh、CUA、自我进化/社区蒸馏的新功能。
+15. **遇阻四段式上报协议、异构盲审隔离与 2 轮返工熔断**（2026-11-27 用户决定）：
+    - **遇阻结构化上报（`raise_plan_issue`）**：执行或评审遇到未预期冲突/设计缺口时，必须按四要素上报（发生了什么与精确证据、为什么出现及是否暴露设计前提盲区、2–3 个选项的含义/优缺点/取舍、结合项目目的的推荐方案与理由）；`detail` 级由 Hub 自动裁决落盘，`direction` 级生成决策卡片呈递用户拍板。
+    - **异构盲审隔离**：PR Gate 传给 Reviewer 的上下文必须与 Worker 的自我背书（“已自检/测试全绿”等话术）隔离，只传客观产物（精确 SHA 完整 `base..head` diff、Ticket 约束、宿主核证事实）；返工提交走与初稿同等严格的独立评审。
+    - **返工熔断回设计层**：同一任务经评审打回返工达到上限（默认 2 轮）仍未通过时，停止继续局部打补丁，强制升级回 Hub 做设计前提复盘并带选项向用户汇报。
 
 ---
 
@@ -486,7 +494,7 @@ CREATE TABLE change_log (
 - **阶段 2：多模型内阁 `council` + 真实 GitHub PR 门禁与 `SCM Observer`**
   - 接入 **Antigravity (`agy`)** 与 **DeepSeek Harness (`dsh`)** 适配器。
   - 实现 `council` 原子宏流程：主控发起方案讨论 → 各家 `manager` 并行独立输出结构化 `Proposal` → 代码剥离厂商标识呈递“方案甲/乙/丙” → `direction` 级交用户拍板、`detail` 级结合偏好决策。
-  - 实现 `pr_gate` 与后台 `SCM Observer`：三层 `touched_paths` 范围契约校验；强制异构模型 Reviewer 在一次性 Worktree 中评审确切 `head_sha`（不复用编写者 Worker 原生线程）；Bot 账号与 Reviewer 账号物理隔离、将本地镜像通过 R1 的分支推送到 GitHub、显式传 `commit_id` 批准并先落台账再开 auto-merge；PR/CI 失败或评论变更实时作为事件推回主控收件箱。
+  - 实现 `pr_gate` 与后台 `SCM Observer`：三层 `touched_paths` 范围契约校验；强制异构模型 Reviewer 在一次性 Worktree 中盲审确切 `head_sha` 的完整 `base..head` diff（隔离编写者 Worker 原生线程与其自检背书）；Bot 账号与 Reviewer 账号物理隔离、将本地镜像通过 R1 的精确 `result_sha` 推送到入库 `origin` 快照、Reviewer 通过后进入 `awaiting_human_approval` 等待用户批准确切 SHA 再开 auto-merge；返工达上限（2 轮）自动熔断回 Hub 重审设计前提；PR/CI 失败或评论变更实时作为 `source='host'` 事件推回主控收件箱。
 - **阶段 3：Tauri v2 移动双端（iOS / Android）、`google/agentmesh` 跨设备联邦与纯私有通知配对**
   - 编译打包 iOS 与 Android Tauri v2 客户端，适配真机 375px 触控交互。
   - 引入 **`google/agentmesh`（Apache-2.0，`polyclave-mesh`）**：支持基于 `agentmesh-one` / `agentmesh-node` 的全自托管跨设备零信任组网（与 Tailscale 并行或替代），实现跨机客户端访问与主控对远端 Windows/Linux 设备 Worker/MCP 的联邦调度，并以 `deny-by-default` 策略及可衰减 Biscuit Token 锁死跨机工具调用权限（R1 核证与主账本仍由主控 `polyclaved` 独占）。

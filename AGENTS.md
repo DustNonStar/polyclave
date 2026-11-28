@@ -82,12 +82,17 @@ Several agents build this project. The user relays messages between them by hand
    - Never push with `--force`. Never push other branches or tags. Never open or merge pull requests.
    - Never run the real `codex` CLI unless the work list says so.
 7. **Conflicts.** If the work list conflicts with a test, a rule or the code, stop.
-   - Write it in `PLAN-ISSUES.md` with the evidence: command, output, file:line.
-   - Mark it `detail` or `direction`, and propose a fix.
-   - Commit it, push, and stop. Do not work around it.
+   - Write it in `PLAN-ISSUES.md` using the four-part structure:
+     1) what happened and exact evidence (`command`, `output`, `file:line`);
+     2) why it happened and whether it exposes an overlooked design assumption;
+     3) for `direction` items, 2–3 concrete options explaining what each means, its pros, cons, and trade-offs;
+     4) the recommended option aligned with the project's current goal and why.
+   - Mark it `detail` or `direction`.
+   - Commit it, push (or leave on branch per `NEXT.md`), and stop. Do not work around it.
 8. **Unfinished work.** Finished work that you cannot commit to `main` yet goes on a local branch `wip/<item>`. Commit it there and never push it. Say in `PLAN-ISSUES.md` that it exists.
 9. **Progress lines.** After each commit, append one progress line to `HANDOFF.md` under the job's heading: `- <sha> <message> — workspace tests: N passed`. If you run out of quota, the next agent continues from that line.
-10. **Cleanup.** Stop every host, fake codex and browser you start, and say so in the report.
+10. **Self-review & honest verification.** Run a self-review pass on your diff before handing back, and explicitly separate in `HANDOFF.md` what was verified only with offline fakes/mocks from what remains unverified in real environments.
+11. **Cleanup.** Stop every host, fake codex and browser you start, and say so in the report.
 
 ## Hand checks
 
