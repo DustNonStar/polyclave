@@ -39,10 +39,30 @@ fn worker(args: &[OsString]) -> i32 {
         "{}",
         json!({"type":"item.completed","item":{"type":"agent_message","text":key}})
     );
+    // A revision Attempt starts from the previous Attempt's verified commit, so
+    // that commit's files are already in the checkout. The change number
+    // continues from them instead of colliding with an existing file.
+    let delivered = std::fs::read_dir(".")
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()?
+                        .strip_prefix("result-")?
+                        .strip_suffix(".txt")?
+                        .parse::<u32>()
+                        .ok()
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
     let n = std::fs::read_to_string(".fixture-turn")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0)
+        .max(delivered)
         + 1;
     std::fs::write(".fixture-turn", n.to_string()).unwrap();
     if let Some(address) = field(&input, "Fixture barrier: ") {

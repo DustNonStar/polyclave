@@ -99,6 +99,7 @@ CREATE TABLE attempts (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id           TEXT NOT NULL REFERENCES runs(id),
   attempt_no       INTEGER NOT NULL,
+  from_sha         TEXT,
   branch           TEXT NOT NULL,
   worktree_path    TEXT NOT NULL,
   agent_thread_id  TEXT,

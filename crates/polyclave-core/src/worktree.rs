@@ -28,6 +28,30 @@ impl MirrorManager {
     /// A standalone checkout has no shared writable Git metadata with either
     /// the owner's primary checkout or another Attempt.
     pub fn prepare_attempt(&self, a: &AttemptGit) -> Result<Workspace, GitError> {
+        self.prepare_attempt_at(a, None)
+    }
+
+    /// A revision Attempt continues the previous Attempt's verified work instead
+    /// of restarting from the Run's baseline. The Run's `base_sha` never moves,
+    /// so the reviewed range still starts where it always did; only this
+    /// Attempt's start commit differs.
+    pub fn prepare_revision_attempt(
+        &self,
+        a: &AttemptGit,
+        from: &str,
+    ) -> Result<Workspace, GitError> {
+        validate_oid(from)?;
+        if a.number < 2 {
+            return Err(GitError::Invalid("a revision needs an earlier Attempt"));
+        }
+        self.prepare_attempt_at(a, Some(from))
+    }
+
+    fn prepare_attempt_at(
+        &self,
+        a: &AttemptGit,
+        from: Option<&str>,
+    ) -> Result<Workspace, GitError> {
         self.with_repo(&a.run.repo, |repo| {
             self.validate_run(&a.run, repo)?;
             validate_attempt(a)?;
@@ -61,16 +85,45 @@ impl MirrorManager {
             if self.oid(cwd, "refs/polyclave/base")? != a.run.base {
                 return Err(GitError::Invalid("checkout baseline differs from the Run"));
             }
+            // A revision starts at the previous Attempt's verified SHA. It is
+            // fetched by its own attempt ref, so the start commit must be
+            // exactly what that ref serves - never a caller's loose SHA.
+            let start = match from {
+                Some(from) => {
+                    let previous = AttemptGit {
+                        run: a.run.clone(),
+                        number: a.number - 1,
+                    };
+                    let previous_ref = previous.full_ref();
+                    self.fetch(
+                        cwd,
+                        &a.run.mirror,
+                        &format!("{previous_ref}:refs/polyclave/revision"),
+                    )?;
+                    if self.oid(cwd, "refs/polyclave/revision")? != from {
+                        return Err(GitError::Invalid(
+                            "the previous Attempt tip differs from the revision base",
+                        ));
+                    }
+                    let ancestor =
+                        self.git(cwd, ["merge-base", "--is-ancestor", &a.run.base, from])?;
+                    if ancestor.status.code() != Some(0) {
+                        return Err(GitError::Invalid(
+                            "the revision base is not descended from the Run baseline",
+                        ));
+                    }
+                    from
+                }
+                None => &a.run.base,
+            };
             self.require(
                 cwd,
-                [
-                    "checkout",
-                    "--no-recurse-submodules",
-                    "-b",
-                    branch,
-                    &a.run.base,
-                ],
-                "checkout immutable base",
+                ["checkout", "--no-recurse-submodules", "-b", branch, start],
+                if from.is_some() {
+                    "checkout revision base"
+                } else {
+                    "checkout immutable base"
+                },
             )?;
             let args = [
                 OsString::from("remote"),

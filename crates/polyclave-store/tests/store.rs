@@ -1166,3 +1166,51 @@ fn external_hub_input_is_marked_as_an_observation_and_user_input_is_not() {
         Err(Error::ConflictError)
     ));
 }
+
+#[test]
+fn attempt_from_sha_upgrades_an_existing_ledger_without_moving_the_schema_version() {
+    let (dir, store) = fixture();
+    let path = dir.path().join("state.sqlite");
+    let version: i64 = store
+        .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 10);
+    drop(store);
+    // A ledger written before revisions has the Attempt row but no start commit.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "ALTER TABLE attempts DROP COLUMN from_sha;
+             INSERT INTO attempts(id,run_id,attempt_no,branch,worktree_path,status,created_at)
+             VALUES(501,'run',8,'agent/run/a8','wt','completed','now');",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.attempt_from_sha(501).unwrap(), None);
+    store
+        .write(|db| {
+            db.execute(
+                "INSERT INTO attempts(id,run_id,attempt_no,from_sha,branch,worktree_path,status,created_at)
+                 VALUES(502,'run',9,'deadbeef','agent/run/a9','wt2','prepared','now')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store.attempt_from_sha(502).unwrap().as_deref(),
+        Some("deadbeef")
+    );
+    assert!(
+        store.attempt_from_sha(999).is_err(),
+        "a missing Attempt is an error"
+    );
+    // Reopening runs the additive step again and must stay harmless.
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 10);
+}

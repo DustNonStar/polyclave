@@ -337,35 +337,111 @@ impl RunManager {
                 workspace,
             });
         }
-        let n = run
-            .current_attempt
-            .checked_add(1)
-            .filter(|n| *n <= run.max_attempts)
-            .ok_or(Error::BudgetExceededError)?;
-        let git = self.attempt_git(&run, n)?;
-        let reserved = self.git.attempt_workspace(&git);
-        let path = path_text(&reserved.cwd)?;
-        let branch = reserved.branch;
-        let id = id.to_owned();
-        let attempt=self.store.write(move|db|{
-            let stamp=now(db)?;
-            if let Some(previous)=previous {
-                db.execute("UPDATE attempts SET status='superseded',ended_at=COALESCE(ended_at,?2) WHERE id=?1",params![previous.id,stamp])?;
-                change(db,ChangeTopic::Attempt,&previous.id.to_string(),&load_attempt(db,previous.id)?)?;
-            }
-            db.execute("INSERT INTO attempts(run_id,attempt_no,branch,worktree_path,status,created_at)
-                VALUES(?1,?2,?3,?4,'prepared',?5)",params![id,n,branch,path,stamp])?;
-            let attempt=load_attempt(db,db.last_insert_rowid())?;
-            db.execute("UPDATE runs SET current_attempt=?2,status='running',detail=NULL,resolution=NULL,updated_at=?3 WHERE id=?1",params![id,n,stamp])?;
-            change(db,ChangeTopic::Attempt,&attempt.id.to_string(),&attempt)?;
-            change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
-            Ok(attempt)
-        })?;
+        let (attempt, git) = self.create_attempt(&run, previous, None, false)?;
         let workspace = match self.git.prepare_attempt(&git) {
             Ok(workspace) => workspace,
             Err(_) => {
                 self.interrupt_unstarted_attempt(attempt)?;
                 return Err(Error::Invalid("cannot prepare isolated Attempt"));
+            }
+        };
+        let run = self.get(&run.id)?;
+        Ok(RunWork {
+            run,
+            attempt,
+            id: git,
+            workspace,
+        })
+    }
+
+    /// Creates the next Attempt and moves the Run to `running`. `from_sha` is
+    /// the commit a revision continues from; `clear_result` drops the Run's own
+    /// verified result so a revision can never inherit it.
+    fn create_attempt(
+        &self,
+        run: &RunDto,
+        previous: Option<AttemptDto>,
+        from_sha: Option<&str>,
+        clear_result: bool,
+    ) -> Result<(AttemptDto, AttemptGit)> {
+        let n = run
+            .current_attempt
+            .checked_add(1)
+            .filter(|n| *n <= run.max_attempts)
+            .ok_or(Error::BudgetExceededError)?;
+        let git = self.attempt_git(run, n)?;
+        let reserved = self.git.attempt_workspace(&git);
+        let path = path_text(&reserved.cwd)?;
+        let branch = reserved.branch;
+        let id = run.id.clone();
+        let from_sha = from_sha.map(str::to_owned);
+        let attempt = self.store.write(move |db| {
+            let stamp = now(db)?;
+            if let Some(previous) = previous {
+                db.execute(
+                    "UPDATE attempts SET status='superseded',ended_at=COALESCE(ended_at,?2) WHERE id=?1",
+                    params![previous.id, stamp],
+                )?;
+                change(
+                    db,
+                    ChangeTopic::Attempt,
+                    &previous.id.to_string(),
+                    &load_attempt(db, previous.id)?,
+                )?;
+            }
+            db.execute(
+                "INSERT INTO attempts(run_id,attempt_no,from_sha,branch,worktree_path,status,created_at)
+                 VALUES(?1,?2,?3,?4,?5,'prepared',?6)",
+                params![id, n, from_sha, branch, path, stamp],
+            )?;
+            let attempt = load_attempt(db, db.last_insert_rowid())?;
+            db.execute(
+                "UPDATE runs SET current_attempt=?2,status='running',detail=NULL,resolution=NULL,
+                   result_sha=CASE WHEN ?4 THEN NULL ELSE result_sha END,
+                   observed_sha=CASE WHEN ?4 THEN NULL ELSE observed_sha END,
+                   result_source=CASE WHEN ?4 THEN NULL ELSE result_source END,
+                   accepted_attempt_id=CASE WHEN ?4 THEN NULL ELSE accepted_attempt_id END,
+                   updated_at=?3
+                 WHERE id=?1",
+                params![id, n, stamp, clear_result],
+            )?;
+            change(db, ChangeTopic::Attempt, &attempt.id.to_string(), &attempt)?;
+            change(db, ChangeTopic::Run, &id, &load_run(db, &id)?)?;
+            Ok(attempt)
+        })?;
+        Ok((attempt, git))
+    }
+
+    /// Starts a PR-gate revision: a fresh Attempt branched from the previous
+    /// Attempt's R1-verified SHA, with the Run's immutable baseline untouched.
+    ///
+    /// The Run's own verified result is cleared first, so the revised commit
+    /// needs its own accepted receipt: a missing one leaves the Run in
+    /// `needs_review` with no `result_sha`, which the PR gate refuses. The prior
+    /// SHA and any approval of it are never reused.
+    pub fn begin_revision(&self, id: &str) -> Result<RunWork> {
+        let _guard = self.gate.lock().map_err(|_| Error::Closed)?;
+        let run = self.get(id)?;
+        let Some(prior) = self.r1_verified_sha(&run)? else {
+            return Err(Error::ConflictError);
+        };
+        let occupied = self.store.read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=?1 AND status='running' AND mode!='consult')",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })?;
+        if occupied {
+            return Err(Error::BusyError);
+        }
+        let previous = self.store.read(|db| current_attempt(db, &run))?;
+        let (attempt, git) = self.create_attempt(&run, previous, Some(&prior), true)?;
+        let workspace = match self.git.prepare_revision_attempt(&git, &prior) {
+            Ok(workspace) => workspace,
+            Err(_) => {
+                self.interrupt_unstarted_attempt(attempt)?;
+                return Err(Error::Invalid("cannot prepare the revision Attempt"));
             }
         };
         let run = self.get(&run.id)?;

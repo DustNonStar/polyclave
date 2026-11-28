@@ -1,4 +1,5 @@
 //! SQLite is owned by this crate; mutation jobs are serialized on one writer.
+mod attempts;
 mod hub;
 mod memory;
 pub mod mesh_limits;

@@ -443,9 +443,11 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
                 gate.branch,
                 violations.join(", ")
             );
+            // A revision is a new Attempt branched from the verified SHA, never
+            // a chat turn on a finished Run.
             let handle = self
                 .runner
-                .schedule(&gate.run_id, TurnMode::WorkerChat, prompt)
+                .schedule_revision(&gate.run_id, prompt)
                 .map_err(|_| Error::Policy)?;
             let run = spawn_blocking(move || handle.join())
                 .await
@@ -468,7 +470,7 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
             );
             let handle = self
                 .runner
-                .schedule(&gate.run_id, TurnMode::WorkerChat, prompt)
+                .schedule_revision(&gate.run_id, prompt)
                 .map_err(|_| Error::Policy)?;
             let run = spawn_blocking(move || handle.join())
                 .await

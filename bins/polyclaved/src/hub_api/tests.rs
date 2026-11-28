@@ -873,6 +873,291 @@ fn setup_unreceipted_run(dir: &FsPath, hub: &Hub, run_id: &str, attempt_id: i64)
     tip
 }
 
+/// The workspace builds `polyclave-fake-agent` for the core suite; it lives in
+/// the same target directory as this test binary.
+fn fake_agent_binary() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let path = exe
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| {
+            p.join(format!(
+                "polyclave-fake-agent{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+        })
+        .unwrap();
+    assert!(
+        path.is_file(),
+        "the offline Worker fixture is missing: {}",
+        path.display()
+    );
+    path
+}
+
+/// A Hub whose TurnRunner really spawns the offline Worker fixture and whose MCP
+/// server really accepts its receipt: the whole A -> B chain, no test double.
+async fn worker_hub() -> (
+    tempfile::TempDir,
+    Hub,
+    String,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_cmd(&repo, &["init", "-b", "main", "--template="]);
+    git_cmd(&repo, &["config", "user.name", "Fixture"]);
+    git_cmd(&repo, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(repo.join("README.md"), "base\n").unwrap();
+    git_cmd(&repo, &["add", "."]);
+    git_cmd(&repo, &["commit", "-m", "base"]);
+    let repo = polyclave_os::canonical_real_path(&repo).unwrap();
+    let repo_str = repo.to_str().unwrap().to_owned();
+    let repo_row = repo_str.clone();
+    let store = Store::open(dir.path().join("hub.db")).unwrap();
+    store
+        .write(move |db| {
+            db.execute(
+                "INSERT INTO provider_profiles(id,display_name,kind,models_json,created_at)
+                 VALUES('p','Fixture','codex_cli','[]','now')",
+                [],
+            )?;
+            db.execute(
+                "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                 VALUES('hub','Hub','hub',?1,'p','fixture','now')",
+                [&repo_row],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let runs = RunManager::new(
+        store.clone(),
+        Arc::new(MirrorManager::new(dir.path()).unwrap()),
+    );
+    let host = "revision-suite".to_owned();
+    let (addr, server) =
+        polyclave_adapters::mcp::Mcp::new(store.clone(), host.clone(), Arc::new(runs.clone()))
+            .listen()
+            .await
+            .unwrap();
+    let fake = fake_agent_binary();
+    let runner = TurnRunner::new(
+        runs.clone(),
+        dir.path(),
+        host,
+        RunnerConfig {
+            supervisor: fake.clone(),
+            mcp_url: format!("http://{addr}/mcp"),
+            codex: fake,
+            claude: "unavailable".into(),
+            claude_isolation: None,
+        },
+        |_, _| {},
+    )
+    .unwrap();
+    let (stream, _rx) = broadcast::channel(64);
+    let hub = Hub::new(
+        store,
+        runs,
+        runner,
+        "fixture-host".into(),
+        dir.path().to_path_buf(),
+        stream,
+    )
+    .await
+    .unwrap();
+    (dir, hub, repo_str, server)
+}
+
+/// `(id, attempt_no)` for every Attempt of a Run, in order.
+fn attempts_of(hub: &Hub, run_id: &str) -> Vec<(i64, u32)> {
+    hub.store
+        .read({
+            let run_id = run_id.to_owned();
+            move |db| {
+                let mut stmt = db.prepare(
+                    "SELECT id,attempt_no FROM attempts WHERE run_id=?1 ORDER BY attempt_no",
+                )?;
+                let rows = stmt
+                    .query_map([run_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+        })
+        .unwrap()
+}
+
+/// One Worker turn through the production scheduler.
+async fn run_turn(
+    hub: &Hub,
+    run_id: &str,
+    mode: TurnMode,
+    prompt: &str,
+) -> polyclave_proto::RunDto {
+    let job = hub
+        .runner
+        .schedule(run_id, mode, prompt.to_owned())
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || job.join().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap()
+}
+
+/// Item 2.3: a PR-gate revision is a new Attempt branched from the verified
+/// SHA, and it needs its own receipt. Without one, the previous SHA and the
+/// previous approval are not reused.
+#[tokio::test]
+async fn pr_gate_revision_turns_a_verified_run_into_a_new_attempt_with_its_own_receipt() {
+    let (dir, hub, repo, server) = worker_hub().await;
+    let message = hub
+        .store
+        .hub_enqueue("hub", "req-revision", "change the loader")
+        .unwrap();
+    let ticket = hub
+        .store
+        .hub_ticket(
+            "hub",
+            message.id,
+            "Revision",
+            json!({
+                "goal": "change the loader",
+                "allowed_paths": ["result-*.txt"],
+                "forbidden_actions": [],
+                "acceptance_criteria": []
+            }),
+            4,
+        )
+        .unwrap();
+    let (run, _) = hub
+        .runs
+        .accept_local_worker(polyclave_core::runs::RunRequest {
+            hub_session_id: "hub".into(),
+            request_id: "req-revision".into(),
+            vendor: Vendor::Codex,
+            model: None,
+            repo_cwd: std::path::PathBuf::from(&repo),
+            instructions: "Fixture: first delivery".into(),
+            base_branch: "main".into(),
+            ticket_id: Some(ticket.id.clone()),
+        })
+        .unwrap();
+    let run_id = run.id.clone();
+    let a = run_turn(&hub, &run_id, TurnMode::Start, "Fixture: first delivery").await;
+    assert_eq!(a.status, polyclave_proto::RunStatus::Done, "{a:?}");
+    let a_sha = a.result_sha.clone().expect("A is verified");
+    assert_eq!(a.current_attempt, 1);
+
+    let gate = hub
+        .store
+        .create_pr_gate(polyclave_store::NewPrGate {
+            run_id: run_id.clone(),
+            repo_slug: "org/repo".into(),
+            branch: "feat/revision".into(),
+            base_sha: a.base_sha.clone(),
+            head_sha: a_sha.clone(),
+            touched_paths: vec!["result-*.txt".into()],
+        })
+        .unwrap();
+
+    // The real executor: a new Attempt from A, then a Worker turn in it.
+    let executor = HostWorkerReviseExecutor {
+        runner: hub.runner.clone(),
+    };
+    let b_sha = executor
+        .revise_pr(&gate, "Please extend the change")
+        .await
+        .unwrap();
+    assert_ne!(b_sha, a_sha, "the revision delivered a new commit");
+
+    let revised = hub.runs.get(&run_id).unwrap();
+    assert_eq!(
+        revised.status,
+        polyclave_proto::RunStatus::Done,
+        "{revised:?}"
+    );
+    assert_eq!(revised.result_sha.as_deref(), Some(b_sha.as_str()));
+    assert_eq!(
+        revised.result_source,
+        Some(polyclave_proto::ResultSource::Agent)
+    );
+    assert_eq!(revised.current_attempt, 2);
+    assert_eq!(
+        revised.base_sha, a.base_sha,
+        "the reviewed baseline never moves"
+    );
+    let attempts = attempts_of(&hub, &run_id);
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[1].1, 2);
+    assert_eq!(
+        hub.store
+            .attempt_from_sha(attempts[1].0)
+            .unwrap()
+            .as_deref(),
+        Some(a_sha.as_str()),
+        "the revision branched from A"
+    );
+    assert_eq!(
+        revised.accepted_attempt_id,
+        Some(attempts[1].0),
+        "B has its own accepted receipt, not A's"
+    );
+    assert_eq!(
+        verified_result_sha(&hub.runs, &revised).unwrap(),
+        b_sha,
+        "the gate publishes B"
+    );
+
+    // A revision that submits no receipt never falls back to B, and the Run is
+    // left for a human instead.
+    let failed = executor
+        .revise_pr(&gate, "Fixture: no receipt")
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, Error::Policy), "{failed:?}");
+    let stalled = hub.runs.get(&run_id).unwrap();
+    assert_eq!(stalled.status, polyclave_proto::RunStatus::NeedsReview);
+    assert_eq!(stalled.result_sha, None, "B is not reused as a result");
+    // The unpublished tip is a new commit nobody accepted: neither A nor B can
+    // stand in for it.
+    let observed = stalled.observed_sha.clone().expect("the pushed tip");
+    assert_ne!(observed, a_sha);
+    assert_ne!(observed, b_sha);
+    assert!(verified_result_sha(&hub.runs, &stalled).is_err());
+    let attempts = attempts_of(&hub, &run_id);
+    assert_eq!(attempts.len(), 3);
+    assert_eq!(
+        hub.store
+            .attempt_from_sha(attempts[2].0)
+            .unwrap()
+            .as_deref(),
+        Some(b_sha.as_str())
+    );
+    let receipts: i64 = hub
+        .store
+        .read({
+            let attempt = attempts[2].0;
+            move |db| {
+                Ok(db.query_row(
+                    "SELECT COUNT(*) FROM results WHERE attempt_id=?1 AND accepted=1",
+                    [attempt],
+                    |r| r.get(0),
+                )?)
+            }
+        })
+        .unwrap();
+    assert_eq!(receipts, 0, "the third Attempt has no accepted receipt");
+
+    server.abort();
+    hub.close().await;
+    drop(dir);
+}
+
 /// Item 2.2: the reviewed base and the authorized path scope come from the
 /// persisted Run and its Ticket mandate. A caller that tries to widen either is
 /// refused before anything is pushed, over HTTP and through the MCP tool.

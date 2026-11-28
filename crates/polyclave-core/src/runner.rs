@@ -147,8 +147,37 @@ impl TurnRunner {
         let cancel = Arc::new(AtomicBool::new(false));
         let work = self.runs.begin(id, mode)?;
         jobs.insert(id.into(), cancel.clone());
+        self.spawn_turn(&mut jobs, work, mode, text, cancel)
+    }
+
+    /// A PR-gate revision: the new Attempt is created from the previous
+    /// Attempt's R1-verified SHA, then a Worker turn runs inside it.
+    pub fn schedule_revision(
+        &self,
+        id: &str,
+        text: String,
+    ) -> Result<std::thread::JoinHandle<Result<RunDto>>> {
+        let mut jobs = self.active.lock().map_err(|_| Error::Closed)?;
+        if jobs.contains_key(id) {
+            return Err(Error::BusyError);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let work = self.runs.begin_revision(id)?;
+        jobs.insert(id.into(), cancel.clone());
+        self.spawn_turn(&mut jobs, work, TurnMode::WorkerChat, text, cancel)
+    }
+
+    fn spawn_turn(
+        &self,
+        jobs: &mut Active,
+        work: RunWork,
+        mode: TurnMode,
+        text: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<std::thread::JoinHandle<Result<RunDto>>> {
         let runner = self.clone();
-        let owned = id.to_owned();
+        let run_id = work.run.id.clone();
+        let owned = run_id.clone();
         match std::thread::Builder::new()
             .name("polyclave-turn".into())
             .spawn(move || {
@@ -160,8 +189,8 @@ impl TurnRunner {
             }) {
             Ok(thread) => Ok(thread),
             Err(_) => {
-                jobs.remove(id);
-                let rid = id.to_owned();
+                jobs.remove(&run_id);
+                let rid = run_id;
                 let _ = self.runs.store.write(move |db| {
                     let changed = db.execute(
                         "UPDATE runs SET status='interrupted',detail='failed to spawn worker thread',updated_at=?2
