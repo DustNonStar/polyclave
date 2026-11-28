@@ -6,7 +6,10 @@ mod publish;
 pub mod remote_dispatch;
 mod scm_cursors;
 pub mod test_results;
-pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
+pub use hub::{
+    ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent,
+    HOST_OBSERVATION_KIND,
+};
 pub use publish::{insert_run_origin_snapshot, OriginSnapshot};
 mod stage2;
 pub mod stage3;

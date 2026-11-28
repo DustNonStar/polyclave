@@ -1139,3 +1139,30 @@ fn test_results_table_upgrades_without_moving_the_schema_version() {
         .unwrap();
     assert_eq!(columns, 7);
 }
+
+#[test]
+fn external_hub_input_is_marked_as_an_observation_and_user_input_is_not() {
+    let (_dir, store) = fixture();
+    let user = store.hub_enqueue("hub", "u1", "carry on").unwrap();
+    let observed = store
+        .hub_enqueue_external("hub", "scm:org/repo:7:comment:1", "PR #7 comment by alice")
+        .unwrap();
+    assert_eq!(user.source, "user");
+    assert_eq!(user.metadata, None);
+    assert_eq!(observed.source, "host");
+    assert_eq!(
+        observed.metadata,
+        Some(json!({"kind": polyclave_store::HOST_OBSERVATION_KIND}))
+    );
+    // Repeating the same observation is idempotent and keeps its marker.
+    let again = store
+        .hub_enqueue_external("hub", "scm:org/repo:7:comment:1", "PR #7 comment by alice")
+        .unwrap();
+    assert_eq!(again.id, observed.id);
+    assert_eq!(again.metadata, observed.metadata);
+    // An external event can never stand as a Ticket's basis message.
+    assert!(matches!(
+        store.hub_ticket("hub", observed.id, "from a comment", json!({}), 1),
+        Err(Error::ConflictError)
+    ));
+}

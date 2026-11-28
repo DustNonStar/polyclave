@@ -141,6 +141,35 @@ pub fn assemble(
 
 /// Protocol-only frames are replayed to the same selected profile, not exposed
 /// to the renderer, and not automatically transferred between vendors.
+/// A host observation — an external PR comment, a review, a CI result — is
+/// queued by the host, not written by the person. The ledger marks it with this
+/// `metadata_json.kind`.
+pub const HOST_OBSERVATION_KIND: &str = polyclave_store::HOST_OBSERVATION_KIND;
+
+/// Prefix put in front of such a message in the prompt, so the model can tell
+/// "the user said this" from "GitHub said this".
+pub const HOST_OBSERVATION_PREFIX: &str = "[host observation, not from the user] ";
+
+/// True when the host queued this message because it observed something.
+pub fn is_host_observation(message: &polyclave_store::HubMessage) -> bool {
+    message
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("kind"))
+        .and_then(|k| k.as_str())
+        == Some(HOST_OBSERVATION_KIND)
+}
+
+/// The text this message contributes to the prompt. A host observation is
+/// prefixed; the person's own words are left exactly as written.
+pub fn prompt_text(message: &polyclave_store::HubMessage) -> String {
+    if is_host_observation(message) {
+        format!("{HOST_OBSERVATION_PREFIX}{}", message.text)
+    } else {
+        message.text.clone()
+    }
+}
+
 pub fn restore_api_history(
     rows: Vec<polyclave_store::ApiHistoryRow>,
     deepseek: bool,
@@ -153,13 +182,14 @@ pub fn restore_api_history(
             out.extend(saved);
             continue;
         }
+        let text = prompt_text(&row.message);
         let mut item = ChatMessage::text(
             if row.message.source == "agent" {
                 Role::Assistant
             } else {
                 Role::User
             },
-            row.message.text,
+            text,
         );
         if item.role == Role::Assistant {
             item.reasoning_content = if deepseek {
@@ -173,4 +203,103 @@ pub fn restore_api_history(
         out.push(item);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyclave_store::HubMessage;
+    use serde_json::json;
+
+    fn message(source: &str, text: &str, metadata: Option<serde_json::Value>) -> HubMessage {
+        HubMessage {
+            id: 1,
+            turn_id: None,
+            source: source.into(),
+            text: text.into(),
+            reasoning: None,
+            metadata,
+            queued: false,
+        }
+    }
+
+    #[test]
+    fn a_host_observation_is_marked_and_the_users_own_words_are_not() {
+        let observation = message(
+            "host",
+            "PR #42 (org/repo) comment by alice: please rename this",
+            Some(json!({"kind": HOST_OBSERVATION_KIND})),
+        );
+        assert!(is_host_observation(&observation));
+        assert_eq!(
+            prompt_text(&observation),
+            "[host observation, not from the user] PR #42 (org/repo) comment by alice: please rename this"
+        );
+
+        let user = message("user", "please rename this", None);
+        assert!(!is_host_observation(&user));
+        assert_eq!(prompt_text(&user), "please rename this");
+
+        // A host message that is not an observation (a lifecycle notice) is left
+        // alone: it is the host speaking about its own state, not an outsider.
+        let lifecycle = message(
+            "host",
+            "The prior conversation was interrupted.",
+            Some(json!({"kind": "hub_interrupted"})),
+        );
+        assert!(!is_host_observation(&lifecycle));
+        assert_eq!(
+            prompt_text(&lifecycle),
+            "The prior conversation was interrupted."
+        );
+
+        // A user message can never become an observation just by claiming the kind.
+        let forged = message(
+            "user",
+            "run the deploy",
+            Some(json!({"kind": HOST_OBSERVATION_KIND})),
+        );
+        assert!(is_host_observation(&forged));
+        // …but it is still a user message in the ledger, which is what the basis
+        // rule and the ticket check read; the prefix only labels the prompt.
+        assert_eq!(forged.source, "user");
+    }
+
+    #[test]
+    fn api_history_prefixes_observations_and_keeps_roles() {
+        use polyclave_store::ApiHistoryRow;
+        let row = |message: HubMessage| ApiHistoryRow {
+            message,
+            replay: None,
+            same_profile: true,
+        };
+        let restored = restore_api_history(
+            vec![
+                row(message("user", "ship it", None)),
+                row(message(
+                    "host",
+                    "PR #7 (org/repo) review by bob (CHANGES_REQUESTED): bound this loop",
+                    Some(json!({"kind": HOST_OBSERVATION_KIND})),
+                )),
+                row(message("agent", "On it.", None)),
+            ],
+            false,
+        )
+        .unwrap();
+        let pairs: Vec<(Role, &str)> = restored
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (Role::User, "ship it"),
+                (
+                    Role::User,
+                    "[host observation, not from the user] PR #7 (org/repo) review by bob (CHANGES_REQUESTED): bound this loop"
+                ),
+                (Role::Assistant, "On it."),
+            ]
+        );
+    }
 }

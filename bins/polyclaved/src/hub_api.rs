@@ -1293,7 +1293,7 @@ impl Hub {
             let system_prompt = build_system_prompt(&store);
             let messages = assemble(&system_prompt, &memory, &claim.summary, &history,
                 &json!({"hub_session_id":claim.session,"repo_cwd":claim.repo,"current_event":claim.input.metadata}),
-                ChatMessage::text(Role::User, &claim.input.text))?;
+                ChatMessage::text(Role::User, polyclave_hub::provider::prompt_text(&claim.input)))?;
             store.hub_authorize(claim.id, None).map_err(|_|Error::Store)?;
             Ok((claim,provider,messages))
         }).await?;
