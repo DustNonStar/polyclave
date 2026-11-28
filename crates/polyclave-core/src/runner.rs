@@ -663,8 +663,12 @@ impl TurnRunner {
                 EndReason::Exit=>TurnStatus::Failed,
                 _=>TurnStatus::Interrupted,
             };
-            db.execute("UPDATE turns SET status=?2,end_reason=?3,writer_check=?4,exit_code=?5,ended_at=?6 WHERE id=?1",
+            let updated_turns = db.execute(
+                "UPDATE turns SET status=?2,end_reason=?3,writer_check=?4,exit_code=?5,ended_at=?6 WHERE id=?1 AND status='running'",
                 params![turn,enum_value(status)?,enum_value(end)?,enum_value(writer)?,exit,stamp])?;
+            if updated_turns == 0 {
+                return work.map(|(id, _, _)| load_run(db, &id)).transpose();
+            }
             change(db,ChangeTopic::Turn,&turn.to_string(),&load_turn(db,turn)?)?;
             let Some(((id,aid,n),verdict))=work.zip(verdict) else {return Ok(None);};
             let current=load_run(db,&id)?;

@@ -852,6 +852,9 @@ async fn devices(State(hub): State<Hub>) -> Reply {
 async fn revoke_device(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
     let device =
         run_blocking(move || hub.store.revoke_paired_device(&id).map_err(HttpError::from)).await?;
+    let _ = hub
+        .stream
+        .send((device.id.clone(), super::StreamEvent::DeviceRevoked));
     Ok(Json(json!(device)))
 }
 

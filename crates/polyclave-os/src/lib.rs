@@ -12,7 +12,9 @@ mod platform;
 #[path = "windows.rs"]
 mod platform;
 
-pub use path::{canonical_real_path, prepare_isolated_link, resolve_cli_binary};
+pub use path::{
+    augmented_path_env, canonical_real_path, prepare_isolated_link, resolve_cli_binary,
+};
 pub use platform::{
     boot_epoch, create_private_dir, desktop_idle_secs, process_identity, write_private_file,
 };

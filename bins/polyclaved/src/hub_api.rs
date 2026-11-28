@@ -71,6 +71,7 @@ pub enum StreamEvent {
     Tool(ToolDelta),
     Resync,
     Shutdown,
+    DeviceRevoked,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolDelta {
@@ -1289,6 +1290,17 @@ impl Hub {
             let _ = handle.await;
         }
         let _ = self.stream.send((String::new(), StreamEvent::Shutdown));
+        if let Ok(runs) = self.runs.list() {
+            for run in runs {
+                if matches!(
+                    run.status,
+                    polyclave_proto::RunStatus::Pending | polyclave_proto::RunStatus::Running
+                ) {
+                    let _ = self.runner.cancel(&run.id);
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         {
             let active = self.lifecycle.sessions.lock().unwrap();
             for session in active.values() {
@@ -1300,10 +1312,12 @@ impl Hub {
             if self.lifecycle.sessions.lock().unwrap().is_empty() {
                 break;
             }
-            changed.await;
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                break;
+            }
         }
         if let Some(server) = self.lifecycle.server.lock().await.take() {
-            let _ = server.await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
         }
     }
     pub fn track(

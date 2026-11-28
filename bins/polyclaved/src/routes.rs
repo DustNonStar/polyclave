@@ -394,7 +394,12 @@ async fn sessions(State(app): State<App>) -> Reply {
     })).await?)))
 }
 
-async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response, HttpError> {
+async fn events(
+    State(app): State<App>,
+    headers: HeaderMap,
+    device: Option<Extension<auth::AuthenticatedDeviceId>>,
+) -> Result<Response, HttpError> {
+    let device_id = device.map(|Extension(d)| d.0);
     let mut cursor =
         match headers.get("last-event-id") {
             None => None,
@@ -434,6 +439,11 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response, 
                         break;
                     }
                     Ok((_, crate::hub_api::StreamEvent::Shutdown)) => break,
+                    Ok((revoked_id, crate::hub_api::StreamEvent::DeviceRevoked)) => {
+                        if device_id.as_deref() == Some(revoked_id.as_str()) {
+                            break;
+                        }
+                    }
                     Ok((run, message)) => {
                         if let Ok(ev)=Event::default().event("agent").json_data(json!({"run_id":run,"message":message})) {
                             yield Ok(ev);

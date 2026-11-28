@@ -129,13 +129,29 @@ pub fn sync_skill_to_isolated_homes(state_dir: &Path, skill: &LocalSkillDto) -> 
         let skills_root = vendor_root.join("skills");
         let target_dir = skills_root.join(&dir_name);
         for p in [&iso_root, &vendor_root, &skills_root, &target_dir] {
+            if let Ok(meta) = std::fs::symlink_metadata(p) {
+                if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                    return Err(Error::Policy);
+                }
+            }
             match create_private_dir(p) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && std::fs::symlink_metadata(p).is_ok_and(|m| {
+                            !m.file_type().is_symlink() && m.file_type().is_dir()
+                        }) => {}
                 Err(_) => return Err(Error::Store),
             }
         }
-        write_private_file(&target_dir.join("SKILL.md"), content.as_bytes())
+        let canonical_iso =
+            polyclave_os::canonical_real_path(&iso_root).map_err(|_| Error::Store)?;
+        let canonical_target =
+            polyclave_os::canonical_real_path(&target_dir).map_err(|_| Error::Store)?;
+        if !canonical_target.starts_with(&canonical_iso) {
+            return Err(Error::Policy);
+        }
+        write_private_file(&canonical_target.join("SKILL.md"), content.as_bytes())
             .map_err(|_| Error::Store)?;
         synced += 1;
     }
@@ -145,34 +161,98 @@ pub fn sync_skill_to_isolated_homes(state_dir: &Path, skill: &LocalSkillDto) -> 
 /// Redacts local paths, emails, and secret-like tokens from text before generating
 /// an opt-in community experience draft. Never uploads anything automatically.
 pub fn redact_text(input: &str) -> (String, u32) {
-    let mut stripped = 0u32;
-    let mut out_tokens = Vec::new();
     let mac_prefix = ["/U", "sers/"].concat();
     let linux_prefix = ["/h", "ome/"].concat();
     let gh_pat = ["github", "_pat_"].concat();
-    for token in input.split_whitespace() {
-        if token.starts_with(&mac_prefix)
-            || token.starts_with(&linux_prefix)
-            || token.starts_with("C:\\")
-            || token.starts_with("c:\\")
+    let slack_bot = ["xox", "b-"].concat();
+    let slack_user = ["xox", "p-"].concat();
+    let secret_prefixes = [
+        "sk-",
+        "ghp_",
+        "gho_",
+        gh_pat.as_str(),
+        slack_bot.as_str(),
+        slack_user.as_str(),
+        "AIza",
+        "AKIA",
+    ];
+    let is_path_stop =
+        |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ']' | '>' | ',' | ';');
+    let is_token_boundary = |prev: Option<char>| {
+        prev.is_none_or(|c| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '=' | ':' | '(' | '[' | '<' | ',')
+        })
+    };
+    let is_email_char =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-');
+
+    let mut out = String::with_capacity(input.len());
+    let mut stripped = 0u32;
+    let mut i = 0usize;
+    while i < input.len() {
+        let rest = &input[i..];
+        let prev = input[..i].chars().next_back();
+
+        if rest.starts_with("file://")
+            && (rest[7..].starts_with(&mac_prefix)
+                || rest[7..].starts_with(&linux_prefix)
+                || rest[7..].starts_with('/')
+                || rest[7..].starts_with("C:\\")
+                || rest[7..].starts_with("c:\\"))
         {
-            out_tokens.push("<LOCAL_PATH>".to_owned());
+            let end = rest.find(is_path_stop).unwrap_or(rest.len());
+            out.push_str("<LOCAL_PATH>");
             stripped += 1;
-        } else if token.contains('@') && token.contains('.') {
-            out_tokens.push("<EMAIL>".to_owned());
-            stripped += 1;
-        } else if token.starts_with("sk-")
-            || token.starts_with("ghp_")
-            || token.starts_with("gho_")
-            || token.starts_with(&gh_pat)
-        {
-            out_tokens.push("<REDACTED_SECRET>".to_owned());
-            stripped += 1;
-        } else {
-            out_tokens.push(token.to_owned());
+            i += end;
+            continue;
         }
+
+        if (rest.starts_with(&mac_prefix)
+            || rest.starts_with(&linux_prefix)
+            || rest.starts_with("C:\\")
+            || rest.starts_with("c:\\"))
+            && is_token_boundary(prev)
+        {
+            let end = rest.find(is_path_stop).unwrap_or(rest.len());
+            out.push_str("<LOCAL_PATH>");
+            stripped += 1;
+            i += end;
+            continue;
+        }
+
+        if is_token_boundary(prev) && secret_prefixes.iter().any(|p| rest.starts_with(p)) {
+            let end = rest.find(is_path_stop).unwrap_or(rest.len());
+            out.push_str("<REDACTED_SECRET>");
+            stripped += 1;
+            i += end;
+            continue;
+        }
+
+        if is_token_boundary(prev) {
+            if let Some(at_rel) = rest.find('@') {
+                let local = &rest[..at_rel];
+                if !local.is_empty() && local.chars().all(is_email_char) {
+                    let after_at = &rest[at_rel + 1..];
+                    let dom_len = after_at
+                        .find(|c: char| !is_email_char(c))
+                        .unwrap_or(after_at.len());
+                    let domain = &after_at[..dom_len];
+                    let trimmed_domain = domain.trim_end_matches('.');
+                    if trimmed_domain.contains('.') && trimmed_domain.len() >= 3 {
+                        out.push_str("<EMAIL>");
+                        stripped += 1;
+                        i += at_rel + 1 + trimmed_domain.len();
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    (out_tokens.join(" "), stripped)
+    (out, stripped)
 }
 
 pub fn build_redacted_community_draft(store: &Store) -> Result<CommunityDraftDto> {
@@ -488,5 +568,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.issue_number, 42);
+    }
+
+    #[test]
+    fn sync_skill_refuses_symlinked_skills_dir_and_redact_text_handles_embedded_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside-skills");
+        std::fs::create_dir_all(&outside).unwrap();
+        let skills_parent = dir.path().join("isolated-homes/codex");
+        std::fs::create_dir_all(&skills_parent).unwrap();
+        polyclave_os::prepare_isolated_link(&outside, &skills_parent.join("skills")).unwrap();
+
+        let store = Store::open(dir.path().join("s.sqlite")).unwrap();
+        let skill = store
+            .save_local_skill(NewLocalSkill {
+                name: "Unsafe".into(),
+                description: "Desc".into(),
+                body_md: "Body".into(),
+                synced_vendors: vec![Vendor::Codex],
+            })
+            .unwrap();
+        assert!(matches!(
+            sync_skill_to_isolated_homes(dir.path(), &skill),
+            Err(Error::Policy)
+        ));
+
+        let embedded = format!(
+            "PATH=\"{}\" `file://{}` TOKEN={} user=<{}>",
+            ["/U", "sers/bob/src"].concat(),
+            ["/h", "ome/bob/proj"].concat(),
+            ["ghp_", "secret999"].concat(),
+            ["bob", "@corp.example.org"].concat(),
+        );
+        let (redacted, count) = redact_text(&embedded);
+        assert_eq!(count, 4, "{redacted}");
+        assert!(!redacted.contains("bob"));
+        assert!(!redacted.contains("secret999"));
+        assert!(!redacted.contains("corp.example.org"));
     }
 }

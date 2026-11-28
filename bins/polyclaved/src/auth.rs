@@ -7,6 +7,9 @@ use axum::{
 use polyclave_store::Store;
 use std::sync::Arc;
 
+#[derive(Clone, Debug)]
+pub struct AuthenticatedDeviceId(pub String);
+
 #[derive(Clone)]
 pub struct LocalAuth {
     token: Arc<str>,
@@ -65,7 +68,7 @@ impl LocalAuth {
     }
 }
 
-pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next) -> Response {
+pub async fn require(State(auth): State<LocalAuth>, mut request: Request, next: Next) -> Response {
     let headers = request.headers();
     // Only the identity Tailscale Serve sets. A Mesh node header is a routing
     // label a caller can write itself, so it is never an identity.
@@ -109,6 +112,7 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
             .and_then(|v| v.as_bytes().strip_prefix(b"Bearer "));
         let single_auth = headers.get_all(header::AUTHORIZATION).iter().count() == 1;
         let mut authorized = false;
+        let mut device_id: Option<String> = None;
         if single_auth {
             if let Some(k) = key {
                 if let Some(peer) = peer_identity.as_deref() {
@@ -118,15 +122,17 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
                     {
                         let token_owned = token_str.to_owned();
                         let peer_owned = peer.to_owned();
-                        authorized = tokio::task::spawn_blocking(move || {
+                        device_id = tokio::task::spawn_blocking(move || {
                             store
                                 .verify_device_token(&token_owned, Some(&peer_owned))
                                 .ok()
                                 .flatten()
-                                .is_some()
+                                .map(|d| d.id)
                         })
                         .await
-                        .unwrap_or(false);
+                        .ok()
+                        .flatten();
+                        authorized = device_id.is_some();
                     }
                 } else if auth.matches(k) {
                     authorized = true;
@@ -134,15 +140,17 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
                     (auth.store.clone(), std::str::from_utf8(k))
                 {
                     let token_owned = token_str.to_owned();
-                    authorized = tokio::task::spawn_blocking(move || {
+                    device_id = tokio::task::spawn_blocking(move || {
                         store
                             .verify_device_token(&token_owned, None)
                             .ok()
                             .flatten()
-                            .is_some()
+                            .map(|d| d.id)
                     })
                     .await
-                    .unwrap_or(false);
+                    .ok()
+                    .flatten();
+                    authorized = device_id.is_some();
                 }
             }
         }
@@ -150,6 +158,9 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
             let mut r = StatusCode::UNAUTHORIZED.into_response();
             cors(&mut r, origin);
             return r;
+        }
+        if let Some(id) = device_id {
+            request.extensions_mut().insert(AuthenticatedDeviceId(id));
         }
     }
     let mut response = if preflight {

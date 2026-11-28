@@ -26,10 +26,17 @@ fn main() {
     if args.first().is_some_and(|s| is_supervisor_argument(s)) {
         std::process::exit(supervisor_exec_entry(&args[1..]).unwrap_or(125));
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build();
-    if let Err(err) = runtime.and_then(|rt| rt.block_on(serve())) {
+    let outcome = (|| -> io::Result<()> {
+        let state = state_dir()?;
+        let _lock = lock_host(&state)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let res = runtime.block_on(serve(state));
+        runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+        res
+    })();
+    if let Err(err) = outcome {
         eprintln!(
             "Polyclave could not start or serve the local daemon ({err}). Check the state directory, daemon lock, and loopback port."
         );
@@ -37,9 +44,7 @@ fn main() {
     }
 }
 
-async fn serve() -> io::Result<()> {
-    let state = state_dir()?;
-    let _lock = lock_host(&state)?;
+async fn serve(state: PathBuf) -> io::Result<()> {
     let port = std::env::var("POLYCLAVE_PORT")
         .ok()
         .map(|s| s.parse::<u16>())

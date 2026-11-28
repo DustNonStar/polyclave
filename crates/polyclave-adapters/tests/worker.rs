@@ -202,6 +202,12 @@ fn prepare_isolated_home_links_only_credentials_and_skills() {
     let claude_iso = prepare_isolated_home_from(&state, Vendor::Claude, Some(&src_claude)).unwrap();
     assert!(claude_iso.join(".credentials.json").exists());
     assert!(claude_iso.join("skills").is_dir());
+    assert!(!claude_iso
+        .join("skills")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert!(!claude_iso.join("settings.json").exists());
 }
 

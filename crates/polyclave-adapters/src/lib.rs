@@ -126,10 +126,10 @@ pub fn prepare_isolated_home_from(
         Vendor::Dsh => "dsh",
     };
     let entries: &[&str] = match vendor {
-        Vendor::Codex => &["auth.json", "skills"],
-        Vendor::Claude => &[".credentials.json", "skills"],
-        Vendor::Agy => &["credentials.json", "oauth_creds.json", "skills"],
-        Vendor::Dsh => &["auth.json", "credentials.json", "skills"],
+        Vendor::Codex => &["auth.json"],
+        Vendor::Claude => &[".credentials.json"],
+        Vendor::Agy => &["credentials.json", "oauth_creds.json"],
+        Vendor::Dsh => &["auth.json", "credentials.json"],
     };
     let parent = state_dir.join("isolated-homes");
     let isolated = parent.join(vendor_name);
@@ -143,6 +143,19 @@ pub fn prepare_isolated_home_from(
         }
     }
     let isolated = canonical_real_path(&isolated)?;
+    let dst_skills = isolated.join("skills");
+    if let Ok(meta) = std::fs::symlink_metadata(&dst_skills) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+            remove_isolated_entry(&dst_skills, &meta)?;
+        }
+    }
+    match create_private_dir(&dst_skills) {
+        Ok(()) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::AlreadyExists
+                && std::fs::symlink_metadata(&dst_skills)?.file_type().is_dir() => {}
+        Err(e) => return Err(e.into()),
+    }
     if let Some(src_root) = source_dir {
         if canonical_real_path(src_root).ok().as_deref() == Some(isolated.as_path()) {
             return Ok(isolated);
@@ -150,8 +163,51 @@ pub fn prepare_isolated_home_from(
         for name in entries {
             sync_isolated_entry(&src_root.join(name), &isolated.join(name))?;
         }
+        sync_isolated_skills_dir(&src_root.join("skills"), &dst_skills)?;
     }
     Ok(isolated)
+}
+
+fn sync_isolated_skills_dir(src_skills: &Path, dst_skills: &Path) -> Result<(), Error> {
+    let src_real = if src_skills.is_dir() {
+        Some(canonical_real_path(src_skills)?)
+    } else {
+        None
+    };
+    if let Ok(entries) = std::fs::read_dir(dst_skills) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                let points_into_src = src_real.as_ref().is_some_and(|root| {
+                    std::fs::read_link(&path).is_ok_and(|target| target.starts_with(root))
+                });
+                let still_exists = src_real
+                    .as_ref()
+                    .is_some_and(|root| root.join(entry.file_name()).exists());
+                if src_real.is_none() || (points_into_src && !still_exists) {
+                    let _ = remove_isolated_entry(&path, &meta);
+                }
+            }
+        }
+    }
+    let Some(src_real) = src_real else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(&src_real)? {
+        let entry = entry?;
+        let dst_entry = dst_skills.join(entry.file_name());
+        if let Ok(meta) = std::fs::symlink_metadata(&dst_entry) {
+            if !meta.file_type().is_symlink() {
+                // Keep real host-managed skills (e.g. Teach-Once) untouched.
+                continue;
+            }
+        }
+        sync_isolated_entry(&entry.path(), &dst_entry)?;
+    }
+    Ok(())
 }
 
 fn sync_isolated_entry(src: &Path, dst: &Path) -> Result<(), Error> {
@@ -213,7 +269,6 @@ fn roots(ctx: &WorkerContext<'_>) -> Result<[PathBuf; 2], Error> {
 /// Returns the minimal environment allowlist shared by Worker and Hub CLI subprocesses.
 pub fn base_environment() -> Vec<(OsString, OsString)> {
     const KEYS: &[&str] = &[
-        "PATH",
         "HOME",
         "USER",
         "LOGNAME",
@@ -241,10 +296,13 @@ pub fn base_environment() -> Vec<(OsString, OsString)> {
         "all_proxy",
         "no_proxy",
     ];
-    KEYS.iter()
+    let mut env: Vec<(OsString, OsString)> = KEYS
+        .iter()
         .filter_map(|k| std::env::var_os(k).map(|v| (OsString::from(k), v)))
-        .chain([(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))])
-        .collect()
+        .collect();
+    env.push((OsString::from("PATH"), polyclave_os::augmented_path_env()));
+    env.push((OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")));
+    env
 }
 
 /// Returns non-empty Claude API/OAuth credentials from the host environment for

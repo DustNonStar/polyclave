@@ -3941,7 +3941,16 @@ async fn pairing_qr_points_at_the_configured_tailscale_origin() {
     }
 
     let (_dir, hub, _rx) = test_hub().await;
-    let app = daemon_router(&hub);
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: hub.store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("test-only".into(), 4310, Some(hub.store.clone())),
+    );
     let create = |label: &'static str| {
         authed_post(
             "/api/pairing/tickets",
@@ -4465,5 +4474,54 @@ async fn pr_gate_is_async_enforces_i1_recovers_stalled_and_merges_clean_pr() {
     assert_eq!(
         hub.store.pr_gate(&stalled.id).unwrap().status,
         PrGateStatus::Escalated
+    );
+}
+
+#[tokio::test]
+async fn revoking_paired_device_closes_open_sse_stream_immediately() {
+    let (_dir, hub, _rx) = test_hub().await;
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: hub.store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("test-only".into(), 4310, Some(hub.store.clone())),
+    );
+    let (_ticket, secret) = hub
+        .store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "user@example.com", 300)
+        .unwrap();
+    let (device, device_token) = hub.store.exchange_pairing_ticket(&secret, None).unwrap();
+
+    let sse_req = Request::builder()
+        .method("GET")
+        .uri("/api/events")
+        .header("Host", "127.0.0.1:4310")
+        .header("Authorization", format!("Bearer {device_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let sse_resp = app.clone().oneshot(sse_req).await.unwrap();
+    assert_eq!(sse_resp.status(), StatusCode::OK);
+    let mut sse_body = sse_resp.into_body();
+
+    let revoke_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/devices/{}/revoke", device.id))
+        .header("Host", "127.0.0.1:4310")
+        .header("Authorization", "Bearer test-only")
+        .body(Body::empty())
+        .unwrap();
+    let revoke_resp = app.clone().oneshot(revoke_req).await.unwrap();
+    assert_eq!(revoke_resp.status(), StatusCode::OK);
+
+    let next_frame = tokio::time::timeout(Duration::from_secs(2), sse_body.frame())
+        .await
+        .expect("revoked device SSE stream must terminate promptly");
+    assert!(
+        next_frame.is_none(),
+        "expected SSE stream to close after device revocation"
     );
 }
