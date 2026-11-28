@@ -16,6 +16,7 @@ pub struct MacosSeatbeltIsolation {
     state_dir: PathBuf,
     isolated_claude_home: PathBuf,
     home_dir: Option<PathBuf>,
+    proxy_urls: Vec<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -28,17 +29,94 @@ impl MacosSeatbeltIsolation {
         let state_dir = polyclave_os::canonical_real_path(state_dir).ok()?;
         let home_dir =
             crate::user_home_dir().and_then(|home| polyclave_os::canonical_real_path(&home).ok());
+        let proxy_urls = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .into_iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .filter(|v| !v.trim().is_empty())
+        .collect();
         Some(Self {
             sandbox_exec,
             isolated_claude_home: state_dir.join("isolated-homes").join("claude"),
             state_dir,
             home_dir,
+            proxy_urls,
         })
     }
 
     pub fn with_home_dir(mut self, home_dir: PathBuf) -> Self {
         self.home_dir = Some(polyclave_os::canonical_real_path(&home_dir).unwrap_or(home_dir));
         self
+    }
+
+    pub fn with_proxy_urls(mut self, proxy_urls: Vec<String>) -> Self {
+        self.proxy_urls = proxy_urls;
+        self
+    }
+
+    fn parse_proxy_sbpl_rule(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.contains(['"', '\\', '\0', '\n', '\r', ' ', '\t', '*']) {
+            return None;
+        }
+        let (scheme, rest) = match trimmed.split_once("://") {
+            Some((s, r)) => (Some(s.to_ascii_lowercase()), r),
+            None => (None, trimmed),
+        };
+        let authority = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+        let host_port = authority.split(['/', '?', '#']).next()?;
+        if host_port.is_empty() {
+            return None;
+        }
+        let default_port = match scheme.as_deref() {
+            Some("http") => Some(80u16),
+            Some("https") => Some(443u16),
+            Some("socks4" | "socks4a" | "socks5" | "socks5h") => Some(1080u16),
+            _ => None,
+        };
+        let (host, port) = if let Some(stripped) = host_port.strip_prefix('[') {
+            let (h, after) = stripped.split_once(']')?;
+            let p = if let Some(p_str) = after.strip_prefix(':') {
+                p_str.parse::<u16>().ok()?
+            } else if after.is_empty() {
+                default_port?
+            } else {
+                return None;
+            };
+            (h, p)
+        } else if let Some((h, p_str)) = host_port.rsplit_once(':') {
+            if h.contains(':') {
+                return None;
+            }
+            (h, p_str.parse::<u16>().ok()?)
+        } else {
+            (host_port, default_port?)
+        };
+        if port == 0 || host.is_empty() {
+            return None;
+        }
+        if host.eq_ignore_ascii_case("localhost") {
+            return Some(format!("(remote tcp \"localhost:{port}\")"));
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if ip.is_loopback() {
+                return Some(format!("(remote tcp \"localhost:{port}\")"));
+            }
+            return Some(format!("(remote tcp \"{ip}:{port}\")"));
+        }
+        if !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        {
+            return None;
+        }
+        Some(format!("(remote tcp \"*:{port}\")"))
     }
 
     fn escape_sbpl_path(path: &Path) -> Result<String, Error> {
@@ -98,6 +176,19 @@ impl MacosSeatbeltIsolation {
         let mcp = mcp_port.map_or_else(String::new, |port| {
             format!(" (remote tcp \"localhost:{port}\")")
         });
+        let mut proxy_rules = Vec::new();
+        for raw in &self.proxy_urls {
+            if let Some(rule) = Self::parse_proxy_sbpl_rule(raw) {
+                if !proxy_rules.contains(&rule) {
+                    proxy_rules.push(rule);
+                }
+            }
+        }
+        let proxies = if proxy_rules.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", proxy_rules.join(" "))
+        };
         Ok(format!(
             "(version 1)\n\
              (deny default)\n\
@@ -111,7 +202,7 @@ impl MacosSeatbeltIsolation {
                   (require-not (require-any {state_read_exceptions}))))\n\
              (deny file-read* {sensitive_reads})\n\
              (allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") {write_roots})\n\
-             (allow network-outbound{mcp}\n\
+             (allow network-outbound{mcp}{proxies}\n\
                   (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))\n\
                   (require-all (remote tcp \"*:443\") (require-not (remote ip \"localhost:*\")))\n\
                   (require-all (remote udp \"*:53\") (require-not (remote ip \"localhost:*\"))))"

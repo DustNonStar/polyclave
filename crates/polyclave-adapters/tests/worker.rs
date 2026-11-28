@@ -887,5 +887,20 @@ fn seatbelt_profile_includes_mdns_and_proxy_and_auth_helpers_compile() {
         ] {
             assert!(profile.contains(rel), "profile missing {rel}");
         }
+
+        let with_proxy = iso
+            .with_proxy_urls(vec![
+                "http://127.0.0.1:7890".into(),
+                "socks5h://user:pass@localhost:1080".into(),
+                "https://proxy.corp:8443".into(),
+                "http://bad\"quote:9999".into(),
+            ])
+            .build_profile(&[state.join("work")])
+            .unwrap();
+        assert!(with_proxy.contains("(remote tcp \"localhost:7890\")"));
+        assert!(with_proxy.contains("(remote tcp \"localhost:1080\")"));
+        assert!(with_proxy.contains("(remote tcp \"*:8443\")"));
+        assert!(!with_proxy.contains("9999"));
+        assert!(!with_proxy.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
     }
 }

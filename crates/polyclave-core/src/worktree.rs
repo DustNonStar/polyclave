@@ -90,19 +90,29 @@ impl MirrorManager {
             // exactly what that ref serves - never a caller's loose SHA.
             let start = match from {
                 Some(from) => {
-                    let previous = AttemptGit {
-                        run: a.run.clone(),
-                        number: a.number - 1,
-                    };
-                    let previous_ref = previous.full_ref();
-                    self.fetch(
-                        cwd,
-                        &a.run.mirror,
-                        &format!("{previous_ref}:refs/polyclave/revision"),
-                    )?;
-                    if self.oid(cwd, "refs/polyclave/revision")? != from {
+                    let mut matched = false;
+                    for prev_no in (1..a.number).rev() {
+                        let candidate = AttemptGit {
+                            run: a.run.clone(),
+                            number: prev_no,
+                        };
+                        let candidate_ref = candidate.full_ref();
+                        if self
+                            .fetch(
+                                cwd,
+                                &a.run.mirror,
+                                &format!("{candidate_ref}:refs/polyclave/revision"),
+                            )
+                            .is_ok()
+                            && self.oid(cwd, "refs/polyclave/revision")? == from
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
                         return Err(GitError::Invalid(
-                            "the previous Attempt tip differs from the revision base",
+                            "no prior Attempt tip matches the revision base",
                         ));
                     }
                     let ancestor =

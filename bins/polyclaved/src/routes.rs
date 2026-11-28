@@ -96,18 +96,30 @@ fn resolve_ui_dir() -> PathBuf {
 }
 
 pub(crate) type Reply = std::result::Result<Json<Value>, HttpError>;
-pub(crate) struct HttpError(
-    pub(crate) StatusCode,
-    pub(crate) &'static str,
-    pub(crate) &'static str,
-);
+pub(crate) struct HttpError {
+    status: StatusCode,
+    code: &'static str,
+    message: std::borrow::Cow<'static, str>,
+}
+#[allow(non_snake_case)]
+pub(crate) fn HttpError(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<std::borrow::Cow<'static, str>>,
+) -> HttpError {
+    HttpError {
+        status,
+        code,
+        message: message.into(),
+    }
+}
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         (
-            self.0,
+            self.status,
             Json(ApiError {
-                code: self.1.into(),
-                message: self.2.into(),
+                code: self.code.into(),
+                message: self.message.into_owned(),
             }),
         )
             .into_response()
@@ -116,20 +128,20 @@ impl IntoResponse for HttpError {
 impl From<Error> for HttpError {
     fn from(error: Error) -> Self {
         match error {
-            Error::NotFound => Self(StatusCode::NOT_FOUND, "not_found", "Not found"),
-            Error::BusyError => Self(StatusCode::CONFLICT, "busy", "The run is busy"),
-            Error::BudgetExceededError => Self(
+            Error::NotFound => HttpError(StatusCode::NOT_FOUND, "not_found", "Not found"),
+            Error::BusyError => HttpError(StatusCode::CONFLICT, "busy", "The run is busy"),
+            Error::BudgetExceededError => HttpError(
                 StatusCode::CONFLICT,
                 "budget_exceeded",
                 "Run or Attempt budget exhausted",
             ),
-            Error::ConflictError => Self(
+            Error::ConflictError => HttpError(
                 StatusCode::CONFLICT,
                 "conflict",
                 "Not permitted in the current state",
             ),
-            Error::Invalid(detail) => Self(StatusCode::BAD_REQUEST, "invalid_request", detail),
-            _ => Self(
+            Error::Invalid(detail) => HttpError(StatusCode::BAD_REQUEST, "invalid_request", detail),
+            _ => HttpError(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
                 "Host operation failed",

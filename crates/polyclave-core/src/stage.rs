@@ -115,19 +115,29 @@ impl MirrorManager {
                 if attempt.number < 2 {
                     return Err(GitError::Invalid("Invalid revision base for first Attempt"));
                 }
-                let previous = AttemptGit {
-                    run: attempt.run.clone(),
-                    number: attempt.number - 1,
-                };
-                let previous_ref = previous.full_ref();
-                broker.fetch(
-                    admin,
-                    &attempt.run.mirror,
-                    &format!("{previous_ref}:refs/polyclave/revision"),
-                )?;
-                if broker.oid(admin, "refs/polyclave/revision")? != prior {
+                let mut matched = false;
+                for prev_no in (1..attempt.number).rev() {
+                    let candidate = AttemptGit {
+                        run: attempt.run.clone(),
+                        number: prev_no,
+                    };
+                    let candidate_ref = candidate.full_ref();
+                    if broker
+                        .fetch(
+                            admin,
+                            &attempt.run.mirror,
+                            &format!("{candidate_ref}:refs/polyclave/revision"),
+                        )
+                        .is_ok()
+                        && broker.oid(admin, "refs/polyclave/revision")? == prior
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
                     return Err(GitError::Invalid(
-                        "The previous Attempt tip differs from the revision base",
+                        "No prior Attempt tip matches the revision base",
                     ));
                 }
                 let ancestor = broker.git(

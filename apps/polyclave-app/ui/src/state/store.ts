@@ -3,7 +3,7 @@ import type { Connection } from '../api/sse.js';
 import type { HubMessage, Profile, ProviderUsage, RunDetail, TicketIntent } from '../api/client.js';
 import type {
   CouncilDto, CuaLockDto, EvolutionSuggestionDto, LocalSkillDto, MemoryItemDto, MeshNodeDto, MeshNodeLimitDto,
-  NotificationChannelDto, PairedDeviceDto, PairingTicketDto, PauseStateDto, PrGateDto, RunDto,
+  NotificationChannelDto, PairedDeviceDto, PairingTicketDto, PauseStateDto, PrGateDiffDto, PrGateDto, RunDto,
   SessionDto, Vendor,
 } from '../generated/proto.js';
 
@@ -46,6 +46,7 @@ export const S = {
   /** Streaming text by session or run id (memory only, never persisted). */
   live: new Map<string, LiveTurn>(),
   details: new Map<string, RunDetail>(),
+  prGateDiffs: new Map<string, PrGateDiffDto>(),
   collapsed: new Set<string>(),
   memFilter: 'all',
   filePath: '',
@@ -57,7 +58,7 @@ export const selectedSession = (): SessionDto | undefined => S.sessions.find(s =
 export const hubSessions = (): SessionDto[] => S.sessions.filter(s => s.role !== 'worker');
 export const sessionRuns = (id: string | null = S.selected): RunDto[] => S.runs.filter(r => (id ? r.hub_session_id === id : true));
 export const visibleRuns = (): RunDto[] => (S.global ? S.runs : sessionRuns());
-export const needsReview = (): RunDto[] => S.runs.filter(r => r.status === 'needs_review');
+export const needsReview = (): RunDto[] => S.runs.filter(r => r.status === 'needs_review' || r.status === 'failed');
 export const awaitingCouncils = (): CouncilDto[] => S.councils.filter(c => c.status === 'awaiting_user');
 export const attentionPrGates = (): PrGateDto[] => S.prGates.filter(
   g => g.status === 'awaiting_human_approval' || g.status === 'scope_violation' || g.status === 'escalated' || g.status === 'failed',

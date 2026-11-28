@@ -174,17 +174,22 @@ export function tokenDialog(act: Actions): void {
 export function openPrGateDialog(api: Api, act: Actions, run: RunDto): void {
   const defaultReviewer: Vendor = run.vendor === 'claude' ? 'codex' : 'claude';
   let reviewerVendor: Vendor = defaultReviewer;
-  const revSeg = segmented(
-    'Heterogeneous reviewer',
-    (['codex', 'claude', 'agy', 'dsh'] as const).filter(v => v !== run.vendor),
-    defaultReviewer,
-    v => { reviewerVendor = v; },
-    { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', dsh: 'DSH' },
-  );
+  let modelEdited = false;
   const [slugL, slug] = textField('GitHub repository (owner/repo)', { placeholder: 'owner/repo', mono: true });
   const [branchL, branch] = textField('PR branch', { value: 'polyclave/' + run.id, mono: true });
   const [titleL, title] = textField('PR title', { value: (run.instructions.split('\n')[0] || 'Polyclave ' + run.id).slice(0, 80) });
   const [modelL, model] = textField('Reviewer model', { value: reviewerVendor === 'claude' ? 'claude-sonnet-4-6' : 'default', mono: true });
+  model.addEventListener('input', () => { modelEdited = true; });
+  const revSeg = segmented(
+    'Heterogeneous reviewer',
+    (['codex', 'claude', 'agy', 'dsh'] as const).filter(v => v !== run.vendor),
+    defaultReviewer,
+    v => {
+      reviewerVendor = v;
+      if (!modelEdited) model.value = v === 'claude' ? 'claude-sonnet-4-6' : 'default';
+    },
+    { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', dsh: 'DSH' },
+  );
   const err = errorLine();
   const go = button([icon('review'), 'Open PR Gate'], () => {
     const repoSlug = slug.value.trim();

@@ -632,8 +632,7 @@ fn map_page_err(err: super::Error) -> HttpError {
         ),
         super::Error::Http { status, detail } => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-            let msg: &'static str = Box::leak(detail.into_boxed_str());
-            HttpError(code, "github_error", msg)
+            HttpError(code, "github_error", detail)
         }
         _ => HttpError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1464,5 +1463,25 @@ async fn mesh_run_status(
         // gets the same answer, so a probe cannot tell the two apart.
         Ok(_) => StatusCode::FORBIDDEN.into_response(),
         Err(err) => err.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn map_page_err_preserves_dynamic_github_error_without_leaking() {
+        let resp = map_page_err(super::super::Error::Http {
+            status: 422,
+            detail: "custom upstream error".to_owned(),
+        })
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["code"], "github_error");
+        assert_eq!(parsed["message"], "custom upstream error");
     }
 }

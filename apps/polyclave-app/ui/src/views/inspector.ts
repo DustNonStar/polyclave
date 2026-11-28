@@ -307,12 +307,19 @@ function safeHttpsUrl(raw: string | null | undefined): string | null {
   }
 }
 
-/** The mirror diff for the gate's exact SHA, loaded once per card. */
+/** The mirror diff for the gate's exact SHA, cached by gate id + head SHA. */
 function approvalDiffSlot(api: Api, act: Actions, gate: PrGateDto): HTMLElement {
+  const diffKey = gate.id + ':' + gate.head_sha;
   const slot = h('div', { class: 'approval-diff', 'data-diff-sha': gate.head_sha });
+  const cached = S.prGateDiffs.get(diffKey);
+  if (cached) {
+    slot.append(diffPanel(cached, gate.pr_url));
+    return slot;
+  }
   const load = button('Show the diff for ' + short(gate.head_sha), () => {
     load.disabled = true;
     void api.prGateDiff(gate.id).then(diff => {
+      S.prGateDiffs.set(diffKey, diff);
       slot.replaceChildren(diffPanel(diff, gate.pr_url));
     }).catch((e: unknown) => {
       load.disabled = false;
@@ -389,10 +396,12 @@ function prGatesSection(api: Api, act: Actions): Node[] {
     nodes.push(picker);
   }
   const safePr = safeHttpsUrl(active.pr_url);
-  const canRunGate = !active.auto_merge_armed
-    && active.status !== 'auto_merge_armed'
-    && active.status !== 'awaiting_human_approval'
-    && active.status !== 'merged';
+  const canRunGate = !active.auto_merge_armed && (
+    active.status === 'failed'
+    || active.status === 'escalated'
+    || active.status === 'scope_violation'
+    || active.status === 'paused'
+  );
   const gateCard = h('section', { class: 'card pr-gate-card', 'data-tone': prGateTone(active.status) },
     h('div', { class: 'row' },
       h('span', { class: 'card-title grow', text: active.repo_slug + (active.pr_number ? ' #' + active.pr_number : '') }),
@@ -457,7 +466,7 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
   if (S.reviewView === 'council') return [sub, ...councilSection(api, act)];
   if (S.reviewView === 'pr_gates') {
     const activeGate = S.prGates.find(g => g.id === S.activePrGate) ?? attentionPrGates()[0] ?? S.prGates.slice(-1)[0];
-    if (activeGate && !S.details.has(activeGate.run_id)) {
+    if (activeGate) {
       try {
         const detail = await api.run(activeGate.run_id);
         S.details.set(activeGate.run_id, detail);
@@ -541,14 +550,19 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
   if (r.status === 'running' || r.status === 'pending') ops.append(button([icon('stop', 'ic--sm'), 'Cancel'], () => { void api.cancelRun(r.id).then(() => { act.tell('Cancel requested', 'info'); return act.refresh(); }).catch(act.problem); }, 'btn-danger', { 'data-focus-key': 'run-cancel' }));
   if (r.status === 'failed' || r.status === 'interrupted') ops.append(button([icon('retry', 'ic--sm'), 'Retry'], () => { void api.retry(r.id).then(() => { act.tell('Retry scheduled', 'info'); return act.refresh(); }).catch(act.problem); }, 'btn-ghost', { 'data-focus-key': 'run-retry' }));
   if (r.status === 'done' && r.result_source === 'agent' && r.result_sha) {
-    const existingGate = S.prGates.find(g => g.run_id === r.id);
-    if (existingGate) {
+    const runGates = S.prGates.filter(g => g.run_id === r.id);
+    const activeOrMergedGate = runGates.find(g =>
+      g.status !== 'failed' && g.status !== 'escalated' && g.status !== 'scope_violation',
+    );
+    const latestGate = runGates[runGates.length - 1];
+    if (latestGate) {
       ops.append(button([icon('review', 'ic--sm'), 'View PR Gate'], () => {
-        S.activePrGate = existingGate.id;
+        S.activePrGate = (activeOrMergedGate ?? latestGate).id;
         S.reviewView = 'pr_gates';
         act.setPanel('Review');
       }, 'btn-ghost', { 'data-focus-key': 'view-pr-gate' }));
-    } else {
+    }
+    if (!activeOrMergedGate) {
       ops.append(button([icon('review', 'ic--sm'), 'Open PR Gate'], () => openPrGateDialog(api, act, r), 'btn-primary', { 'data-focus-key': 'open-pr-gate', disabled: S.pause.paused }));
     }
   }

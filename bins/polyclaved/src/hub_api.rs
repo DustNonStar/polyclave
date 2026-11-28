@@ -1089,32 +1089,35 @@ impl Hub {
             if let Err(err) =
                 execute_admitted_pr_gate(&deps, gate_for_task, req, selected_reviewers).await
             {
-                if let Ok(current) = deps.store.pr_gate(&gate_id) {
-                    if matches!(
-                        current.status,
-                        polyclave_proto::PrGateStatus::Pending
-                            | polyclave_proto::PrGateStatus::Reviewing
-                            | polyclave_proto::PrGateStatus::ReviseRequested
-                    ) {
-                        let _ = deps
-                            .store
-                            .set_pr_gate_status(&gate_id, polyclave_proto::PrGateStatus::Failed);
+                let transitioned_to_failed = deps
+                    .store
+                    .pr_gate(&gate_id)
+                    .map(|current| {
+                        matches!(
+                            current.status,
+                            polyclave_proto::PrGateStatus::Pending
+                                | polyclave_proto::PrGateStatus::Reviewing
+                                | polyclave_proto::PrGateStatus::ReviseRequested
+                        )
+                    })
+                    .unwrap_or(false);
+                if transitioned_to_failed {
+                    let _ = deps
+                        .store
+                        .set_pr_gate_status(&gate_id, polyclave_proto::PrGateStatus::Failed);
+                    if let Some(hub_id) = hub_session_id.as_deref() {
+                        let _ = deps.store.hub_enqueue(
+                            hub_id,
+                            &format!("pr_gate:{gate_id}:failed"),
+                            &format!("PR gate {gate_id} failed: {err}"),
+                        );
                     }
-                }
-                if let Some(hub_id) = hub_session_id.as_deref() {
-                    let _ = deps.store.hub_enqueue(
-                        hub_id,
-                        &format!("pr_gate:{gate_id}:failed"),
-                        &format!("PR gate {gate_id} failed: {err}"),
-                    );
                 }
             }
         });
-        self.lifecycle
-            .pr_gate_tasks
-            .lock()
-            .await
-            .insert(gate.id.clone(), handle);
+        let mut tasks = self.lifecycle.pr_gate_tasks.lock().await;
+        tasks.retain(|_, existing| !existing.is_finished());
+        tasks.insert(gate.id.clone(), handle);
         Ok(gate)
     }
 

@@ -786,3 +786,157 @@ async fn prelaunch_error_persists_into_run_detail_and_default_max_attempts_is_fi
         Some("Claude worker not started: no verified external filesystem and network sandbox is available")
     );
 }
+
+#[tokio::test]
+async fn revision_commit_and_stage_resolves_earlier_attempt_when_previous_attempt_has_no_commit() {
+    use serde_json::{json, Value};
+
+    let (_tmp, manager, mut request) = repository();
+    let source = manager
+        .store
+        .hub_enqueue("hub", "rev-skip-test", "Modify a.rs and b.rs")
+        .unwrap();
+    let ticket = manager
+        .store
+        .hub_ticket(
+            "hub",
+            source.id,
+            "Revision skip test",
+            json!({
+                "goal": "Modify a.rs and b.rs",
+                "allowed_paths": ["a.rs", "b.rs"],
+                "forbidden_actions": [],
+                "acceptance_criteria": []
+            }),
+            2,
+        )
+        .unwrap();
+    request.ticket_id = Some(ticket.id);
+    let (run, _) = manager.accept(request).unwrap();
+    let work1 = manager.begin(&run.id, TurnMode::Start).unwrap();
+    let (host, key1, key3) = ("rev-skip-host", "rev-skip-1", "rev-skip-3");
+    let rid = run.id.clone();
+    let worker = run.worker_session_id.clone();
+    let attempt1 = work1.attempt.id;
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE attempts SET status='running' WHERE id=?1", [attempt1])?;
+            db.execute(
+                "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+                 VALUES(1,?1,?2,?3,'start','running','authorized',?4,'boot',?5,'now')",
+                rusqlite::params![worker, rid, attempt1, host, key1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (addr, server) = Mcp::new(manager.store.clone(), host, Arc::new(manager.clone()))
+        .listen()
+        .await
+        .unwrap();
+    let call = |token: &'static str, name: &'static str, args: Value| {
+        tokio::task::spawn_blocking(move || staging_rpc(addr, token, name, args))
+    };
+
+    std::fs::write(work1.workspace.cwd.join("a.rs"), "v1 a\n").unwrap();
+    std::fs::write(work1.workspace.cwd.join("b.rs"), "v1 b\n").unwrap();
+    let staged1 = call(
+        key1,
+        "commit_and_stage",
+        json!({"message": "attempt 1", "paths": ["a.rs", "b.rs"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged1["result"]["isError"], false, "{staged1}");
+    let sha1 = staged1["result"]["structuredContent"]["sha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let receipt1 = call(
+        key1,
+        "submit_result",
+        json!({"run_id": run.id, "branch": work1.attempt.branch, "sha": sha1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt1["result"]["isError"], false, "{receipt1}");
+
+    let rid = run.id.clone();
+    let sha1_db = sha1.clone();
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE turns SET status='completed', mcp_revoked=1 WHERE id=1", [])?;
+            db.execute("UPDATE attempts SET status='completed' WHERE id=?1", [attempt1])?;
+            db.execute(
+                "UPDATE runs SET status='done', result_sha=?2, result_source='agent', accepted_attempt_id=?3, detail=NULL WHERE id=?1",
+                rusqlite::params![rid, sha1_db, attempt1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Attempt 2 starts a revision from sha1, but is superseded without committing.
+    let work2 = manager.begin_revision(&run.id).unwrap();
+    assert_eq!(work2.attempt.attempt_no, 2);
+    let rid = run.id.clone();
+    let sha1_db = sha1.clone();
+    let attempt2 = work2.attempt.id;
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE attempts SET status='superseded' WHERE id=?1", [attempt2])?;
+            db.execute(
+                "UPDATE runs SET status='done', result_sha=?2, result_source='agent', accepted_attempt_id=?3, detail=NULL WHERE id=?1",
+                rusqlite::params![rid, sha1_db, attempt1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Attempt 3 also revises from Attempt 1's sha1; Attempt 2 has no ref in the mirror.
+    let work3 = manager.begin_revision(&run.id).unwrap();
+    assert_eq!(work3.attempt.attempt_no, 3);
+    let rid = run.id.clone();
+    let worker = run.worker_session_id.clone();
+    let attempt3 = work3.attempt.id;
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE attempts SET status='running' WHERE id=?1", [attempt3])?;
+            db.execute(
+                "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+                 VALUES(3,?1,?2,?3,'worker_chat','running','authorized',?4,'boot',?5,'now')",
+                rusqlite::params![worker, rid, attempt3, host, key3],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    std::fs::write(work3.workspace.cwd.join("a.rs"), "v3 a\n").unwrap();
+    let staged3 = call(
+        key3,
+        "commit_and_stage",
+        json!({"message": "attempt 3 partial", "paths": ["a.rs"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged3["result"]["isError"], false, "{staged3}");
+    let sha3 = staged3["result"]["structuredContent"]["sha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        git(
+            &work3.workspace.staging,
+            &["rev-parse", &format!("{sha3}^")]
+        ),
+        sha1
+    );
+    assert_eq!(
+        git(&work3.workspace.staging, &["show", &format!("{sha3}:b.rs")]),
+        "v1 b"
+    );
+    server.abort();
+}
