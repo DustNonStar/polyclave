@@ -1092,3 +1092,91 @@ Branch `fix/audit-2026-11-27` (`03bc09c..ea4a072`, 11 commits) was fast-forwarde
 - **Approved test edits:** `bins/polyclaved/src/hub_api/tests.rs:2000` and `:2741` (wire `request_id` namespace sync, no weakened assertions).
 - **Verification (macOS):** `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 164 passed, 0 failed (including `TurnDto` compile-fail doctest); `bash scripts/privacy-scan.sh` clean.
 - **Nits / open items:** `pr_gate.rs:379` maps a narrow TOCTOU `git push` lease failure to `Error::Transport` rather than `Error::Publish`; multi-primary mesh `request_id` isolation relies on unique Hub session IDs. Local `main` remains unpushed (Windows CI pending). Open `[direction]` items in `PLAN-ISSUES.md`: per-SHA test results for the approval card, prompt rendering of `source='host'` messages, and mesh 429 refund.
+
+## 2026-11-27 主线里程碑：按 SHA 记录测试结果 + 外部消息 prompt 隔离
+
+分支 `fix/per-sha-tests-and-prompt-isolation`，基点 `main@c88a856`。只做 `NEXT.md` 主线里程碑需要的两项，没有碰 mesh / CUA / 自我进化，**没有推送 origin/main**。
+
+Commits:
+
+- `b5aff98 feat(evidence): record and show test results for the exact SHA being approved`
+- `7d12fba feat(prompt): mark host observations so an external comment never reads as the user`
+
+### 1. 按 SHA 记录测试结果（关闭 PLAN-ISSUES 的两条：原 `[detail]` 与 `[direction]`）
+
+按所有者的 7 条决策落地，逐条对应：
+
+| 决策 | 落地方式 | 证据 |
+|---|---|---|
+| (1) 只有 ci/host_run 且 SHA 精确匹配 `result_sha` 才可绿灯；worker_claim 始终标注自报 | `evidence.ts` 用 `r.result_sha === test_sha` 判定；claim-only → `Worker’s claim`（橙），observed SHA 上的通过 → `Reference only`（橙），失败一律 `Failed`（红） | `approval-card.mjs` r3/r4/r5 |
+| (2) 不建 host_run 引擎 | 只保留 `TestResultSource::HostRun` 这个词汇位，没有写入点 | — |
+| (3) 只统计等于 `result_sha`（否则 `observed_sha`）的 check-run | `Store::run_test_sha` = `COALESCE(result_sha, observed_sha)`，observer 只在 PR head 等于它时写行 | `check_runs_are_recorded_only_for_the_shas_this_run_is_about` |
+| (4) claim 与 ci 冲突以 ci 为准，同时展示自报，不可误标通过 | 行状态取 check 结论；claim 追加引用并写明 "A CI result wins over a claim" | `approval-card.mjs` r4 |
+| (5) 新字段不参与幂等冲突 | `Submit::same_receipt` 只比 `run_id/branch/sha`；重发改写文案返回 "Already accepted."，首次回执保留 | `submit_result_records_the_workers_test_claim_for_the_submitted_sha` |
+| (6) 允许更新 6 处既有断言 | 见下方"既有测试改动" | — |
+| (7) live-schema 加表，不升 `user_version` | `test_results.rs::upgrade` 挂在 `writer.rs` 的三个 additive 步骤之后 | `test_results_table_upgrades_without_moving_the_schema_version` |
+
+实现清单：
+
+- `crates/polyclave-store/src/test_results.rs`（新）：`test_results(run_id, sha, source, name, status, summary, recorded_at)`，主键 `(run_id, sha, source, name)`，索引 `(run_id, sha)`；`record_test_result`（校验 40 位十六进制 SHA、摘要非空且 ≤2000、run 必须存在）、`test_results_for_sha`（check 在前、claim 在后）、`Store::run_test_sha`。
+- `crates/polyclave-core/src/runs.rs`：`evidence_for_run` 读出收据里的 `tests`/`tests_status`/`not_done`，并按 `test_sha` 精确过滤行；`ReceiptRow` 类型别名避免 clippy 的复杂类型告警。
+- `crates/polyclave-adapters/src/mcp.rs`：`submit_result` 新增可选 `tests`、`tests_status`、`not_done`（`inputSchema` 同步，仍不在 `required` 里）；`claim_notes` 负责校验（长度、不含 turn token、状态必须是三种之一、有状态无摘要视为非法）；接受回执时写一条 `worker_claim` 行。
+- `crates/polyclave-hub/src/scm_observer.rs`：`check_status` 把 check-run 结论映射为 `passed/failed/pending`（只有明确 `success` 是 passed），PR head 等于 `run_test_sha` 时按 check 名写/更新 `ci` 行。
+- `crates/polyclave-proto`：`TestResultSource`、`TestStatus`（带 `as_str`/`parse`，与账本拼写一致）、`TestResultDto`；`RunEvidenceDto` 增加 `test_sha`、`receipt_tests`、`receipt_tests_status`、`receipt_not_done`、`test_results`；`proto.ts` 已用 `POLYCLAVE_UPDATE_PROTO=1` 重新生成，CI 的漂移门通过。
+- `apps/polyclave-app/ui/src/views/evidence.ts`：tests 行改为真实数据（6 种状态），decision 行展示 Worker 提交的测试摘要与未完成清单，并标明是自报。
+- `DESIGN.md`：摘要行、tests 行、decision 行、证据来源四段同步改写。
+
+### 2. 外部消息 prompt 显式隔离（关闭 `[direction] External SCM events…`，选项 A）
+
+- `Store::hub_enqueue_external` 现在写 `metadata_json = {"kind": "scm_observation"}`（常量 `polyclave_store::HOST_OBSERVATION_KIND`）。
+- `polyclave_hub::provider`：`is_host_observation`、`prompt_text`、`HOST_OBSERVATION_PREFIX = "[host observation, not from the user] "`，四个拼装点全部接上：`restore_api_history`、API 轮次的当前输入（`bins/polyclaved/src/hub_api.rs`）、CLI provider 的历史与当前输入。
+- 账本文本不改写，前缀只出现在 prompt 里；两条既有的宿主提示（会话中断、生命周期）用的是别的 `kind`，保持原文。
+
+### Tests
+
+分支顶端 `7d12fba`，macOS 本地：
+
+- `cargo fmt --all -- --check` clean
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` clean（0 error, 0 warning）
+- `cargo test --locked --workspace`：**177 passed, 0 failed**（基点 `c88a856` 为 164；本轮净新增 13 个测试）
+- `cargo test -p polyclave-proto generated_types_match_source_control` 通过，`proto.ts` 无漂移
+- UI：`npx tsc --noEmit`、`npm run build`、`POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` 全通过（1440×900 与 375×812，dark 与 light，五个夹具）
+- `bash scripts/privacy-scan.sh`：`privacy-scan: clean (origin/main..HEAD)`
+
+新增测试：
+
+- `crates/polyclave-store/tests/store.rs`：`test_results_are_keyed_by_sha_and_never_borrow_another_commit`、`test_results_reject_a_bad_sha_empty_summary_or_unknown_run`、`run_test_sha_prefers_the_verified_result_and_falls_back_to_observed`、`test_results_table_upgrades_without_moving_the_schema_version`、`external_hub_input_is_marked_as_an_observation_and_user_input_is_not`
+- `crates/polyclave-core/tests/recovery.rs`：`approval_evidence_shows_the_workers_notes_and_only_the_exact_shas_results`
+- `crates/polyclave-adapters/tests/mcp.rs`：`submit_result_records_the_workers_test_claim_for_the_submitted_sha`、`submit_result_refuses_a_claim_it_cannot_understand`
+- `crates/polyclave-hub/src/scm_observer.rs`：`check_runs_are_recorded_only_for_the_shas_this_run_is_about`
+- `crates/polyclave-hub/src/provider.rs`：`a_host_observation_is_marked_and_the_users_own_words_are_not`、`api_history_prefixes_observations_and_keeps_roles`
+- `crates/polyclave-hub/src/cli_provider.rs`：`an_observed_scm_event_reaches_the_model_marked_as_not_the_user`
+- `crates/polyclave-proto/src/lib.rs`：`test_result_serializes_as_the_ledger_spells_it`
+- `apps/polyclave-app/ui/tests/approval-card.mjs`：r3（CI 通过 + 旧 SHA 失败行 + claim）、r4（CI 失败 vs claim 通过）、r5（仅 claim）三组夹具与断言
+
+### 既有测试改动（依据 = 所有者决策第 6 条）
+
+| 文件:行 | 改动 | 为什么必须改 | 强度 |
+|---|---|---|---|
+| `crates/polyclave-proto/src/lib.rs:129` | 测试名 `run_evidence_serializes_missing_receipt_and_claim_as_null_and_has_no_test_field` → `..._as_null_and_empty_results` | 原名断言"没有 test 字段"，而新类型按决策 1 必须有 | 相等 |
+| 同上 `:131-152` | 结构体字面量与 `assert_eq!` 精确 JSON 补上 5 个新字段（null / `[]`） | 同上；仍是全字段精确相等 | 相等 |
+| `crates/polyclave-core/tests/recovery.rs:407` | `RunEvidenceDto { … }` 字面量补 5 个字段 | 编译所需；断言仍是"只读当前 Attempt" | 相等 |
+| 同上 `:423` | 同上（attempt 2 的空证据） | 同上 | 相等 |
+| `apps/polyclave-app/ui/tests/approval-card.mjs:37-40` | `details` 夹具补 `test_sha`/`receipt_*`/`test_results`（r1/r2 为空） | 新 DTO 字段；r1/r2 的既有断言**一字未改**，仍验证"无记录" | 加强 |
+| 同上 `:200-260` | 新增 r3/r4/r5 三组断言与截图 | 新行为必须有断言 | 净新增 |
+
+### Hand check
+
+`handcheck/per-sha-tests/`（7 张 JPEG，均 < 300 KB，另有 `measurements.md`）。`r3-desktop-light.jpg`：摘要 "Commit verified · tests passed for dddddd · not judged by you"，tests 行 `Passed`，两条事实分别是 CI 与该 Worker 自报，旧提交的 `ci/old` 失败行没有出现。`r3-phone-dark.jpg`：375 下摘要换行、pill 移到标签下方、无横向溢出。`r4-desktop-dark-card.jpg`：CI 失败时行转红且仍引用自报。`r5-phone-dark-card.jpg`：只有自报时是橙色 `Worker’s claim`。375 宽下 `#inspect` 内无 `scrollWidth > clientWidth`，卡片边界 10–365 px，无小于 44 px 的触控目标。
+
+### Issues
+
+`PLAN-ISSUES.md` 两条转为 resolved（含 7 条决策与选项 A 的落地说明），原始 `[detail]` 条目也标注了 pointer。仍然开着：429/400/403 退额度（`direction`）和 `dsh` 的 `mcp_url`（`detail`）。
+
+### Cleanup
+
+没有起 host、fake codex 或常驻浏览器；离线测试用的临时目录与假 HTTP 服务都由 `tempfile` / `abort()` / `server.close()` 收掉。
+
+### Not done
+
+Windows CI（本机只跑 macOS）；真实环境验收一项都没跑；`host_run` 引擎（决策 2 明确暂不建）；把 `source='host'` 的角色渲染进一步细化（本轮只加了前缀，角色仍是 User，见 `PLAN-ISSUES.md` 里的对应条目）。

@@ -225,7 +225,7 @@ Options:
 
 **Proposed follow-up:** in a job that allows one real `dsh` run, find the config key the headless agent obeys, then set it through a `--patch <path>` overlay written under the isolated `DSH_HOME` (never the user's `~/.dsh`), and lift the refusal with a test that checks the overlay. Separately, item 9 also notes that `mcp_url` is not injected into `dsh`; this fix does not cover that.
 
-## [detail] The host records no test result per SHA, so the approval card cannot show one
+## [detail, resolved] The host records no test result per SHA, so the approval card cannot show one
 
 Found while building the approval evidence card (2026-11-27). Nothing stores "tests for SHA X":
 
@@ -236,6 +236,8 @@ So the card's "Tests for this exact SHA" row always says "No test result recorde
 
 **What recording them would need (not built):** a `test_results` table keyed by `(run_id, sha, source)` with `source` in {`worker_claim`, `host_run`, `ci`}, status (`passed`/`failed`/`pending`), a summary and the time; for CI, the SCM observer writes one row per check-run conclusion for `head_sha` when it equals a Run's `result_sha`/`observed_sha`; optionally an extended `submit_result` with `tests` and `not_done` fields stored as the Worker's claim and shown labelled as such. `RunEvidenceDto` would then gain a list filtered by the exact SHA, so a result from an older SHA can never show. A host-run test (the host itself running the project's tests on the mirror SHA) is the only source that is not a claim and would need a direction decision.
 
+
+**Resolved (project owner, 2026-11-27):** built in `b5aff98`; the design that was recorded here as "not built" is what shipped. The seven owner decisions and what each one means in the code are recorded under "[direction, resolved] What recording a test result per SHA still needs" below.
 
 ## [detail, resolved] 2026-11-27 audit fix round changed two existing assertions
 
@@ -267,7 +269,7 @@ Options for the owner:
 
 Nothing is implemented on any branch. This is `direction` because A needs the receiver behaviour changed and because the `blocked_on_user` restore rule can override an explicit user decision.
 
-## [direction] What recording a test result per SHA still needs
+## [direction, resolved] What recording a test result per SHA still needs
 
 The 2026-11-27 fix round measured the existing `detail` item above against the code. The conclusion is that the approval card's tests row cannot be fixed by a query: **no final summary text exists in the ledger at all**. `results.payload_json` holds only `{run_id, branch, sha}`; `turns` has no text column; Worker turns never write `messages`; the vendor CLI's stdout is parsed into `AgentEvent` values that only reach the SSE stream and are never persisted. The card's "Worker's claim" already reads the last `progress` event of the Attempt — there is nothing later to read.
 
@@ -287,11 +289,25 @@ Decisions the owner must make before that work starts:
 6. Is renaming the proto test allowed?
 7. Is the additive live-schema upgrade (no `user_version` bump) acceptable for a new `test_results` table?
 
+**Resolved (project owner, 2026-11-27; implemented on `fix/per-sha-tests-and-prompt-isolation` as `b5aff98`).** The owner's seven decisions, all implemented and tested:
+
+1. **Only a host-observed result for the verified SHA may turn the tests row green.** `source in {ci, host_run}` for exactly the Run's `result_sha`. A `worker_claim` row is always labelled the Worker's claim and never greens the row, whatever it says. `apps/polyclave-app/ui/src/views/evidence.ts` decides this from `r.result_sha === test_sha`; a check that passed for an `observed_sha` renders as `Reference only` (orange), and a failure renders as `Failed` regardless.
+2. **No host-run test engine.** `TestResultSource::HostRun` exists in the vocabulary so a future engine has a slot, but nothing writes it.
+3. **Only check runs for the SHA the Run is about are recorded.** `ScmObserver` writes rows only when the PR's head equals `runs.result_sha`, else `runs.observed_sha` (`Store::run_test_sha`, `COALESCE(result_sha, observed_sha)`). A later push carries another SHA, so it can add rows for that SHA but never rewrite the old ones; the card only reads `test_sha`.
+4. **A conflict resolves to CI, with the claim still shown.** When both a check and a claim exist for the same SHA the row follows the check (a failure stays red) and the claim is quoted after it with "A CI result wins over a claim".
+5. **The new fields do not take part in receipt identity.** `submit_result` gained optional `tests`, `tests_status` and `not_done`; `Submit::same_receipt` compares only `run_id`, `branch` and `sha`, so a resend that rewords its notes returns "Already accepted." and the first receipt stays authoritative.
+6. **The six assertions were updated as authorised**, and nothing else in those tests was weakened — the exact list is in the HANDOFF report for this round.
+7. **The table is added by a live-schema step** (`crates/polyclave-store/src/test_results.rs`, called from `writer.rs` next to the mesh and remote-dispatch steps). `user_version` stays 10, and a store test asserts that.
+
+What was built: `test_results` keyed by `(run_id, sha, source, name)` with `source in {worker_claim, host_run, ci}` and `status in {passed, failed, pending}`; `submit_result` records one `worker_claim` row for the submitted SHA and keeps the notes in the receipt; `ScmObserver` records one `ci` row per check run for the matching SHA (only an explicit `success` is `passed`, `failure`/`timed_out`/`action_required`/`cancelled` are `failed`, everything else `pending`); `RunEvidenceDto` gained `test_sha`, `receipt_tests`, `receipt_tests_status`, `receipt_not_done` and `test_results` filtered to exactly `test_sha`; the approval card shows real states and both providers label the claim.
+
+Still open, and deliberately not built: nothing records a *host-run* test, and the SCM observer has never polled real GitHub (see the verification table in `README.md`).
+
 ## [detail] `dsh` still gets no `mcp_url`, and choosing its model still needs a real run
 
 Sections 9–10 of `docs/LESSONS.md` and the existing `dsh` item above stand. Two facts from the 2026-11-27 round: `crates/polyclave-adapters/src/dsh.rs` still sets only `DSH_HOME` and `POLYCLAVE_MCP_TOKEN`, so a real `dsh` Worker cannot call `submit_result`; and the model key cannot be established from `--help` or `--dump-config-schema` alone. Both need one real `dsh` run under an isolated `DSH_HOME`, which no job has authorised yet. Not attempted this round.
 
-## [direction] External SCM events still reach the model as a user turn
+## [direction, resolved] External SCM events still reach the model as a user turn
 
 The 2026-11-27 round made `ScmObserver` write Hub input with `source='host'` (`store.hub_enqueue_external`), which closes two things: an external PR comment or review can no longer be read as the user's own message in the ledger, and it can never satisfy a Ticket's basis (`hub_ticket` requires `source='user'`, so no Run can be authorised by an injected comment).
 
@@ -304,3 +320,5 @@ Options for the owner:
 - **C:** leave it. The ledger identity, the basis rule and the admission policy already stop an external comment from authorising anything.
 
 Nothing is implemented. This does not affect R1, and no test asserts the current role mapping for host messages.
+
+**Resolved (project owner, 2026-11-27; option A, implemented on `fix/per-sha-tests-and-prompt-isolation` as `7d12fba`).** `Store::hub_enqueue_external` now writes `metadata_json = {"kind": "scm_observation"}` (the constant is `polyclave_store::HOST_OBSERVATION_KIND`). `polyclave_hub::provider::prompt_text` prefixes such a message with `[host observation, not from the user] ` and is used in all four places that turn a ledger message into a prompt: `restore_api_history`, the API turn's current input (`bins/polyclaved/src/hub_api.rs`), the CLI provider's history and its current input. The person's own messages are untouched, and the two existing internal host notices (the interrupted-conversation line and the lifecycle notices) carry a different `kind`, so they keep their plain wording. The ledger text is never rewritten: the prefix exists only in the prompt.
