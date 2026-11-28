@@ -204,14 +204,14 @@ impl GitMirrorPusher {
     }
 
     /// Replaces the token source. Tests only.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_token(mut self, token: &'static str) -> Self {
         self.token = Arc::new(move || Ok(SecretToken::new(token)));
         self
     }
 
     /// Runs git through `git` instead of the one on PATH. Tests only.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_git_binary(mut self, git: PathBuf) -> Self {
         self.git = Some(git);
         self
@@ -2685,6 +2685,7 @@ mod tests {
     }
 
     /// Every text value in every table of the ledger.
+    #[cfg(unix)]
     fn dump_database(store: &Store) -> String {
         store
             .read(|db| {
