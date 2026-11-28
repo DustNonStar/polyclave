@@ -38,6 +38,17 @@ pub trait ClaudeIsolation: Send + Sync {
         args: &[OsString],
         roots: &[PathBuf],
     ) -> Result<(PathBuf, Vec<OsString>), Error>;
+
+    fn verified_worker_command(
+        &self,
+        worker: &Path,
+        args: &[OsString],
+        roots: &[PathBuf],
+        _config: &Path,
+        _mcp_url: &str,
+    ) -> Result<(PathBuf, Vec<OsString>), Error> {
+        self.verified_command(worker, args, roots)
+    }
 }
 
 pub struct WorkerCommand {

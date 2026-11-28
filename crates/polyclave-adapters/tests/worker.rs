@@ -679,3 +679,101 @@ fn dsh_worker_with_a_model_set_does_not_pass_model_and_is_refused() {
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("unknown option '--model'"));
     }
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_worker_seatbelt_isolates_host_state_and_allows_only_its_mcp_port() {
+    use polyclave_adapters::MacosSeatbeltIsolation;
+    use std::{ffi::OsStr, net::TcpListener, process::Command};
+
+    let dir = tempfile::tempdir_in("/private/tmp").unwrap();
+    let root = polyclave_os::canonical_real_path(dir.path()).unwrap();
+    let state = root.join("state");
+    let worktree = state.join("worktrees/current");
+    let staging = state.join("staging/current.git");
+    let other_attempt = state.join("worktrees/older");
+    let mirror = state.join("mirror");
+    let primary = root.join("primary");
+    for path in [&worktree, &staging, &other_attempt, &mirror, &primary] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::create_dir_all(state.join("tmp")).unwrap();
+    let auth = state.join("local-auth.token");
+    let ledger = state.join("polyclave.sqlite-wal");
+    let other_token = state.join("tmp/mcp-turn-10.json");
+    let previous_attempt = other_attempt.join("old-result");
+    for path in [&auth, &ledger, &other_token, &previous_attempt] {
+        std::fs::write(path, b"public test sentinel").unwrap();
+    }
+    let mcp = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let main_api = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let mcp_url = format!("http://{}/mcp", mcp.local_addr().unwrap());
+    let ctx = WorkerContext {
+        executable: Path::new("/bin/sh"),
+        state_dir: &state,
+        worktree: &worktree,
+        staging: &staging,
+        primary_repo: &primary,
+        final_mirror: &mirror,
+        mcp_url: &mcp_url,
+        turn_id: 11,
+        token: "fixture-turn",
+        model: None,
+        thread: None,
+    };
+    let iso = MacosSeatbeltIsolation::detect(&state).unwrap();
+    let worker = claude_worker(&ctx, Uuid::nil(), Some(&iso)).unwrap();
+    let run = |program: &str, args: &[&OsStr]| {
+        Command::new(&worker.executable)
+            .args(&worker.args[..2])
+            .arg(program)
+            .args(args)
+            .env_clear()
+            .envs(worker.env.iter().cloned())
+            .current_dir(&worker.cwd)
+            .output()
+            .unwrap()
+    };
+    let write = |path: &Path| {
+        run(
+            "/bin/sh",
+            &[
+                OsStr::new("-c"),
+                OsStr::new("printf ok > \"$1\""),
+                OsStr::new("fixture"),
+                path.as_os_str(),
+            ],
+        )
+        .status
+        .success()
+    };
+    let connect = |listener: &TcpListener| {
+        let port = listener.local_addr().unwrap().port().to_string();
+        run(
+            "/usr/bin/nc",
+            &["-z", "-w", "1", "127.0.0.1", &port].map(OsStr::new),
+        )
+        .status
+        .success()
+    };
+    let denied_reads = [&auth, &ledger, &other_token, &previous_attempt]
+        .map(|path| !run("/bin/cat", &[path.as_os_str()]).status.success());
+    let permitted_config = run(
+        "/bin/cat",
+        &[state.join("tmp/mcp-turn-11.json").as_os_str()],
+    );
+    assert!(write(&worktree.join("ok")));
+    assert!(
+        permitted_config.status.success(),
+        "{:?}",
+        permitted_config.stderr
+    );
+    assert!(connect(&mcp));
+    assert_eq!(denied_reads, [true; 4]);
+    assert!(!write(&state.join("forbidden")));
+    assert!(!write(&mirror.join("forbidden")));
+    assert!(!write(&primary.join("forbidden")));
+    assert!(!connect(&main_api));
+    let tmp = worker.env.iter().find(|(key, _)| key == "TMPDIR").unwrap();
+    assert!(Path::new(&tmp.1).starts_with(&staging));
+    assert!(write(&Path::new(&tmp.1).join("ok")));
+}
