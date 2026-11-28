@@ -1589,3 +1589,14 @@ Not done:
   5. B6: Finder/Tauri `PATH` fallback (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, `POLYCLAVE_EXTRA_PATH`).
 - **Not pushed to `origin/main`**; Windows CI has not run on `09319ad..HEAD`.
 - **Stage 2 real-environment acceptance (V1–V5) not started**: all Batch 1 & Batch 2 checks above used offline fakes/mocks, local bare repos, and Playwright.
+
+### Audit follow-up queue (Batch 1 & Batch 2 self-review)
+
+- [ ] #1 [High] `crates/polyclave-hub/src/pr_gate.rs`: `merge_immediately` uncertain error leaves gate wedged in `approved` — restore `AwaitingHumanApproval` + regression test.
+- [ ] #2 [High] `bins/polyclaved/src/hub_api/http.rs` & `bins/polyclaved/src/routes.rs`: remove `Box::leak` in `map_page_err` by changing `HttpError`'s message field to `Cow<'static, str>`.
+- [ ] #3 [Medium] `apps/polyclave-app/ui/src/views/inspector.ts` & `app.ts`: refresh `S.details` for `prGateEvidenceSlot` when SSE changes arrive or cached detail lacks `activeGate.head_sha`, without clobbering an open diff panel.
+- [ ] #4 [Medium] `crates/polyclave-core/src/stage.rs`: resolve revision `from_sha` ref by matching the Attempt that produced `from_sha` (or matching `prepare_revision_attempt`) instead of assuming `attempt.number - 1`.
+- [ ] #5 [Medium] `crates/polyclave-adapters/src/claude.rs` / `lib.rs`: handle local/custom `HTTP_PROXY`/`HTTPS_PROXY` ports in macOS Seatbelt SBPL (or explicitly parse & allow configured proxy host:port safely).
+- [ ] #6 [Medium] `apps/polyclave-app/ui/src/state/store.ts` & `inspector.ts`: align frontend `Needs you` with backend `/api/attention`, hide `Run PR Gate` for all active/armed states (`pending`, `reviewing`, `revise_requested`, `approved`, `awaiting_human_approval`, `auto_merge_armed`, `merged`), and only treat active gates as `existingGate` on the Run card.
+- [ ] #7 [Low] `bins/polyclaved/src/hub_api.rs` (remove finished `pr_gate_tasks` handles), `apps/polyclave-app/ui/src/views/flows.ts` (update default model input when switching reviewer vendor), and `crates/polyclave-hub/src/pr_gate.rs` (surface async preflight failure clearly).
+
