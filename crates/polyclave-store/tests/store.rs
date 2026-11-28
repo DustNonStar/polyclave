@@ -545,7 +545,7 @@ fn pr_gate_auto_merge_ledger_and_pause_flag_persist_across_reopen() {
         store.arm_auto_merge(&gate.id, "head1"),
         Err(Error::ConflictError)
     ));
-    let armed = store.arm_auto_merge(&gate.id, "head2").unwrap();
+    let armed = store.arm_auto_merge(&gate.id, "head2").unwrap().unwrap();
     assert!(armed.auto_merge_armed);
     assert_eq!(armed.status, PrGateStatus::AutoMergeArmed);
     assert_eq!(armed.reviews.len(), 2);
@@ -576,16 +576,17 @@ fn pr_gate_auto_merge_ledger_and_pause_flag_persist_across_reopen() {
         .unwrap();
     assert!(!revoked.auto_merge_armed);
     assert!(store.armed_pr_gates().unwrap().is_empty());
-    // New arming is refused while paused.
+    // New arming is refused while paused, and nothing is armed: the pause flag is
+    // read inside the same write transaction as the armed bit.
     store
         .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
         .unwrap();
-    assert!(matches!(
-        store.arm_auto_merge(&gate.id, "head2"),
-        Err(Error::ConflictError)
-    ));
+    assert!(store.arm_auto_merge(&gate.id, "head2").unwrap().is_none());
+    assert!(store.armed_pr_gates().unwrap().is_empty());
+    assert!(!store.pr_gate(&gate.id).unwrap().auto_merge_armed);
+    assert_eq!(store.pr_gate_remote_intent(&gate.id).unwrap(), None);
     assert!(!store.set_pause(false, None).unwrap().paused);
-    store.arm_auto_merge(&gate.id, "head2").unwrap();
+    store.arm_auto_merge(&gate.id, "head2").unwrap().unwrap();
     let merged = store
         .set_pr_gate_status(&gate.id, PrGateStatus::Merged)
         .unwrap();

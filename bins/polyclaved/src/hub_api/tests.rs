@@ -1749,7 +1749,7 @@ async fn pause_and_resume_routes_handle_missing_token_revoke_armed_prs_and_block
     hub.store
         .set_pr_gate_status(&gate.id, polyclave_proto::PrGateStatus::Approved)
         .unwrap();
-    hub.store.arm_auto_merge(&gate.id, "head").unwrap();
+    hub.store.arm_auto_merge(&gate.id, "head").unwrap().unwrap();
 
     let paused_with_scm = app
         .oneshot(authed_post(

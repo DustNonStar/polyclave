@@ -723,17 +723,26 @@ impl Store {
     }
 
     /// Crash-safe ledger: commits `auto_merge_armed = 1` *before* the caller
-    /// asks GitHub to enable auto-merge. Refused while globally paused or when
-    /// `expected_head_sha` no longer matches the recorded head.
-    pub fn arm_auto_merge(&self, gate_id: &str, expected_head_sha: &str) -> Result<PrGateDto> {
+    /// asks GitHub to enable auto-merge.
+    ///
+    /// The global Pause flag is read inside this same write transaction, so a
+    /// Pause that commits just before cannot be missed: the pause flag and the
+    /// armed bit are decided by one serialized writer. `Ok(None)` means the host
+    /// is paused and nothing was armed, so the caller must not talk to GitHub;
+    /// `Err(ConflictError)` still means the head or the gate status moved.
+    pub fn arm_auto_merge(
+        &self,
+        gate_id: &str,
+        expected_head_sha: &str,
+    ) -> Result<Option<PrGateDto>> {
         let (gate_id, expected) = (gate_id.to_owned(), expected_head_sha.to_owned());
         self.write(move |db| {
             if load_pause(db)?.paused {
-                return Err(Error::ConflictError);
+                return Ok(None);
             }
             let (status, armed, head) = gate_state(db, &gate_id)?;
             if armed {
-                return load_pr_gate(db, &gate_id);
+                return load_pr_gate(db, &gate_id).map(Some);
             }
             if head != expected || status != PrGateStatus::Approved {
                 return Err(Error::ConflictError);
@@ -746,7 +755,7 @@ impl Store {
                  WHERE id=?1",
                 [&gate_id],
             )?;
-            publish_pr_gate(db, &gate_id)
+            publish_pr_gate(db, &gate_id).map(Some)
         })
     }
 

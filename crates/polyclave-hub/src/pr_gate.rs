@@ -1188,30 +1188,34 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err);
     }
 
-    // Arming is serialized with Pause per gate: the lock is taken before the
-    // pause state is read, so either the enable happens before the pause took
-    // effect (and the pause then disarms it), or the pause is already recorded
-    // and nothing is armed at all.
+    // Arming is serialized with Pause per gate, and the pause flag is read inside
+    // the same SQLite write transaction that sets the armed bit (`arm_auto_merge`
+    // returns `None` when the host is paused). A Pause committing at any point in
+    // this section therefore either sees this gate in its armed snapshot — and
+    // revokes it — or refuses the arm here; there is no window in between, because
+    // a single serialized writer decides both.
     let guard = auto_merge_locks().lock(&gate.id).await;
     let current = deps.store.pr_gate(&gate.id).map_err(map_store_err)?;
-    if deps.store.pause_state().map_err(map_store_err)?.paused {
+    // Crash-safe ordering: persist auto_merge_armed = 1 *and* the unconfirmed
+    // remote intent in SQLite BEFORE calling GitHub enableAutoMerge.
+    let Some(armed) = deps
+        .store
+        .arm_auto_merge(&current.id, &current_head)
+        .map_err(map_store_err)?
+    else {
+        // The host is paused: nothing was armed, so GitHub is never called.
         drop(guard);
         return deps
             .store
             .set_pr_gate_status(&current.id, PrGateStatus::Paused)
             .map_err(map_store_err);
-    }
-    // Crash-safe ordering: persist auto_merge_armed = 1 *and* the unconfirmed
-    // remote intent in SQLite BEFORE calling GitHub enableAutoMerge.
-    deps.store
-        .arm_auto_merge(&current.id, &current_head)
-        .map_err(map_store_err)?;
+    };
 
     match deps.scm.enable_auto_merge(&pr.node_id, &current_head).await {
         Ok(()) => {
             let confirmed = deps
                 .store
-                .confirm_auto_merge(&current.id)
+                .confirm_auto_merge(&armed.id)
                 .map_err(map_store_err)?;
             drop(guard);
             Ok(confirmed)
@@ -1220,7 +1224,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             // GitHub answered: it did not arm this PR.
             let _ = deps
                 .store
-                .disarm_auto_merge(&current.id, PrGateStatus::Approved);
+                .disarm_auto_merge(&armed.id, PrGateStatus::Approved);
             drop(guard);
             Err(map_scm_err(err))
         }
@@ -1231,7 +1235,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             enqueue_hub_notice(
                 &deps.store,
                 req.hub_session_id.as_deref(),
-                &format!("pr_gate:{}:auto_merge_unknown", current.id),
+                &format!("pr_gate:{}:auto_merge_unknown", armed.id),
                 &format!(
                     "auto-merge for PR {} on {} could not be confirmed: the request may have reached GitHub. The gate stays armed in the ledger so Pause revokes it; check the PR before merging.",
                     pr.number, req.repo_slug
@@ -1357,10 +1361,29 @@ pub async fn reconcile_auto_merge(store: &Store, scm: &dyn ScmClient) -> Result<
         };
         if must_disable {
             if pr_state.auto_merge_enabled {
+                // Same ordering as Pause: the intent is durable before the call,
+                // so a crash during reconciliation is still recoverable.
+                store
+                    .begin_auto_merge_disable(&current.id)
+                    .map_err(map_store_err)?;
                 match scm.disable_auto_merge(&pr_state.node_id).await {
                     Ok(()) => (),
                     Err(err) if remote_answer_is_definite(&err) => (),
-                    Err(err) => return Err(map_scm_err(err)),
+                    Err(err) => {
+                        // No usable answer: the remote may still be armed, so the
+                        // gate stays armed and the rest are still reconciled.
+                        let owner = gate_owner(store, &current.run_id);
+                        enqueue_hub_notice(
+                            store,
+                            owner.as_deref(),
+                            &format!("pr_gate:{}:reconcile_unknown", current.id),
+                            &format!(
+                                "auto-merge for gate {} could not be revoked ({err}); it stays armed and is retried on the next pause or restart",
+                                current.id
+                            ),
+                        );
+                        continue;
+                    }
                 }
             }
             store
@@ -1402,7 +1425,7 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::process::Command as StdCommand;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use tokio::net::TcpListener;
 
@@ -2041,6 +2064,9 @@ mod tests {
         enabled: Mutex<bool>,
         /// Repository slugs whose PR state GitHub refuses to answer for.
         unreadable: Mutex<Vec<String>>,
+        /// When set, a disarm request gets no answer (the remote may have applied
+        /// it, so the ledger must stay armed).
+        lose_disable: AtomicBool,
     }
 
     impl RacingScm {
@@ -2137,10 +2163,19 @@ mod tests {
         }
         fn disable_auto_merge<'a>(
             &'a self,
-            _pr_node_id: &'a str,
+            pr_node_id: &'a str,
         ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
-            *self.state.enabled.lock().unwrap() = false;
+            let _ = pr_node_id;
+            // A lost answer: the remote may or may not have disarmed.
             self.state.ops.lock().unwrap().push("disable");
+            if self.state.lose_disable.load(Ordering::SeqCst) {
+                return Box::pin(async {
+                    Err(ScmError::Transport {
+                        op: "disable_auto_merge",
+                    })
+                });
+            }
+            *self.state.enabled.lock().unwrap() = false;
             Box::pin(async { Ok(()) })
         }
         fn get_pr_state<'a>(
@@ -2280,6 +2315,160 @@ mod tests {
         assert!(!*scm.state.enabled.lock().unwrap());
     }
 
+    /// Pauses the whole host from inside the review loop, so the Pause lands
+    /// after the gate was created and opened and before the arm transaction runs:
+    /// `pause_all` reads the armed gates while this gate is not armed yet. The
+    /// test pins the outcome for that interleaving (nothing is armed, GitHub is
+    /// never called, no gate is left for a Pause snapshot to miss). The
+    /// transaction-level guarantee itself is pinned by
+    /// `pr_gate_auto_merge_ledger_and_pause_flag_persist_across_reopen`, which
+    /// fails if the pause check leaves `arm_auto_merge`'s write transaction.
+    struct PausingReviewer {
+        store: Store,
+        scm: Arc<RacingScm>,
+        paused: AtomicBool,
+    }
+
+    impl ReviewerExecutor for PausingReviewer {
+        fn check_available(&self, _spec: &ReviewerSpec) -> Result<()> {
+            Ok(())
+        }
+        fn run_review<'a>(
+            &'a self,
+            req: ReviewWorktreeRequest,
+        ) -> BoxFuture<'a, Result<ReviewOutcome>> {
+            assert!(req.worktree_path.exists());
+            let paused = self.paused.swap(true, Ordering::SeqCst);
+            let store = self.store.clone();
+            let scm = self.scm.clone();
+            Box::pin(async move {
+                if !paused {
+                    // The real Pause path, on the real ledger.
+                    pause_all(&store, scm.as_ref(), Some("interleaved".into()))
+                        .await
+                        .unwrap();
+                }
+                Ok(ReviewOutcome {
+                    verdict: ReviewVerdict::Approve,
+                    comments: "Clean diff".into(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pause_between_approval_and_arming_never_reaches_github() {
+        let fix = setup_git_and_store();
+        let scm = RacingScm::new(EnableAnswer::Armed);
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm: scm.clone(),
+            reviewer: Arc::new(PausingReviewer {
+                store: fix.store.clone(),
+                scm: scm.clone(),
+                paused: AtomicBool::new(false),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/pause-race");
+        request.hub_session_id = Some("hub".into());
+
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+        // The pause landed while the gate was approved but not yet armed: the arm
+        // transaction refuses, so GitHub is never told to enable auto-merge.
+        assert_eq!(gate.status, PrGateStatus::Paused, "{gate:?}");
+        assert!(!gate.auto_merge_armed, "{gate:?}");
+        assert!(scm.ops().is_empty(), "no remote operation: {:?}", scm.ops());
+        assert!(!*scm.state.enabled.lock().unwrap());
+        // Nothing for a Pause snapshot to miss: no gate is left armed.
+        assert!(fix.store.armed_pr_gates().unwrap().is_empty());
+        assert_eq!(fix.store.pr_gate_remote_intent(&gate.id).unwrap(), None);
+        // The PR was still opened before the pause, which is what the gate does;
+        // the point is that it was never armed.
+        assert_eq!(pusher.pushed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_disarm_answer_leaves_the_gate_armed_and_still_settles_the_others() {
+        let fix = setup_git_and_store();
+        let mut gates = Vec::new();
+        for slug in ["org/repo", "org/other"] {
+            let gate = fix
+                .store
+                .create_pr_gate(NewPrGate {
+                    run_id: "run1".into(),
+                    repo_slug: slug.into(),
+                    branch: format!("feat/{}", slug.replace('/', "-")),
+                    base_sha: fix.base_sha.clone(),
+                    head_sha: fix.good_head_sha.clone(),
+                    touched_paths: vec!["src/**".into()],
+                })
+                .unwrap();
+            fix.store
+                .record_pr_opened(&gate.id, 42, "https://example.invalid/42")
+                .unwrap();
+            fix.store
+                .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+                .unwrap();
+            let armed = fix
+                .store
+                .arm_auto_merge(&gate.id, &fix.good_head_sha)
+                .unwrap()
+                .unwrap();
+            gates.push(armed.id);
+        }
+        let scm = RacingScm::new(EnableAnswer::Armed);
+        *scm.state.enabled.lock().unwrap() = true;
+        scm.state.lose_disable.store(true, Ordering::SeqCst);
+        fix.store.set_pause(true, Some("restart".into())).unwrap();
+
+        // The disarm answer is lost for every gate: none may be reported settled,
+        // every gate keeps its armed bit, and the loop still finishes.
+        assert_eq!(
+            reconcile_auto_merge(&fix.store, scm.as_ref())
+                .await
+                .unwrap(),
+            0
+        );
+        for gate in &gates {
+            let kept = fix.store.pr_gate(gate).unwrap();
+            assert!(kept.auto_merge_armed, "{kept:?}");
+            assert_eq!(
+                fix.store.pr_gate_remote_intent(gate).unwrap().as_deref(),
+                Some("disable")
+            );
+        }
+        let notices: Vec<String> = fix
+            .store
+            .hub_messages("hub")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.contains("could not be revoked"))
+                .count(),
+            2,
+            "{notices:?}"
+        );
+
+        // A later confirmed disarm settles both gates.
+        scm.state.lose_disable.store(false, Ordering::SeqCst);
+        assert_eq!(
+            reconcile_auto_merge(&fix.store, scm.as_ref())
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(fix.store.armed_pr_gates().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn one_gate_github_cannot_answer_for_does_not_stop_the_others_reconciling() {
         let fix = setup_git_and_store();
@@ -2303,11 +2492,12 @@ mod tests {
             fix.store
                 .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
                 .unwrap();
-            gates.push(
-                fix.store
-                    .arm_auto_merge(&gate.id, &fix.good_head_sha)
-                    .unwrap(),
-            );
+            let armed = fix
+                .store
+                .arm_auto_merge(&gate.id, &fix.good_head_sha)
+                .unwrap()
+                .unwrap();
+            gates.push(armed.id);
         }
         let scm = RacingScm::new(EnableAnswer::Armed);
         scm.state.unreadable.lock().unwrap().push("org/repo".into());
@@ -2320,9 +2510,9 @@ mod tests {
                 .unwrap(),
             1
         );
-        let unreadable = fix.store.pr_gate(&gates[0].id).unwrap();
+        let unreadable = fix.store.pr_gate(&gates[0]).unwrap();
         assert!(unreadable.auto_merge_armed, "{unreadable:?}");
-        let settled = fix.store.pr_gate(&gates[1].id).unwrap();
+        let settled = fix.store.pr_gate(&gates[1]).unwrap();
         assert!(!settled.auto_merge_armed, "{settled:?}");
         assert_eq!(settled.status, PrGateStatus::Paused);
         let notices: Vec<String> = fix
@@ -2420,6 +2610,7 @@ mod tests {
         let gate = fix
             .store
             .arm_auto_merge(&gate_id, &approved.head_sha)
+            .unwrap()
             .unwrap();
         assert!(gate.auto_merge_armed);
         *scm.state.enabled.lock().unwrap() = false;
