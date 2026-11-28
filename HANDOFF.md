@@ -1083,3 +1083,12 @@ Not done: Windows CI；真实环境验收（本轮一项都没跑）；按 SHA �
   4. **残余风险（未改，如实记录）**：Hub provider 仍把 `source='host'` 的消息按 **user** 角色交给模型（`crates/polyclave-hub/src/provider.rs:157`、`cli_provider.rs:214`），所以一条外部 PR 评论在模型的对话里仍是一条"用户"发言——只是它在账本里不是用户消息、也永远无法充当工单依据。这一层属于"要不要在历史里给外部消息单独加标签"的产品决定，已作为 `direction` 记进 `PLAN-ISSUES.md`；本轮不动 prompt 构造。
 
 自检后分支顶端：**164 passed, 0 failed**（新增 1 个测试，自检提交自身也过了 fmt / Clippy `-D warnings` / workspace 测试）。文档同步：`README.md` 增加了"Reaching the daemon from a phone"一节（loopback + Tailscale Serve、身份头、同源规则），并更新了验证状态表里 PR 门禁、手机配对、SCM 观察器、mesh 四行。
+
+## 2026-11-27 审计修复合并审查（Gemini）：passed, merged
+
+Branch `fix/audit-2026-11-27` (`03bc09c..ea4a072`, 11 commits) was fast-forwarded into `main` and the branch deleted.
+
+- **Code & invariant audit:** verified `pr_gate.rs` first-push refusal (`Error::Publish` + empty-lease `--force-with-lease=<dest>:` for absent branches), pre-push `reviewable_diff` before both first push and revise push, revise scope-violation Hub notice, `auth.rs`/`routes.rs` unified `origin_allowed` + removal of `body.peer_identity`, `scm_observer.rs` `hub_enqueue_external` (`source='host'`) + single per-gate policy read + separate `scm_review_cursors` table, `notify.rs` `pr_gate` `kind` metadata wakeups, and `tools.rs` session-namespaced wire `request_id`.
+- **Approved test edits:** `bins/polyclaved/src/hub_api/tests.rs:2000` and `:2741` (wire `request_id` namespace sync, no weakened assertions).
+- **Verification (macOS):** `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 164 passed, 0 failed (including `TurnDto` compile-fail doctest); `bash scripts/privacy-scan.sh` clean.
+- **Nits / open items:** `pr_gate.rs:379` maps a narrow TOCTOU `git push` lease failure to `Error::Transport` rather than `Error::Publish`; multi-primary mesh `request_id` isolation relies on unique Hub session IDs. Local `main` remains unpushed (Windows CI pending). Open `[direction]` items in `PLAN-ISSUES.md`: per-SHA test results for the approval card, prompt rendering of `source='host'` messages, and mesh 429 refund.
