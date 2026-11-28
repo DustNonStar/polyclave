@@ -67,9 +67,10 @@ impl LocalAuth {
 
 pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next) -> Response {
     let headers = request.headers();
+    // Only the identity Tailscale Serve sets. A Mesh node header is a routing
+    // label a caller can write itself, so it is never an identity.
     let peer_identity = headers
         .get("tailscale-user-login")
-        .or_else(|| headers.get("x-agentmesh-node"))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())

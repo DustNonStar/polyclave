@@ -290,8 +290,14 @@ impl Store {
         Ok((dto, raw_token))
     }
 
-    /// Verifies a device bearer token and optional remote peer identity
-    /// (`Tailscale-User-Login` / `X-AgentMesh-Node`). Rejects revoked or mismatched devices.
+    /// Verifies a device bearer token against the peer identity the device was
+    /// paired with.
+    ///
+    /// The two must agree exactly, in both directions: a remote call that names
+    /// `Tailscale-User-Login` is accepted only for a device whose persisted
+    /// `peer_identity` is that same value, so a device paired locally (no
+    /// binding) can never pass a remote Tailscale check, and a bound device
+    /// cannot be used without its identity. Revoked tokens never pass.
     pub fn verify_device_token(
         &self,
         token: &str,
@@ -313,10 +319,8 @@ impl Store {
             if revoked_at.is_some() {
                 return Ok(None);
             }
-            if let Some(expected) = expected_peer {
-                if peer_owned.as_deref() != Some(expected.as_str()) {
-                    return Ok(None);
-                }
+            if peer_owned.as_deref() != expected_peer.as_deref() {
+                return Ok(None);
             }
             let ts = now(db)?;
             db.execute(

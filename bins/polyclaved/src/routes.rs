@@ -319,9 +319,10 @@ async fn exchange_pairing(
     headers: HeaderMap,
     Json(body): Json<ExchangePairingBody>,
 ) -> Reply {
+    // Only the identity the trusted proxy sets. `X-AgentMesh-Node` is a routing
+    // label any client can send, so it can never stand as a pairing identity.
     let peer = headers
         .get("tailscale-user-login")
-        .or_else(|| headers.get("x-agentmesh-node"))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())

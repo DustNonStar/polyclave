@@ -3778,6 +3778,121 @@ async fn phone_page_origin_is_accepted_and_a_cross_site_origin_is_refused() {
     );
 }
 
+/// Item 3.1: a device token only passes when the identity presented on the wire
+/// is exactly the identity the device was paired with, and the only identity that
+/// counts is the one Tailscale Serve sets.
+#[tokio::test]
+async fn remote_device_auth_requires_tailscale_identity_and_a_matching_binding() {
+    use axum::body::to_bytes;
+    use axum::http::header;
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let store = hub.store.clone();
+    let app = crate::routes::router(
+        crate::routes::App {
+            store: store.clone(),
+            runs: hub.runs.clone(),
+            runner: hub.runner.clone(),
+            stream: hub.stream.clone(),
+            hub: Some(hub.clone()),
+        },
+        crate::auth::LocalAuth::with_store("cap-token".into(), 4310, Some(store.clone())),
+    );
+    let (_, bound) = paired_over_tailnet(&app, &store).await;
+    // A device paired on this machine has no persisted binding at all.
+    let (_, local_secret) = store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "Local".to_owned(), 600)
+        .unwrap();
+    let (unbound, unbound_body) = store.exchange_pairing_ticket(&local_secret, None).unwrap();
+    assert_eq!(unbound.peer_identity, None);
+    let unbound_token = unbound_body;
+
+    let remote = |uri: &str, token: &str| {
+        let b = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(header::HOST, "polyclave.tailnet.ts.net")
+            .header(header::ORIGIN, "https://polyclave.tailnet.ts.net")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        b
+    };
+
+    // 1. No Tailscale identity at all: refused before the token is even read.
+    let missing = remote("/api/devices", &bound).body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(missing).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // 2. A Mesh node header is a caller-written label, not an identity.
+    let mesh_only = remote("/api/devices", &bound)
+        .header("X-AgentMesh-Node", "dust@tailnet")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(mesh_only).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // 3. A token paired locally (no binding) cannot pass a remote check, even
+    //    when it presents a well-formed Tailscale identity.
+    let unbound_remote = remote("/api/devices", &unbound_token)
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(unbound_remote).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The same unbound device still works from this machine: local pairing is
+    // exactly what an unbound token is for.
+    let loopback = Request::builder()
+        .method("GET")
+        .uri("/api/devices")
+        .header(header::HOST, "127.0.0.1:4310")
+        .header(header::AUTHORIZATION, format!("Bearer {unbound_token}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(loopback).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // 4. Pairing itself refuses a request that only carries the mesh header.
+    let (_, secret) = store
+        .create_pairing_ticket(polyclave_proto::ClientKind::Ios, "Phone".to_owned(), 600)
+        .unwrap();
+    let mesh_exchange = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header(header::ORIGIN, "https://polyclave.tailnet.ts.net")
+        .header("X-AgentMesh-Node", "dust@tailnet")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "secret": secret }).to_string()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(mesh_exchange).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    // The ticket was not spent by the refused attempt.
+    let (device, _token) = store
+        .exchange_pairing_ticket(&secret, Some("dust@tailnet".into()))
+        .unwrap();
+    assert_eq!(device.peer_identity.as_deref(), Some("dust@tailnet"));
+
+    // A bound device still works from its own Tailscale identity.
+    let bound_ok = remote("/api/devices", &bound)
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(bound_ok).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    hub.close().await;
+}
+
 #[tokio::test]
 async fn pairing_never_trusts_a_peer_identity_from_the_request_body() {
     use axum::body::to_bytes;
