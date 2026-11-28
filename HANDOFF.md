@@ -1316,3 +1316,19 @@ Privacy scan: `privacy-scan: clean (origin/main..HEAD)` after the four code comm
 ### Not done
 
 Real vendor CLI acceptance and Windows branch CI remain pending. Host staging requires a Ticket with explicit `allowed_paths` and an Attempt prepared by the new runtime. A legacy Attempt must be retried into a fresh workspace to use the tool. Batch 2 and Batch 3 remain for their own branches and review.
+
+## Audit Hardening — Batch 1 self-review follow-up (2026-11-27)
+
+- 2fdf2d6 fix(runtime): validate and cancel brokered Worker staging — workspace tests: 185 passed
+
+Three regressions traced to Item 1.4 were corrected on `fix/hardening-batch1-runtime`.
+
+- **Local dispatch.** An implicit Direct request Ticket has no `allowed_paths`. Both sandboxed vendors require the host broker to commit. The local endpoint now rejects a new unscoped Codex or Claude dispatch before it allocates a Run, an Attempt, or a Ticket slot. Create a Ticket with repository-relative allowed paths, then use Dispatch Worker on that Ticket. Local chat and retry also return scope guidance for an existing unscoped Run.
+- **Cancellation.** Each Git command in the broker checks the turn authorization while running. Revocation terminates and reaps the Git process before the repository lock is released. The broker has a two-minute command-sequence deadline once it acquires the repository lock. If a push completed before revocation, reconciliation still sees its ref and applies the existing receipt and R1 rules. The stall regression verifies lock release, an absent staged ref and scratch cleanup when cancellation happens during commit.
+- **Upgrade.** Continuing a scoped pre-upgrade Attempt without its host staging directory now returns an error before scheduling the Worker. For an Attempt awaiting review, choose Allow retry and then Retry to allocate a fresh Attempt. The regression verifies that a rejected chat preserves the old status and generation and that retry creates Attempt 2 with a staging directory.
+
+Tests: macOS local formatting check, Clippy with warnings denied, and workspace tests passed at `2fdf2d6` with **185 passed, 0 failed, 0 ignored**. Three new regressions, with existing tests preserved. Generated protocol diff is empty. Privacy scan for the code commit printed `privacy-scan: clean (origin/main..HEAD)`.
+
+Hand check and cleanup: the Unix stall regression used a local Git subprocess and temporary repository and joined the test thread before closing the fixture. The HTTP regression used an in-process Axum router. No UI changes or persistent fixture processes.
+
+Native Windows execution of the Git Job Object path and real vendor CLI acceptance remain pending. The paused Mesh transport still has no Ticket path mandate for brokered Codex or Claude publishing. This branch is local for merge review.
