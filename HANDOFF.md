@@ -1280,3 +1280,39 @@ Branch `fix/per-sha-tests-and-prompt-isolation` (`b5aff98..9d94605`, 3 commits) 
 2. 闭合 Mac 生产执行链。让 Codex 能在 Attempt 内提交，修退出死锁、启动恢复和原页面重连。用真实返工执行器经新 Attempt 交付并核证 B。
 3. 让 B 的审批证据完整且可刷新。采集 B 的 CI 检查，从镜像提供实际 diff 和未决项，用原子检查把审批绑定到 B。
 4. 闭合扫码到审批 POST。用 375 px 浏览器覆盖 HTTPS 兑换、查看证据、拒绝过期 SHA 和批准当前 SHA，随后才执行真实 Mac 重启、异构 Reviewer、GitHub 和手机的整条验收。
+
+## Audit Hardening — Batch 1 (Runtime & Sandbox)
+
+- 61f6dd1 fix(core): drain stdout channel before joining reader on worker exit — workspace tests: 178 passed
+- a58eff0 fix(core): persist attempt reservation before preparing worktree and staging — workspace tests: 180 passed
+- ef40a41 fix(adapters): tighten macOS Seatbelt read, temp-write and loopback boundaries — workspace tests: 181 passed
+- 70b4c21 feat(adapters): add host-side commit_and_stage MCP tool for sandboxed workers — workspace tests: 182 passed
+
+Code head: `70b4c214d1859b44cc56acbc1a2ea320a12ae1ee` on `fix/hardening-batch1-runtime`, based on `main@615f6bf`. The four implementation commits are listed above in plan order.
+
+### Implementation and evidence
+
+- **1.1 — Worker stdout at exit.** The runner drains the bounded event channel while the reader finishes. It stops waiting after a two-second post-exit deadline if a descendant keeps the pipe open. A 280-event fake Worker holds the consumer until supervisor exit. The regression timed out before the fix and afterwards verified completion, token revocation and release of the execution slot.
+- **1.2 — Attempt reservation.** SQLite reserves the Attempt before either repository directory is created. A preparation failure or startup recovery of a prepared Attempt without a turn supersedes that reservation. A retry uses the next Attempt number and leaves the residual directory isolated. Two regressions cover a directory collision and recovery with incomplete staging metadata before launch.
+- **1.3 — macOS Claude confinement.** The Worker receives an Attempt-private temporary directory. Seatbelt denies reads of protected host state and direct reads of native Keychain files. The generated MCP config for this turn and the isolated Claude home remain accessible. The only permitted loopback destination is the assigned MCP TCP port. The policy retains non-loopback HTTPS and DNS for vendor connectivity. The native test used sentinel files under `/private/tmp` and two local listeners, and verified that the allowed worktree write and assigned MCP connection succeeded while the host reads, writes and other local connection were refused.
+- **1.4 — `commit_and_stage`.** An authorized Codex or Claude Worker can pass a message and optional literal paths. The host checks the Ticket path scope, uses its own Git metadata and index, adds the Run-Id trailer, and publishes only to the Attempt's staging ref. Repeating the request with the same selected contents returns the staged SHA. The production MCP integration test verifies that omitted paths cannot widen scope, an expired token is rejected, Claude cannot write checkout or staging Git metadata, and the main repository and authoritative mirror are untouched by the tool. The separate `submit_result` call imports the exact SHA into the mirror for R1. Codex launch arguments were checked without starting the subscription CLI. [Codex sandbox configuration reference](https://developers.openai.com/docs/config-file/config-reference)
+
+### Tests
+
+- macOS local: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, and `cargo test --locked --workspace` passed after each implementation item.
+- Final workspace result at `70b4c21`: **182 passed, 0 failed**. The baseline was 177. Five regression tests were added. Existing tests retained their assertions and execution.
+- Native Windows CI has no run for this local branch. The native macOS checks above are local. The diff for generated `proto.ts` is empty.
+
+### Hand check
+
+The native Seatbelt tests verified the filesystem and local-network boundaries using local fixtures. This batch has no UI changes or browser screenshots.
+
+### Issues and cleanup
+
+No `PLAN-ISSUES.md` items opened or resolved. The test MCP listeners, fixture processes and temporary repositories were torn down. No real vendor CLI or persistent host was started.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)` after the four code commits.
+
+### Not done
+
+Real vendor CLI acceptance and Windows branch CI remain pending. Host staging requires a Ticket with explicit `allowed_paths` and an Attempt prepared by the new runtime. A legacy Attempt must be retried into a fresh workspace to use the tool. Batch 2 and Batch 3 remain for their own branches and review.
