@@ -129,6 +129,7 @@ impl Store {
         // Additive upgrades that check the live schema instead of user_version,
         // so they apply once to every v10 ledger, new or existing.
         crate::attempts::upgrade(&migration)?;
+        crate::stage2::upgrade(&migration)?;
         crate::mesh_limits::upgrade(&migration)?;
         crate::remote_dispatch::upgrade(&migration)?;
         crate::scm_cursors::upgrade(&migration)?;

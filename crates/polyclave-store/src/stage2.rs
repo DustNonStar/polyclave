@@ -2,6 +2,27 @@
 //! the global Pause flag. Every mutation runs on the single writer and appends
 //! its public projection to `change_log` in the same transaction.
 use crate::{decode_enum, enum_value, new_id, now, parse_json, Error, Result, Store};
+
+/// Adds `pr_gates.remote_intent` to a ledger written before it existed.
+///
+/// Additive and idempotent, checked against the live schema so `user_version`
+/// stays 10. A `NULL` value means no unconfirmed remote operation.
+pub(crate) fn upgrade(db: &Connection) -> Result<()> {
+    let present: Option<i64> = db
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('pr_gates') WHERE name='remote_intent'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if present.is_none() {
+        db.execute_batch(
+            "ALTER TABLE pr_gates ADD COLUMN remote_intent TEXT
+             CHECK (remote_intent IN ('enable', 'disable'));",
+        )?;
+    }
+    Ok(())
+}
 use polyclave_proto::{
     ChangeTopic, CouncilDto, CouncilLevel, CouncilProposalDto, CouncilStatus, PauseStateDto,
     PlanningPreference, PrGateDto, PrGateStatus, PrReviewDto, ProposalPayload, ReviewVerdict,
@@ -62,6 +83,7 @@ CREATE TABLE IF NOT EXISTS pr_gates (
   scope_violations_json TEXT NOT NULL DEFAULT '[]',
   revise_rounds         INTEGER NOT NULL DEFAULT 0 CHECK (revise_rounds >= 0),
   auto_merge_armed      INTEGER NOT NULL DEFAULT 0 CHECK (auto_merge_armed IN (0, 1)),
+  remote_intent         TEXT CHECK (remote_intent IN ('enable', 'disable')),
   created_at            TEXT NOT NULL,
   updated_at            TEXT NOT NULL
 );
@@ -716,8 +738,40 @@ impl Store {
             if head != expected || status != PrGateStatus::Approved {
                 return Err(Error::ConflictError);
             }
+            // The intent is persisted in the same write as the armed bit, so a
+            // crash between here and GitHub's answer leaves a record that an
+            // enable may be live on the remote.
             db.execute(
-                "UPDATE pr_gates SET auto_merge_armed=1,status='auto_merge_armed' WHERE id=?1",
+                "UPDATE pr_gates SET auto_merge_armed=1,status='auto_merge_armed',remote_intent='enable'
+                 WHERE id=?1",
+                [&gate_id],
+            )?;
+            publish_pr_gate(db, &gate_id)
+        })
+    }
+
+    /// GitHub confirmed the arming: the intent is resolved and the gate keeps
+    /// `auto_merge_armed = 1`.
+    pub fn confirm_auto_merge(&self, gate_id: &str) -> Result<PrGateDto> {
+        let gate_id = gate_id.to_owned();
+        self.write(move |db| {
+            gate_state(db, &gate_id)?;
+            db.execute(
+                "UPDATE pr_gates SET remote_intent=NULL WHERE id=?1 AND auto_merge_armed=1",
+                [&gate_id],
+            )?;
+            publish_pr_gate(db, &gate_id)
+        })
+    }
+
+    /// Records that the remote was asked to disarm before the call is made, so a
+    /// lost answer is never mistaken for a disarm.
+    pub fn begin_auto_merge_disable(&self, gate_id: &str) -> Result<PrGateDto> {
+        let gate_id = gate_id.to_owned();
+        self.write(move |db| {
+            gate_state(db, &gate_id)?;
+            db.execute(
+                "UPDATE pr_gates SET remote_intent='disable' WHERE id=?1 AND auto_merge_armed=1",
                 [&gate_id],
             )?;
             publish_pr_gate(db, &gate_id)
@@ -735,10 +789,28 @@ impl Store {
         self.write(move |db| {
             gate_state(db, &gate_id)?;
             db.execute(
-                "UPDATE pr_gates SET auto_merge_armed=0,status=?2 WHERE id=?1",
+                "UPDATE pr_gates SET auto_merge_armed=0,remote_intent=NULL,status=?2 WHERE id=?1",
                 params![gate_id, enum_value(next)?],
             )?;
             publish_pr_gate(db, &gate_id)
+        })
+    }
+
+    /// The remote auto-merge operation whose outcome is not confirmed yet.
+    /// `Some("enable")` means GitHub may have armed the PR; `Some("disable")`
+    /// means it was asked to disarm and the answer never arrived. Either way the
+    /// ledger keeps the PR armed until a confirmed remote answer says otherwise.
+    pub fn pr_gate_remote_intent(&self, gate_id: &str) -> Result<Option<String>> {
+        let gate_id = gate_id.to_owned();
+        self.read(move |db| {
+            Ok(db
+                .query_row(
+                    "SELECT remote_intent FROM pr_gates WHERE id=?1",
+                    [gate_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
         })
     }
 

@@ -1214,3 +1214,36 @@ fn attempt_from_sha_upgrades_an_existing_ledger_without_moving_the_schema_versio
         .unwrap();
     assert_eq!(version, 10);
 }
+
+#[test]
+fn remote_intent_column_upgrades_an_existing_ledger_without_moving_the_schema_version() {
+    let (dir, store) = fixture();
+    let path = dir.path().join("state.sqlite");
+    drop(store);
+    // A ledger written before the intent column: auto-merge arming had no record
+    // of the remote call it was about to make.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("ALTER TABLE pr_gates DROP COLUMN remote_intent;")
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let present: i64 = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM pragma_table_info('pr_gates') WHERE name='remote_intent'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(present, 1);
+    let version: i64 = store
+        .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 10);
+    // Reopening runs the additive step again and must stay harmless.
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert!(!store.pause_state().unwrap().paused);
+}

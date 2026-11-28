@@ -718,7 +718,11 @@ impl Hub {
             })
             .ok()
             .flatten();
-        self.start_scm_observer(Arc::new(client), hub_session, Duration::from_secs(30))
+        let scm: Arc<dyn ScmClient> = Arc::new(client);
+        // Startup reconciliation: any auto-merge whose remote outcome was never
+        // confirmed is settled against GitHub before the host accepts new work.
+        let _ = self.reconcile_auto_merge(scm.clone()).await;
+        self.start_scm_observer(scm, hub_session, Duration::from_secs(30))
             .await;
     }
     pub async fn start_notification_dispatcher(&self) {
@@ -974,6 +978,14 @@ impl Hub {
                 model,
             })
             .collect()
+    }
+    /// Settles every gate whose remote auto-merge outcome is unconfirmed
+    /// against what GitHub really has, and revokes anything still armed while
+    /// the host is paused.
+    pub async fn reconcile_auto_merge(&self, scm: Arc<dyn ScmClient>) -> HubResult<usize> {
+        polyclave_hub::pr_gate::reconcile_auto_merge(&self.store, scm.as_ref())
+            .await
+            .map_err(|_| Error::Store)
     }
     pub(crate) async fn pause_all(&self, reason: Option<String>) -> HubResult<PauseStateDto> {
         match self.scm() {
