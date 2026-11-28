@@ -1,4 +1,5 @@
 //! Transport-only types. This crate owns no platform or persistence primitives.
+pub mod attention;
 mod dto;
 mod error;
 mod events;

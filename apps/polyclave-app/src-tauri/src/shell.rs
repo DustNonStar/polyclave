@@ -269,32 +269,27 @@ pub fn run() {
             std::thread::spawn(move || {
                 let mut shown = HashSet::new();
                 loop {
-                    for (path, status, title) in [
-                        ("/api/runs", "needs_review", "A Worker run needs review"),
-                        (
-                            "/api/tickets",
-                            "blocked_on_user",
-                            "A Ticket needs your attention",
-                        ),
-                    ] {
-                        if let Ok(Value::Array(items)) = daemon.get_if_running(path) {
-                            for item in items {
-                                if let Some(id) = item["id"].as_str() {
-                                    if item["status"] == status {
-                                        if shown.insert((path, id.to_owned())) {
-                                            let _ = handle
-                                                .notification()
-                                                .builder()
-                                                .title("Polyclave")
-                                                .body(title)
-                                                .show();
-                                        }
-                                    } else {
-                                        shown.remove(&(path, id.to_owned()));
-                                    }
+                    let mut active_keys = HashSet::new();
+                    if let Ok(Value::Array(items)) = daemon.get_if_running("/api/attention") {
+                        for item in items {
+                            if let (Some(topic), Some(id), Some(title)) = (
+                                item["topic"].as_str(),
+                                item["id"].as_str(),
+                                item["title"].as_str(),
+                            ) {
+                                let key = (topic.to_owned(), id.to_owned());
+                                active_keys.insert(key.clone());
+                                if shown.insert(key) {
+                                    let _ = handle
+                                        .notification()
+                                        .builder()
+                                        .title("Polyclave")
+                                        .body(title)
+                                        .show();
                                 }
                             }
                         }
+                        shown.retain(|key| active_keys.contains(key));
                     }
                     std::thread::park_timeout(Duration::from_secs(3));
                 }

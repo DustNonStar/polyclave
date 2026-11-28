@@ -163,6 +163,8 @@ pub struct PrState {
     pub merged: bool,
     pub mergeable: Option<bool>,
     pub mergeable_state: Option<String>,
+    #[serde(default)]
+    pub merge_state_status: Option<String>,
     pub head_sha: String,
     pub auto_merge_enabled: bool,
     pub html_url: String,
@@ -240,6 +242,19 @@ pub trait ScmClient: Send + Sync {
 
     fn disable_auto_merge<'a>(&'a self, pr_node_id: &'a str)
         -> BoxFuture<'a, Result<(), ScmError>>;
+
+    fn merge_pull_request<'a>(
+        &'a self,
+        pr_node_id: &'a str,
+        expected_head_oid: &'a str,
+    ) -> BoxFuture<'a, Result<(), ScmError>>;
+
+    fn get_pr_merge_state_status<'a>(
+        &'a self,
+        _pr_node_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>, ScmError>> {
+        Box::pin(async { Ok(None) })
+    }
 
     fn get_pr_state<'a>(
         &'a self,
@@ -668,6 +683,69 @@ impl ScmClient for GitHubScmClient {
         })
     }
 
+    fn merge_pull_request<'a>(
+        &'a self,
+        pr_node_id: &'a str,
+        expected_head_oid: &'a str,
+    ) -> BoxFuture<'a, Result<(), ScmError>> {
+        Box::pin(async move {
+            const MUTATION: &str = r#"
+                mutation MergePullRequest($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) {
+                    mergePullRequest(input: {
+                        pullRequestId: $pullRequestId,
+                        expectedHeadOid: $expectedHeadOid,
+                        mergeMethod: $mergeMethod
+                    }) {
+                        pullRequest {
+                            id
+                            merged
+                        }
+                    }
+                }
+            "#;
+            self.graphql(
+                MUTATION,
+                serde_json::json!({
+                    "pullRequestId": pr_node_id,
+                    "expectedHeadOid": expected_head_oid,
+                    "mergeMethod": "SQUASH",
+                }),
+                "merge_pull_request",
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn get_pr_merge_state_status<'a>(
+        &'a self,
+        pr_node_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<String>, ScmError>> {
+        Box::pin(async move {
+            const MERGE_STATE_QUERY: &str = r#"
+                query PrMergeState($id: ID!) {
+                    node(id: $id) {
+                        ... on PullRequest {
+                            mergeStateStatus
+                        }
+                    }
+                }
+            "#;
+            let data = self
+                .graphql(
+                    MERGE_STATE_QUERY,
+                    serde_json::json!({ "id": pr_node_id }),
+                    "get_pr_merge_state_status",
+                )
+                .await?;
+            Ok(data
+                .get("node")
+                .and_then(|node| node.get("mergeStateStatus"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned))
+        })
+    }
+
     fn get_pr_state<'a>(
         &'a self,
         repo_slug: &'a str,
@@ -692,6 +770,7 @@ impl ScmClient for GitHubScmClient {
                 merged: pr.merged.unwrap_or(false),
                 mergeable: pr.mergeable,
                 mergeable_state: pr.mergeable_state,
+                merge_state_status: None,
                 head_sha: pr.head.sha,
                 auto_merge_enabled: pr.auto_merge.is_some(),
                 html_url: pr.html_url,

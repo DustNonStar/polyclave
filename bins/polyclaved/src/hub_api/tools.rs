@@ -1,7 +1,7 @@
 use super::*;
 use polyclave_hub::{
     council::{start_council as run_start_council, StartCouncilRequest},
-    pr_gate::{run_pr_gate as execute_pr_gate, ReviewerSpec},
+    pr_gate::ReviewerSpec,
 };
 use polyclave_proto::{CouncilLevel, PlanningPreference};
 use polyclave_store::{new_id, remote_dispatch::RemoteOutcome, Error as StoreError};
@@ -162,7 +162,7 @@ impl Hub {
                     Ok((req, deps))
                 })
                 .await?;
-                let gate = execute_pr_gate(&deps, req).await?;
+                let gate = self.start_pr_gate_async(deps, req).await?;
                 serde_json::to_value(gate).map_err(|_| Error::Store)
             }
             "dispatch_remote" => {

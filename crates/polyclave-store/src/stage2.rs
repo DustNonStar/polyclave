@@ -636,6 +636,19 @@ impl Store {
                 )
                 .optional()?;
             let ticket = ticket.ok_or(Error::NotFound)?;
+            let sibling_active: bool = db.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pr_gates
+                    WHERE run_id = ?1
+                      AND (auto_merge_armed = 1
+                           OR status IN ('pending', 'reviewing', 'revise_requested', 'awaiting_human_approval', 'approved', 'auto_merge_armed'))
+                )",
+                [&input.run_id],
+                |r| r.get(0),
+            )?;
+            if sibling_active {
+                return Err(Error::ConflictError);
+            }
             let id = new_id('g');
             let at = now(db)?;
             db.execute(

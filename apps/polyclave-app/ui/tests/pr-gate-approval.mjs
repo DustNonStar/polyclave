@@ -51,6 +51,30 @@ async function handle(route) {
       return json(gate);
     }
     if (path === '/api/sessions') return json([session]);
+    if (path === '/api/runs/r1') {
+      return json({
+        run: {
+          id: 'r1', ticket_id: 't1', hub_session_id: 'sfixture', worker_session_id: 'w1', request_id: 'q1',
+          repo_cwd: 'fixture', vendor: 'codex', model: 'gpt-5', instructions: 'do it', context_refs_json: null,
+          base_branch: 'main', base_sha: gate.base_sha, status: 'done', current_attempt: 1, max_attempts: 5,
+          accepted_attempt_id: 1, detail: null, result_sha: shaB, observed_sha: shaB, result_source: 'agent',
+          resolution: null, created_at: '2026-11-28T00:00:00Z', updated_at: '2026-11-28T00:00:00Z',
+        },
+        commit: null,
+        evidence: {
+          attempt_no: 1,
+          receipt_sha: shaB,
+          worker_claim: 'implemented v2',
+          test_sha: shaB,
+          receipt_tests: 'cargo test',
+          receipt_tests_status: 'passed',
+          receipt_not_done: 'Windows CI pending',
+          test_results: [
+            { id: 1, run_id: 'r1', sha: shaB, source: 'ci', name: 'ci/unit', check_id: '101', status: 'passed', summary: 'ci/unit: success', created_at: '2026-11-28T00:00:00Z' },
+          ],
+        },
+      });
+    }
     if (path === '/api/pause') return json({ paused: false, reason: null, updated_at: '2026-11-28T00:00:00Z' });
     return json([]);
   }
@@ -74,10 +98,15 @@ try {
     await page.addInitScript(() => { try { sessionStorage.setItem('pc-session', 'f'.repeat(32)); } catch { /* ignore */ } });
     await page.goto('http://127.0.0.1:4310/?visit=1');
     await page.waitForFunction(() => document.getElementById('connection')?.textContent === 'Local daemon connected', null, { timeout: 5000 });
-    if (width === 375) await page.getByRole('button', { name: 'Inspect', exact: true }).click();
-    // The gate card lives in the Review panel's PR Gates sub-view.
-    await page.locator('#tab-review').click();
-    await page.locator('[data-focus-key="rev-sub-pr_gates"]').click({ timeout: 5000 });
+    // Needs you count must be > 0 and match attentionPrGates() length (1).
+    await page.waitForFunction(() => document.getElementById('needs-count')?.textContent === '1', null, { timeout: 5000 });
+    if (width === 375) {
+      await page.getByRole('button', { name: 'Inspect', exact: true }).click();
+      await page.locator('#tab-review').click();
+      await page.locator('[data-focus-key="rev-sub-pr_gates"]').click({ timeout: 5000 });
+    } else {
+      await page.locator('#needs-you').click();
+    }
     await page.locator('.pr-gate-card').waitFor({ state: 'visible', timeout: 5000 });
 
     // Nothing is armed, and the card names the exact commit it wants approved.
@@ -85,6 +114,10 @@ try {
     const card = page.locator('.pr-gate-card');
     assert.match(await card.textContent(), /awaiting human approval/);
     assert.match(await card.textContent(), new RegExp('bbbbbbb'), 'the exact SHA is on the card');
+    assert.equal(await page.locator('[data-pr-link="true"]').getAttribute('href'), 'https://github.com/org/repo/pull/42');
+    assert.match(await card.textContent(), /ci\/unit/);
+    assert.match(await card.textContent(), /Windows CI pending/);
+    assert.equal(await page.locator('[data-focus-key="run-pr-gate"]').count(), 0, 'Run PR Gate button hidden while awaiting approval');
     const approve = page.locator('[data-focus-key="approve-pr-gate"]');
     assert.equal((await approve.textContent()).trim(), 'Approve bbbbbbb');
 
@@ -103,6 +136,7 @@ try {
     // Approving this SHA arms it, and the POST carried exactly that SHA.
     await approve.click();
     await page.waitForFunction(() => document.querySelector('.pr-gate-card')?.textContent?.includes('auto merge armed'));
+    assert.equal(await page.locator('[data-focus-key="run-pr-gate"]').count(), 0, 'Run PR Gate button hidden while armed');
     assert.deepEqual(state.approvals, [shaB]);
     assert.equal(state.enabled, true);
     measurements.push({ step: 'approved', width, approvals: state.approvals });

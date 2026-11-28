@@ -296,6 +296,31 @@ impl ScmObserver {
             }
 
             if pr_state.merged {
+                if pr_state.head_sha != gate.head_sha {
+                    let _ = if gate.auto_merge_armed {
+                        self.store
+                            .disarm_auto_merge(&gate.id, PrGateStatus::Escalated)
+                    } else {
+                        self.store
+                            .set_pr_gate_status(&gate.id, PrGateStatus::Escalated)
+                    };
+                    let ev = ObservedEvent {
+                        gate_id: gate.id.clone(),
+                        run_id: gate.run_id.clone(),
+                        repo_slug: gate.repo_slug.clone(),
+                        pr_number,
+                        kind: ObservedEventKind::HumanReview,
+                        summary: format!(
+                            "PR #{pr_number} ({}) merged at {} instead of approved head {}; escalating",
+                            gate.repo_slug, pr_state.head_sha, gate.head_sha
+                        ),
+                    };
+                    if self.emit_event(policy.as_ref(), &ev, "merged_mismatch", None) {
+                        events.push(ev);
+                    }
+                    self.store.save_scm_cursor(cursor).map_err(map_store_err)?;
+                    continue;
+                }
                 let _ = self
                     .store
                     .set_pr_gate_status(&gate.id, PrGateStatus::Merged);
@@ -755,6 +780,10 @@ mod tests {
                     "UPDATE runs SET observed_sha=?1 WHERE id='run1'",
                     [PAGED_SHA],
                 )?;
+                db.execute(
+                    "UPDATE pr_gates SET head_sha=?1 WHERE run_id='run1'",
+                    [PAGED_SHA],
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -881,6 +910,24 @@ mod tests {
         assert_eq!(
             store.list_pr_gates().unwrap()[0].status,
             PrGateStatus::Merged
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn merged_pr_with_mismatched_head_sha_escalates_instead_of_marking_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("ledger")).unwrap();
+        let gate_id = create_gate(&store);
+        let (base_url, state, server) = spawn_paged_gh().await;
+        // gate.head_sha is "sha_abc", while spawn_paged_gh serves PAGED_SHA ("aaa...").
+        state.merged.store(true, Ordering::SeqCst);
+        let observer = observer_for(&store, &base_url);
+        let events = observer.poll_once().await.unwrap();
+        assert!(!events.iter().any(|e| e.kind == ObservedEventKind::Merged));
+        assert_eq!(
+            store.pr_gate(&gate_id).unwrap().status,
+            PrGateStatus::Escalated
         );
         server.abort();
     }

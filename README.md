@@ -55,6 +55,11 @@ Or run the desktop shell (`target/debug/polyclave-app`). It looks for a running 
 
 - `POLYCLAVE_STATE_DIR`: the state directory. Default: the platform local data directory plus `polyclave`, which is `~/Library/Application Support/polyclave` on macOS and `%LOCALAPPDATA%\polyclave` on Windows.
 - `POLYCLAVE_PORT`: the loopback port. Default `4310`; `0` picks a free port. The desktop shell always uses `4310`.
+- `POLYCLAVE_TAILSCALE_ORIGIN`: optional `https://<host>` origin used when pairing a phone over Tailscale Serve (for example `https://macmini.tailnet.ts.net`), so pairing QR codes point at the tailnet HTTPS origin instead of loopback.
+
+For PR Gate and GitHub SCM automation, store two distinct GitHub tokens in the OS Keychain under service `Polyclave.GitHub`:
+- `bot_token`: bot/author account used to push branches, open PRs, and enable/execute merges.
+- `reviewer_token`: distinct reviewer account used to submit independent PR reviews.
 
 Only one daemon can own a state directory at a time.
 

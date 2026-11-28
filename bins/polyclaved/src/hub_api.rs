@@ -15,9 +15,10 @@ use polyclave_hub::{
     council::CouncilParticipant,
     curation::MemoryCurator,
     pr_gate::{
-        pause_all as pr_gate_pause_all, review_diff, GitMirrorPusher, MirrorPusher, PrGateDeps,
-        ReviewDiff, ReviewOutcome, ReviewWorktreeRequest, ReviewerExecutor, ReviewerSpec,
-        RunPrGateRequest, WorkerReviseExecutor,
+        admit_pr_gate, execute_admitted_pr_gate, pause_all as pr_gate_pause_all, review_diff,
+        GitMirrorPusher, MirrorPusher, PrGateDeps, ReviewDiff, ReviewOutcome,
+        ReviewWorktreeRequest, ReviewerExecutor, ReviewerSpec, RunPrGateRequest,
+        WorkerReviseExecutor,
     },
     provider::{
         assemble, restore_api_history, ChatMessage, HubModelProvider, HubReply, HubRequest,
@@ -126,6 +127,7 @@ struct Lifecycle {
     notifier: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     mesh_probe: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     evolution_sched: tokio::sync::Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    pr_gate_tasks: tokio::sync::Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 struct OneShotCliModelProvider {
@@ -513,6 +515,13 @@ impl ScmClient for UnconfiguredScmClient {
     fn disable_auto_merge<'a>(
         &'a self,
         _pr_node_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), ScmError>> {
+        Box::pin(async { Err(ScmError::EmptyToken("bot")) })
+    }
+    fn merge_pull_request<'a>(
+        &'a self,
+        _pr_node_id: &'a str,
+        _expected_head_oid: &'a str,
     ) -> BoxFuture<'a, Result<(), ScmError>> {
         Box::pin(async { Err(ScmError::EmptyToken("bot")) })
     }
@@ -1062,6 +1071,61 @@ impl Hub {
         .await
     }
 
+    /// Admits a PR gate synchronously (I1/I3) and runs its long lifecycle in a
+    /// lifecycle-owned background task, returning the `pending` gate immediately.
+    pub async fn start_pr_gate_async(
+        &self,
+        deps: PrGateDeps,
+        req: RunPrGateRequest,
+    ) -> HubResult<PrGateDto> {
+        let store = deps.store.clone();
+        let req_for_admit = req.clone();
+        let (gate, selected_reviewers) =
+            blocking(move || admit_pr_gate(&store, &req_for_admit)).await?;
+        let gate_id = gate.id.clone();
+        let gate_for_task = gate.clone();
+        let hub_session_id = req.hub_session_id.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(err) =
+                execute_admitted_pr_gate(&deps, gate_for_task, req, selected_reviewers).await
+            {
+                if let Ok(current) = deps.store.pr_gate(&gate_id) {
+                    if matches!(
+                        current.status,
+                        polyclave_proto::PrGateStatus::Pending
+                            | polyclave_proto::PrGateStatus::Reviewing
+                            | polyclave_proto::PrGateStatus::ReviseRequested
+                    ) {
+                        let _ = deps
+                            .store
+                            .set_pr_gate_status(&gate_id, polyclave_proto::PrGateStatus::Failed);
+                    }
+                }
+                if let Some(hub_id) = hub_session_id.as_deref() {
+                    let _ = deps.store.hub_enqueue(
+                        hub_id,
+                        &format!("pr_gate:{gate_id}:failed"),
+                        &format!("PR gate {gate_id} failed: {err}"),
+                    );
+                }
+            }
+        });
+        self.lifecycle
+            .pr_gate_tasks
+            .lock()
+            .await
+            .insert(gate.id.clone(), handle);
+        Ok(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_pr_gate(&self, gate_id: &str) {
+        let handle = self.lifecycle.pr_gate_tasks.lock().await.remove(gate_id);
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+
     /// Settles every gate whose remote auto-merge outcome is unconfirmed
     /// against what GitHub really has, and revokes anything still armed while
     /// the host is paused.
@@ -1207,6 +1271,18 @@ impl Hub {
         }
         if let Some((tx, handle)) = self.lifecycle.evolution_sched.lock().await.take() {
             let _ = tx.send(true);
+            let _ = handle.await;
+        }
+        let gate_tasks: Vec<_> = self
+            .lifecycle
+            .pr_gate_tasks
+            .lock()
+            .await
+            .drain()
+            .map(|(_, h)| h)
+            .collect();
+        for handle in gate_tasks {
+            handle.abort();
             let _ = handle.await;
         }
         let _ = self.stream.send((String::new(), StreamEvent::Shutdown));

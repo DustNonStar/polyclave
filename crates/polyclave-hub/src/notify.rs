@@ -2,7 +2,10 @@
 //! Strictly rejects public-internet / third-party IM cloud targets and sends
 //! metadata-only wakeups (never conversation text, code, or secrets).
 use crate::{Error, Result};
-use polyclave_proto::{NotificationChannelDto, NotificationChannelKind};
+use polyclave_proto::{
+    attention::{council_needs_attention, pr_gate_needs_attention, run_needs_attention},
+    CouncilStatus, NotificationChannelDto, NotificationChannelKind, PrGateStatus, RunStatus,
+};
 use polyclave_store::{Changes, Store};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -164,13 +167,22 @@ pub fn classify_attention_change(
             return Some(NotificationMetadata::sanitized(topic, entity_id, title, 1));
         }
     }
-    let status = payload.get("status").and_then(|v| v.as_str())?;
-    let title = match (topic, status) {
-        ("run", "needs_review") => "Run needs review",
-        ("run", "failed") => "Run failed",
-        ("ticket", "blocked_on_user") => "Ticket awaiting your input",
-        ("council", "awaiting_user") => "Council awaiting decision",
-        ("pr_gate", "failed" | "blocked") => "PR gate needs attention",
+    let status_val = payload.get("status")?;
+    let status = status_val.as_str()?;
+    let title = match topic {
+        "run" => {
+            let parsed: RunStatus = serde_json::from_value(status_val.clone()).ok()?;
+            run_needs_attention(parsed)?
+        }
+        "pr_gate" => {
+            let parsed: PrGateStatus = serde_json::from_value(status_val.clone()).ok()?;
+            pr_gate_needs_attention(parsed)?
+        }
+        "council" => {
+            let parsed: CouncilStatus = serde_json::from_value(status_val.clone()).ok()?;
+            council_needs_attention(parsed)?
+        }
+        "ticket" if status == "blocked_on_user" => "Ticket awaiting your input",
         _ => return None,
     };
     Some(NotificationMetadata::sanitized(topic, entity_id, title, 1))
@@ -379,6 +391,28 @@ mod tests {
             &serde_json::json!({"status": "awaiting_user"})
         )
         .is_some());
+        assert_eq!(
+            classify_attention_change(
+                "pr_gate",
+                "g1",
+                &serde_json::json!({"status": "awaiting_human_approval"})
+            )
+            .unwrap()
+            .title,
+            "PR gate awaiting your approval"
+        );
+        assert_eq!(
+            classify_attention_change("pr_gate", "g2", &serde_json::json!({"status": "escalated"}))
+                .unwrap()
+                .title,
+            "PR gate escalated for human review"
+        );
+        assert!(classify_attention_change(
+            "pr_gate",
+            "g3",
+            &serde_json::json!({"status": "auto_merge_armed"})
+        )
+        .is_none());
     }
 
     #[tokio::test]

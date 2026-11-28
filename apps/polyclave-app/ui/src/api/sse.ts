@@ -85,6 +85,7 @@ export async function follow(c:Connection,onFrame:(event:Frame)=>Promise<void>,s
   if(!trustedOrigin(c.origin))throw Error('Untrusted local endpoint');
   let cursor:string|null=null;
   let delay=150;
+  let reconnectAttempt=false;
   while(!signal.aborted){
     let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
     try{
@@ -93,6 +94,10 @@ export async function follow(c:Connection,onFrame:(event:Frame)=>Promise<void>,s
       const res=await fetch(c.origin+'/api/events',{headers,signal,redirect:'error'});
       if(res.status===401)throw new Unauthorized();
       if(!res.ok||!res.body||!res.headers.get('content-type')?.startsWith('text/event-stream'))throw Error('Event stream unavailable');
+      if(reconnectAttempt){
+        reconnectAttempt=false;
+        await onFrame({event:'resync_required',id:null,data:null});
+      }
       reader=res.body.getReader();
       const decoder=new TextDecoder();
       let buffer='';
@@ -128,6 +133,7 @@ export async function follow(c:Connection,onFrame:(event:Frame)=>Promise<void>,s
       if(e instanceof Unauthorized)throw e;
     }
     finally{void reader?.cancel().catch(()=>{});}
+    reconnectAttempt=true;
     await new Promise<void>(resolve=>setTimeout(resolve,delay));
     delay=Math.min(delay*2,2500);
   }

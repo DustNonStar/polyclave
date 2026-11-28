@@ -81,6 +81,7 @@ async fn serve() -> io::Result<()> {
     .with_dsh(resolve_cli_binary(Path::new("dsh")).unwrap_or_else(|_| PathBuf::from("dsh")));
     runner.recover().map_err(io::Error::other)?;
     store.hub_recover_inputs().map_err(io::Error::other)?;
+    let _ = polyclave_hub::pr_gate::recover_stalled_pr_gates(&store);
     store.builtin_profiles().map_err(io::Error::other)?;
     let hub = hub_api::Hub::new(
         store.clone(),

@@ -744,13 +744,18 @@ fn remote_answer_is_definite(err: &ScmError) -> bool {
     }
 }
 
-/// Runs the full PR gate lifecycle for a completed run.
-pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrGateDto> {
-    if deps.store.pause_state().map_err(map_store_err)?.paused {
+/// Admits a PR gate synchronously: checks global pause, heterogeneous reviewer
+/// selection, non-empty diff range, and creates the `pending` PR gate row
+/// (enforcing I1: at most one active/armed gate per Run).
+pub fn admit_pr_gate(
+    store: &Store,
+    req: &RunPrGateRequest,
+) -> Result<(PrGateDto, Vec<ReviewerSpec>)> {
+    if store.pause_state().map_err(map_store_err)?.paused {
         return Err(Error::Policy);
     }
 
-    let (author_vendor, author_model) = lookup_author_launch(&deps.store, &req.run_id)?;
+    let (author_vendor, author_model) = lookup_author_launch(store, &req.run_id)?;
     let required_reviewers = if req.is_high_risk { 2 } else { 1 };
     let selected_reviewers: Vec<ReviewerSpec> = req
         .reviewers
@@ -770,8 +775,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         return Err(Error::Policy);
     }
 
-    let mut gate = deps
-        .store
+    let gate = store
         .create_pr_gate(NewPrGate {
             run_id: req.run_id.clone(),
             repo_slug: req.repo_slug.clone(),
@@ -782,6 +786,49 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         })
         .map_err(map_store_err)?;
 
+    Ok((gate, selected_reviewers))
+}
+
+/// Escalates any PR gate left in `pending`, `reviewing`, or `revise_requested`
+/// when the daemon restarts so it does not stay wedged.
+pub fn recover_stalled_pr_gates(store: &Store) -> Result<usize> {
+    let mut recovered = 0usize;
+    for gate in store.list_pr_gates().map_err(map_store_err)? {
+        if matches!(
+            gate.status,
+            PrGateStatus::Pending | PrGateStatus::Reviewing | PrGateStatus::ReviseRequested
+        ) {
+            let owner = gate_owner(store, &gate.run_id);
+            let _ = store.set_pr_gate_status(&gate.id, PrGateStatus::Escalated);
+            enqueue_hub_notice(
+                store,
+                owner.as_deref(),
+                &format!("pr_gate:{}:daemon_restarted", gate.id),
+                &format!(
+                    "PR gate {} escalated because the daemon restarted while it was {}",
+                    gate.id,
+                    format!("{:?}", gate.status).to_lowercase()
+                ),
+            );
+            recovered += 1;
+        }
+    }
+    Ok(recovered)
+}
+
+/// Runs the full PR gate lifecycle for a completed run.
+pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrGateDto> {
+    let (gate, selected_reviewers) = admit_pr_gate(&deps.store, &req)?;
+    execute_admitted_pr_gate(deps, gate, req, selected_reviewers).await
+}
+
+/// Executes the background lifecycle of an already-admitted PR gate.
+pub async fn execute_admitted_pr_gate(
+    deps: &PrGateDeps,
+    mut gate: PrGateDto,
+    req: RunPrGateRequest,
+    selected_reviewers: Vec<ReviewerSpec>,
+) -> Result<PrGateDto> {
     // Publish target: only the origin snapshotted at admission, and only when
     // it names exactly this GitHub repository. Checked before anything is
     // pushed or a PR is opened.
@@ -841,7 +888,21 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         let _ = deps
             .store
             .set_pr_gate_status(&gate.id, PrGateStatus::Failed);
-        return Err(Error::Policy);
+        let summary = if preflight.issues.is_empty() {
+            "PR preflight failed".to_owned()
+        } else {
+            format!("PR preflight failed: {}", preflight.issues.join("; "))
+        };
+        enqueue_hub_notice(
+            &deps.store,
+            req.hub_session_id.as_deref(),
+            &format!("pr_gate:{}:preflight_failed", gate.id),
+            &summary,
+        );
+        return Err(Error::Http {
+            status: 422,
+            detail: summary,
+        });
     }
 
     // GitHub computes the PR's diff from the remote base branch, so the branch
@@ -1186,6 +1247,20 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             return Ok(escalated);
         }
 
+        // Any path allowed to change the remote PR head must confirm remote
+        // auto-merge is disarmed before pushing.
+        let pr_state = deps
+            .scm
+            .get_pr_state(&req.repo_slug, pr.number)
+            .await
+            .map_err(map_scm_err)?;
+        if pr_state.auto_merge_enabled {
+            deps.scm
+                .disable_auto_merge(&pr_state.node_id)
+                .await
+                .map_err(map_scm_err)?;
+        }
+
         // The revise head may only replace the tip this gate pushed last.
         match deps
             .pusher
@@ -1290,6 +1365,26 @@ pub async fn approve_pr_gate(
         drop(guard);
         return Err(Error::Policy);
     }
+    let merge_state = match pr_state.merge_state_status.clone() {
+        Some(status) => Some(status),
+        None => deps
+            .scm
+            .get_pr_merge_state_status(&pr_state.node_id)
+            .await
+            .ok()
+            .flatten(),
+    };
+    if is_immediately_mergeable(merge_state.as_deref()) {
+        return merge_immediately(
+            deps,
+            guard,
+            gate,
+            expected_head_sha.to_owned(),
+            pr_state.node_id,
+            hub_session_id,
+        )
+        .await;
+    }
     arm_and_enable(
         deps,
         guard,
@@ -1299,6 +1394,60 @@ pub async fn approve_pr_gate(
         hub_session_id,
     )
     .await
+}
+
+/// True when GitHub's `mergeStateStatus` indicates the PR can be merged
+/// immediately via `mergePullRequest` without arming `enablePullRequestAutoMerge`.
+pub fn is_immediately_mergeable(merge_state_status: Option<&str>) -> bool {
+    merge_state_status.is_some_and(|s| {
+        s.eq_ignore_ascii_case("CLEAN")
+            || s.eq_ignore_ascii_case("HAS_HOOKS")
+            || s.eq_ignore_ascii_case("UNSTABLE")
+    })
+}
+
+async fn merge_immediately(
+    deps: &PrGateDeps,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    gate: PrGateDto,
+    expected_head_sha: String,
+    pr_node_id: String,
+    hub_session_id: Option<&str>,
+) -> Result<PrGateDto> {
+    match deps
+        .scm
+        .merge_pull_request(&pr_node_id, &expected_head_sha)
+        .await
+    {
+        Ok(()) => {
+            let merged = deps
+                .store
+                .set_pr_gate_status(&gate.id, PrGateStatus::Merged)
+                .map_err(map_store_err)?;
+            drop(guard);
+            Ok(merged)
+        }
+        Err(err) if remote_answer_is_definite(&err) => {
+            let _ = deps
+                .store
+                .set_pr_gate_status(&gate.id, PrGateStatus::AwaitingHumanApproval);
+            drop(guard);
+            Err(map_scm_err(err))
+        }
+        Err(err) => {
+            enqueue_hub_notice(
+                &deps.store,
+                hub_session_id,
+                &format!("pr_gate:{}:merge_unknown", gate.id),
+                &format!(
+                    "merge for PR {:?} on {} could not be confirmed: {err}",
+                    gate.pr_number, gate.repo_slug
+                ),
+            );
+            drop(guard);
+            Err(map_scm_err(err))
+        }
+    }
 }
 
 /// Persists the armed bit and the unconfirmed intent, then asks GitHub.
@@ -1343,10 +1492,11 @@ async fn arm_and_enable(
             Ok(confirmed)
         }
         Err(err) if remote_answer_is_definite(&err) => {
-            // GitHub answered: it did not arm this PR.
+            // GitHub answered: it did not arm this PR. Return to the human wait
+            // so the gate is never wedged in `approved`.
             let _ = deps
                 .store
-                .disarm_auto_merge(&armed.id, PrGateStatus::Approved);
+                .disarm_auto_merge(&armed.id, PrGateStatus::AwaitingHumanApproval);
             drop(guard);
             Err(map_scm_err(err))
         }
@@ -1519,7 +1669,7 @@ pub async fn reconcile_auto_merge(store: &Store, scm: &dyn ScmClient) -> Result<
             settled += 1;
         } else {
             store
-                .disarm_auto_merge(&current.id, PrGateStatus::Approved)
+                .disarm_auto_merge(&current.id, PrGateStatus::AwaitingHumanApproval)
                 .map_err(map_store_err)?;
             settled += 1;
         }
@@ -2321,6 +2471,13 @@ mod tests {
             *self.state.enabled.lock().unwrap() = false;
             Box::pin(async { Ok(()) })
         }
+        fn merge_pull_request<'a>(
+            &'a self,
+            _pr_node_id: &'a str,
+            _expected_head_oid: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+            Box::pin(async { Ok(()) })
+        }
         fn get_pr_state<'a>(
             &'a self,
             repo_slug: &'a str,
@@ -2350,6 +2507,7 @@ mod tests {
                     merged: false,
                     mergeable: Some(true),
                     mergeable_state: Some("clean".into()),
+                    merge_state_status: None,
                     head_sha: head,
                     auto_merge_enabled: enabled,
                     html_url: format!("https://github.com/org/repo/pull/{pr_number}"),
@@ -2559,6 +2717,13 @@ mod tests {
         ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
             self.inner.disable_auto_merge(node)
         }
+        fn merge_pull_request<'a>(
+            &'a self,
+            node: &'a str,
+            head: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+            self.inner.merge_pull_request(node, head)
+        }
         fn get_pr_state<'a>(
             &'a self,
             _repo_slug: &'a str,
@@ -2645,12 +2810,23 @@ mod tests {
     #[tokio::test]
     async fn a_lost_disarm_answer_leaves_the_gate_armed_and_still_settles_the_others() {
         let fix = setup_git_and_store();
+        fix.store
+            .write(|db| {
+                db.execute_batch(
+                    "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES('w2','w2','worker','repo','p','gpt-5','now');
+                     INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,status,created_at,updated_at)
+                     VALUES('run2','t1','hub','w2','req2','repo','codex','gpt-5','do 2','origin','main','base','done','now','now');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let mut gates = Vec::new();
-        for slug in ["org/repo", "org/other"] {
+        for (run_id, slug) in [("run1", "org/repo"), ("run2", "org/other")] {
             let gate = fix
                 .store
                 .create_pr_gate(NewPrGate {
-                    run_id: "run1".into(),
+                    run_id: run_id.into(),
                     repo_slug: slug.into(),
                     branch: format!("feat/{}", slug.replace('/', "-")),
                     base_sha: fix.base_sha.clone(),
@@ -2722,13 +2898,24 @@ mod tests {
     #[tokio::test]
     async fn one_gate_github_cannot_answer_for_does_not_stop_the_others_reconciling() {
         let fix = setup_git_and_store();
+        fix.store
+            .write(|db| {
+                db.execute_batch(
+                    "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES('w2','w2','worker','repo','p','gpt-5','now');
+                     INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,status,created_at,updated_at)
+                     VALUES('run2','t1','hub','w2','req2','repo','codex','gpt-5','do 2','origin','main','base','done','now','now');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
         // Two armed gates in different repositories; GitHub 404s the first.
         let mut gates = Vec::new();
-        for slug in ["org/repo", "org/other"] {
+        for (run_id, slug) in [("run1", "org/repo"), ("run2", "org/other")] {
             let gate = fix
                 .store
                 .create_pr_gate(NewPrGate {
-                    run_id: "run1".into(),
+                    run_id: run_id.into(),
                     repo_slug: slug.into(),
                     branch: format!("feat/{}", slug.replace('/', "-")),
                     base_sha: fix.base_sha.clone(),
@@ -2876,7 +3063,7 @@ mod tests {
         );
         let tracked = fix.store.pr_gate(&gate_id).unwrap();
         assert!(!tracked.auto_merge_armed, "{tracked:?}");
-        assert_eq!(tracked.status, PrGateStatus::Approved);
+        assert_eq!(tracked.status, PrGateStatus::AwaitingHumanApproval);
         assert_eq!(fix.store.pr_gate_remote_intent(&gate_id).unwrap(), None);
     }
 

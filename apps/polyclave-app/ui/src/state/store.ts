@@ -59,7 +59,9 @@ export const sessionRuns = (id: string | null = S.selected): RunDto[] => S.runs.
 export const visibleRuns = (): RunDto[] => (S.global ? S.runs : sessionRuns());
 export const needsReview = (): RunDto[] => S.runs.filter(r => r.status === 'needs_review');
 export const awaitingCouncils = (): CouncilDto[] => S.councils.filter(c => c.status === 'awaiting_user');
-export const attentionPrGates = (): PrGateDto[] => S.prGates.filter(g => g.status === 'scope_violation' || g.status === 'escalated' || g.status === 'failed');
+export const attentionPrGates = (): PrGateDto[] => S.prGates.filter(
+  g => g.status === 'awaiting_human_approval' || g.status === 'scope_violation' || g.status === 'escalated' || g.status === 'failed',
+);
 export const totalNeedsCount = (): number => needsReview().length + awaitingCouncils().length + attentionPrGates().length;
 export const activeRunDto = (): RunDto | undefined =>
   S.runs.find(r => r.id === S.activeRun) ?? visibleRuns().find(r => r.status === 'needs_review') ?? visibleRuns().slice(-1)[0];

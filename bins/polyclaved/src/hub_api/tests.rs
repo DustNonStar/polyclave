@@ -343,10 +343,12 @@ impl HubModelProvider for MockCouncilProvider {
 struct MockScmState {
     disabled_nodes: Mutex<Vec<String>>,
     enabled_nodes: Mutex<Vec<(String, String)>>,
+    merged_nodes: Mutex<Vec<(String, String)>>,
     submitted_reviews: Mutex<Vec<SubmitReviewRequest>>,
     /// The head this stand-in reports for the PR. `None` keeps the old fixed
     /// value, so tests that do not approve anything are unchanged.
     head_sha: Mutex<Option<String>>,
+    merge_state_status: Mutex<Option<String>>,
 }
 
 struct MockScmClient {
@@ -436,6 +438,20 @@ impl ScmClient for MockScmClient {
         })
     }
 
+    fn merge_pull_request<'a>(
+        &'a self,
+        pr_node_id: &'a str,
+        expected_head_oid: &'a str,
+    ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+        let state = self.state.clone();
+        let node = pr_node_id.to_owned();
+        let sha = expected_head_oid.to_owned();
+        Box::pin(async move {
+            state.merged_nodes.lock().unwrap().push((node, sha));
+            Ok(())
+        })
+    }
+
     fn get_pr_state<'a>(
         &'a self,
         _repo_slug: &'a str,
@@ -453,6 +469,7 @@ impl ScmClient for MockScmClient {
                 merged: false,
                 mergeable: Some(true),
                 mergeable_state: Some("clean".into()),
+                merge_state_status: self.state.merge_state_status.lock().unwrap().clone(),
                 head_sha: self
                     .state
                     .head_sha
@@ -1634,8 +1651,12 @@ async fn pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge() {
         .await
         .unwrap();
     assert_eq!(run_res.status(), StatusCode::OK);
-    let gate: Value =
+    let admitted: Value =
         serde_json::from_slice(&run_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(admitted["status"], "pending");
+    let gate_id = admitted["id"].as_str().unwrap().to_owned();
+    hub.wait_pr_gate(&gate_id).await;
+    let gate = serde_json::to_value(hub.store.pr_gate(&gate_id).unwrap()).unwrap();
     // Heterogeneous approval is not a human approval: the gate waits, and nothing
     // is armed or sent to GitHub.
     assert_eq!(gate["status"], "awaiting_human_approval");
@@ -1645,8 +1666,6 @@ async fn pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge() {
     assert_eq!(gate["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(gate["reviews"][0]["reviewed_sha"], head_sha);
     assert!(gate["scope_violations"].as_array().unwrap().is_empty());
-
-    let gate_id = gate["id"].as_str().unwrap().to_owned();
     // The exact-SHA diff the card shows: the range the reviewer read, from the
     // mirror, with truncation reported rather than hidden.
     let diff_res = app
@@ -1924,8 +1943,8 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
     assert!(council_val["proposals"][0]["vendor"].is_null());
     assert_eq!(hub.runs.list().unwrap().len(), 1); // only the pre-seeded r-gate-1
 
-    // run_pr_gate via tool completes gate
-    let gate_val = hub
+    // run_pr_gate via tool admits immediately and completes asynchronously
+    let admitted_val = hub
         .call_tool(
             &scope,
             "run_pr_gate",
@@ -1938,6 +1957,10 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
         )
         .await
         .unwrap();
+    assert_eq!(admitted_val["status"], "pending");
+    let gate_id = admitted_val["id"].as_str().unwrap().to_owned();
+    hub.wait_pr_gate(&gate_id).await;
+    let gate_val = serde_json::to_value(hub.store.pr_gate(&gate_id).unwrap()).unwrap();
     // Reviewers approved; a person has not, so nothing is armed yet.
     assert_eq!(gate_val["status"], "awaiting_human_approval");
     assert_eq!(gate_val["auto_merge_armed"], false);
@@ -4310,4 +4333,137 @@ fn cli_hub_model_surface_matches_declared_tools_and_noninteractive_permissions()
             "Codex CLI hub missing -c {required}: {codex_strs:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn pr_gate_is_async_enforces_i1_recovers_stalled_and_merges_clean_pr() {
+    use polyclave_hub::pr_gate::recover_stalled_pr_gates;
+    use polyclave_proto::PrGateStatus;
+
+    let (dir, hub, _rx) = test_hub().await;
+    let (run_id, _base, head_sha) = setup_git_run_fixture(dir.path(), &hub);
+    let scm_state = Arc::new(MockScmState::default());
+    *scm_state.head_sha.lock().unwrap() = Some(head_sha.clone());
+    *scm_state.merge_state_status.lock().unwrap() = Some("CLEAN".into());
+    hub.set_scm(Arc::new(MockScmClient {
+        state: scm_state.clone(),
+        polled: None,
+    }));
+    hub.set_pusher(Arc::new(MockPusher::new()));
+    hub.set_default_reviewers(vec![ReviewerSpec {
+        vendor: Vendor::Claude,
+        model: "claude-sonnet-4-6".into(),
+    }]);
+
+    struct BarrierReviewer {
+        entered: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+    impl ReviewerExecutor for BarrierReviewer {
+        fn check_available(&self, _spec: &ReviewerSpec) -> HubResult<()> {
+            Ok(())
+        }
+        fn run_review<'a>(
+            &'a self,
+            _req: ReviewWorktreeRequest,
+        ) -> BoxFuture<'a, HubResult<ReviewOutcome>> {
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                entered.add_permits(1);
+                let _ = release.acquire().await;
+                Ok(ReviewOutcome {
+                    verdict: ReviewVerdict::Approve,
+                    comments: "Looks clean".into(),
+                })
+            })
+        }
+    }
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    hub.set_reviewer(Arc::new(BarrierReviewer {
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+
+    let app = daemon_router(&hub);
+    let run_res = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{run_id}/run"),
+            json!({
+                "repo_slug": "org/repo",
+                "branch": "feat/clean-async",
+                "pr_title": "Clean async PR"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(run_res.status(), StatusCode::OK);
+    let admitted: Value =
+        serde_json::from_slice(&run_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(admitted["status"], "pending");
+    let gate_id = admitted["id"].as_str().unwrap().to_owned();
+
+    // Sibling gate creation is refused while active (I1).
+    let sibling_res = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{run_id}/run"),
+            json!({
+                "repo_slug": "org/repo",
+                "branch": "feat/sibling",
+                "pr_title": "Sibling"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sibling_res.status(), StatusCode::CONFLICT);
+
+    let _ = entered.acquire().await;
+    release.add_permits(1);
+    hub.wait_pr_gate(&gate_id).await;
+    assert_eq!(
+        hub.store.pr_gate(&gate_id).unwrap().status,
+        PrGateStatus::AwaitingHumanApproval
+    );
+
+    // CLEAN PR merges directly via merge_pull_request with expected_head_oid.
+    let approved = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{gate_id}/approve"),
+            json!({"expected_sha": head_sha}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    let merged_gate: Value =
+        serde_json::from_slice(&approved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(merged_gate["status"], "merged");
+    assert_eq!(
+        scm_state.merged_nodes.lock().unwrap().as_slice(),
+        [("PR_node_42".to_owned(), head_sha)]
+    );
+
+    // Startup recovery escalates stalled reviewing gates.
+    let stalled = hub
+        .store
+        .create_pr_gate(polyclave_store::NewPrGate {
+            run_id: run_id.clone(),
+            repo_slug: "org/repo".into(),
+            branch: "feat/stalled".into(),
+            base_sha: "base".into(),
+            head_sha: "head".into(),
+            touched_paths: vec!["src/**".into()],
+        })
+        .unwrap();
+    hub.store
+        .set_pr_gate_status(&stalled.id, PrGateStatus::Reviewing)
+        .unwrap();
+    assert_eq!(recover_stalled_pr_gates(&hub.store).unwrap(), 1);
+    assert_eq!(
+        hub.store.pr_gate(&stalled.id).unwrap().status,
+        PrGateStatus::Escalated
+    );
 }

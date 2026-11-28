@@ -261,6 +261,17 @@ async function recoverAuth(): Promise<boolean> {
   return true;
 }
 
+function startFollow(): void {
+  if (!S.connection || stop.signal.aborted) return;
+  S.live.clear();
+  if (S.selected) renderLive();
+  void follow(S.connection, frame, stop.signal).catch(async (e: unknown) => {
+    if (e instanceof Unauthorized && await recoverAuth()) {
+      startFollow();
+    }
+  });
+}
+
 void (async () => {
   try { S.connection = await bootstrap(); } catch (e) { act.problem(e); }
   if (!S.connection) {
@@ -268,14 +279,12 @@ void (async () => {
     renderStatus(); tokenDialog(act); return;
   }
   try { await sync(); } catch (e) {
-    if (e instanceof Unauthorized && await recoverAuth()) { void follow(S.connection!, frame, stop.signal); return; }
+    if (e instanceof Unauthorized && await recoverAuth()) { startFollow(); return; }
     byId('connection').textContent = 'Local daemon unreachable'; act.problem(e); renderStatus(); return;
   }
   S.online = true;
   byId('connection').textContent = 'Local daemon connected';
   renderStatus(); renderSidebar(act);
-  void follow(S.connection, frame, stop.signal).catch(async (e: unknown) => {
-    if (e instanceof Unauthorized && await recoverAuth()) void follow(S.connection!, frame, stop.signal);
-  });
+  startFollow();
 })();
 window.addEventListener('pagehide', () => stop.abort(), { once: true });

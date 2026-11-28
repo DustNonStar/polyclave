@@ -8,7 +8,7 @@ use polyclave_hub::{
     notify::{
         validate_private_endpoint, HttpPrivateNotifier, NotificationMetadata, PrivateNotifier,
     },
-    pr_gate::{resume_all as pr_gate_resume_all, run_pr_gate as execute_pr_gate, ReviewerSpec},
+    pr_gate::{resume_all as pr_gate_resume_all, ReviewerSpec},
 };
 use polyclave_proto::{
     ClientKind, CouncilLevel, EvolutionStatus, MeshNodeStatus, NotificationChannelKind,
@@ -100,6 +100,7 @@ pub fn router(hub: Hub) -> Router {
         .route("/pr-gates/{id}/run", post(run_pr_gate))
         .route("/pr-gates/{id}/diff", axum::routing::get(pr_gate_diff))
         .route("/pr-gates/{id}/approve", post(approve_pr_gate))
+        .route("/attention", axum::routing::get(attention_items))
         .route("/pause", axum::routing::get(pause_state).post(pause))
         .route("/resume", post(resume))
         .route(
@@ -575,6 +576,42 @@ async fn pr_gates(State(hub): State<Hub>) -> Reply {
     Ok(Json(json!(list)))
 }
 
+async fn attention_items(State(hub): State<Hub>) -> Reply {
+    let items = run_blocking(move || {
+        use polyclave_proto::attention::{
+            council_needs_attention, pr_gate_needs_attention, run_needs_attention,
+        };
+        let mut out = Vec::new();
+        for run in hub.runs.list().map_err(HttpError::from)? {
+            if let Some(title) = run_needs_attention(run.status) {
+                out.push(json!({"topic": "run", "id": run.id, "title": title}));
+            }
+        }
+        for gate in hub.store.list_pr_gates().map_err(HttpError::from)? {
+            if let Some(title) = pr_gate_needs_attention(gate.status) {
+                out.push(json!({"topic": "pr_gate", "id": gate.id, "title": title}));
+            }
+        }
+        for council in hub.store.list_councils().map_err(HttpError::from)? {
+            if let Some(title) = council_needs_attention(council.status) {
+                out.push(json!({"topic": "council", "id": council.id, "title": title}));
+            }
+        }
+        for ticket in hub.store.hub_tickets().map_err(HttpError::from)? {
+            if ticket.status == "blocked_on_user" {
+                out.push(json!({
+                    "topic": "ticket",
+                    "id": ticket.id,
+                    "title": "Ticket awaiting your input",
+                }));
+            }
+        }
+        Ok::<_, HttpError>(out)
+    })
+    .await?;
+    Ok(Json(json!(items)))
+}
+
 /// The mirror diff for exactly the gate's `base_sha..head_sha`. A change bigger
 /// than the page budget is cut and marked `truncated`, never silently shortened.
 const MAX_PAGE_DIFF_BYTES: usize = 65_536;
@@ -588,6 +625,16 @@ fn map_page_err(err: super::Error) -> HttpError {
             "policy",
             "The host refused this operation",
         ),
+        super::Error::Credential => HttpError(
+            StatusCode::CONFLICT,
+            "scm_unconfigured",
+            "GitHub credentials are not configured",
+        ),
+        super::Error::Http { status, detail } => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let msg: &'static str = Box::leak(detail.into_boxed_str());
+            HttpError(code, "github_error", msg)
+        }
         _ => HttpError(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -717,7 +764,10 @@ async fn run_pr_gate(
             })
     })
     .await?;
-    let gate = execute_pr_gate(&deps, req).await.map_err(map_hub_err)?;
+    let gate = hub
+        .start_pr_gate_async(deps, req)
+        .await
+        .map_err(map_hub_err)?;
     Ok(Json(json!(gate)))
 }
 

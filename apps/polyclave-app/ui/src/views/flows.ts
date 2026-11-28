@@ -1,6 +1,6 @@
 // Dialog flows that create durable records. Each one shows the exact data and saves only on explicit confirmation.
 import type { Api } from '../api/client.js';
-import type { CouncilLevel, MemoryKind, PlanningPreference, Vendor } from '../generated/proto.js';
+import type { CouncilLevel, MemoryKind, PlanningPreference, RunDto, Vendor } from '../generated/proto.js';
 import { S, selectedSession } from '../state/store.js';
 import type { Actions } from '../state/store.js';
 import { button, h } from './elements.js';
@@ -169,4 +169,46 @@ export function tokenDialog(act: Actions): void {
       : 'Open the address polyclaved printed, or paste its token here. The token stays in this tab only.' }),
     tokL, err,
   ], { footer: [go] });
+}
+
+export function openPrGateDialog(api: Api, act: Actions, run: RunDto): void {
+  const defaultReviewer: Vendor = run.vendor === 'claude' ? 'codex' : 'claude';
+  let reviewerVendor: Vendor = defaultReviewer;
+  const revSeg = segmented(
+    'Heterogeneous reviewer',
+    (['codex', 'claude', 'agy', 'dsh'] as const).filter(v => v !== run.vendor),
+    defaultReviewer,
+    v => { reviewerVendor = v; },
+    { codex: 'Codex', claude: 'Claude', agy: 'Antigravity', dsh: 'DSH' },
+  );
+  const [slugL, slug] = textField('GitHub repository (owner/repo)', { placeholder: 'owner/repo', mono: true });
+  const [branchL, branch] = textField('PR branch', { value: 'polyclave/' + run.id, mono: true });
+  const [titleL, title] = textField('PR title', { value: (run.instructions.split('\n')[0] || 'Polyclave ' + run.id).slice(0, 80) });
+  const [modelL, model] = textField('Reviewer model', { value: reviewerVendor === 'claude' ? 'claude-sonnet-4-6' : 'default', mono: true });
+  const err = errorLine();
+  const go = button([icon('review'), 'Open PR Gate'], () => {
+    const repoSlug = slug.value.trim();
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repoSlug)) { err.textContent = 'Enter repository as owner/repo.'; return; }
+    go.disabled = true;
+    void api.runPrGate(run.id, {
+      repo_slug: repoSlug,
+      branch: branch.value.trim() || undefined,
+      pr_title: title.value.trim() || undefined,
+      reviewers: [{ vendor: reviewerVendor, model: model.value.trim() || 'default' }],
+      hub_session_id: run.hub_session_id,
+    }).then(async gate => {
+      closeDialog();
+      S.activePrGate = gate.id;
+      S.reviewView = 'pr_gates';
+      act.setPanel('Review');
+      act.tell('PR Gate ' + gate.id + ' started', 'info');
+      await act.refresh();
+    }).catch(e => { go.disabled = false; err.textContent = e instanceof Error ? e.message : 'PR Gate could not be started'; });
+  }, 'btn-primary');
+  openDialog('Open PR Gate · ' + run.id, [
+    h('p', { text: 'Pushes R1-verified commit ' + run.result_sha?.slice(0, 7) + ' and runs heterogeneous review before asking for your approval.' }),
+    slugL, h('div', { class: 'grid-2' }, branchL, titleL),
+    h('div', { class: 'field-label' }, h('span', { text: 'Reviewer vendor' }), revSeg),
+    modelL, err,
+  ], { footer: [button('Cancel', closeDialog, 'btn-ghost'), go] });
 }

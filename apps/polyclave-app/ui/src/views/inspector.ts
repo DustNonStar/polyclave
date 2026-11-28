@@ -10,7 +10,7 @@ import { withFocusPreserved } from '../state/focus.js';
 import { button, byId, h, short, svgEl } from './elements.js';
 import { icon } from './icons.js';
 import type { IconName } from './icons.js';
-import { dispatchWorker, rememberRule, startCouncilDialog } from './flows.js';
+import { dispatchWorker, openPrGateDialog, rememberRule, startCouncilDialog } from './flows.js';
 import { areaField } from './dialog.js';
 import { approvalEvidence, evidenceCard } from './evidence.js';
 
@@ -297,13 +297,23 @@ function councilSection(api: Api, act: Actions): Node[] {
   return nodes;
 }
 
+function safeHttpsUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The mirror diff for the gate's exact SHA, loaded once per card. */
 function approvalDiffSlot(api: Api, act: Actions, gate: PrGateDto): HTMLElement {
   const slot = h('div', { class: 'approval-diff', 'data-diff-sha': gate.head_sha });
   const load = button('Show the diff for ' + short(gate.head_sha), () => {
     load.disabled = true;
     void api.prGateDiff(gate.id).then(diff => {
-      slot.replaceChildren(diffPanel(diff));
+      slot.replaceChildren(diffPanel(diff, gate.pr_url));
     }).catch((e: unknown) => {
       load.disabled = false;
       act.tell(e instanceof Error ? e.message : 'The diff could not be read', 'info');
@@ -313,14 +323,50 @@ function approvalDiffSlot(api: Api, act: Actions, gate: PrGateDto): HTMLElement 
   return slot;
 }
 
-function diffPanel(diff: PrGateDiffDto): HTMLElement {
-  const lines = diff.text.split('\n').slice(0, 400);
+function diffPanel(diff: PrGateDiffDto, prUrl?: string | null): HTMLElement {
+  const allLines = diff.text.split('\n');
+  const lineTruncated = allLines.length > 400;
+  const body = h('pre', { class: 'diff-body', text: allLines.slice(0, 400).join('\n') });
+  let expanded = false;
+  const toggle = lineTruncated
+    ? button('Show all ' + allLines.length + ' lines', () => {
+        expanded = !expanded;
+        body.textContent = (expanded ? allLines : allLines.slice(0, 400)).join('\n');
+        if (toggle) toggle.textContent = expanded ? 'Show first 400 lines' : 'Show all ' + allLines.length + ' lines';
+      }, 'btn-ghost', { 'data-focus-key': 'toggle-full-diff' })
+    : null;
+  const safePr = safeHttpsUrl(prUrl);
   return h('div', { class: 'diff-panel', 'data-diff': 'text' },
     h('div', { class: 'diff-title', text: short(diff.base_sha) + ' .. ' + short(diff.head_sha) + ' · ' + diff.bytes + ' bytes' }),
-    diff.truncated
-      ? h('p', { class: 'field-hint', 'data-truncated': 'true', text: 'Showing the first ' + diff.text.length + ' of ' + diff.bytes + ' bytes. The rest is not hidden: open the PR on GitHub to read it.' })
+    diff.truncated || lineTruncated
+      ? h('p', { class: 'field-hint', 'data-truncated': 'true', text: (lineTruncated && !diff.truncated ? 'Showing first 400 of ' + allLines.length + ' lines. ' : 'Showing the first ' + diff.text.length + ' of ' + diff.bytes + ' bytes. ') + 'Full diff is never silently hidden.' },
+          toggle,
+          safePr ? h('a', { href: safePr, target: '_blank', rel: 'noopener noreferrer', class: 'btn-ghost', text: 'Open PR on GitHub' }) : null)
       : null,
-    h('pre', { class: 'diff-body', text: lines.join('\n') }));
+    body);
+}
+
+function prGateEvidenceSlot(gate: PrGateDto): HTMLElement | null {
+  const detail = S.details.get(gate.run_id);
+  const ev = detail?.evidence;
+  const tests = (ev?.test_results ?? []).filter(t => t.sha === gate.head_sha);
+  const notDone = ev && (ev.receipt_sha === gate.head_sha || ev.test_sha === gate.head_sha)
+    ? ev.receipt_not_done?.trim() || null
+    : null;
+  const box = h('div', { class: 'diff-well', 'data-gate-evidence': gate.head_sha },
+    h('div', { class: 'diff-title', text: 'Evidence for ' + short(gate.head_sha) }));
+  if (tests.length) {
+    for (const t of tests) {
+      box.append(h('div', { class: 'diff-row' },
+        h('span', { class: 'pill-tag', 'data-tone': t.status === 'passed' ? 'done' : t.status === 'failed' ? 'fail' : 'review', text: t.status }),
+        h('span', { class: 'path', text: (t.source === 'ci' ? 'CI: ' : t.source === 'host_run' ? 'Host: ' : 'Claim: ') + (t.name || t.summary) })));
+    }
+  } else {
+    box.append(h('div', { class: 'diff-row' }, h('span', { class: 'path', text: 'No test result recorded for ' + short(gate.head_sha) + '.' })));
+  }
+  box.append(h('div', { class: 'diff-row' },
+    h('span', { class: 'path', text: notDone ? 'Not done (Worker): ' + notDone : 'No unfinished items listed by Worker.' })));
+  return box;
 }
 
 function prGatesSection(api: Api, act: Actions): Node[] {
@@ -342,9 +388,15 @@ function prGatesSection(api: Api, act: Actions): Node[] {
     picker.addEventListener('change', () => { S.activePrGate = picker.value; void renderInspector(api, act); });
     nodes.push(picker);
   }
+  const safePr = safeHttpsUrl(active.pr_url);
+  const canRunGate = !active.auto_merge_armed
+    && active.status !== 'auto_merge_armed'
+    && active.status !== 'awaiting_human_approval'
+    && active.status !== 'merged';
   const gateCard = h('section', { class: 'card pr-gate-card', 'data-tone': prGateTone(active.status) },
     h('div', { class: 'row' },
       h('span', { class: 'card-title grow', text: active.repo_slug + (active.pr_number ? ' #' + active.pr_number : '') }),
+      safePr ? h('a', { href: safePr, target: '_blank', rel: 'noopener noreferrer', class: 'pill-tag', 'data-pr-link': 'true', text: 'GitHub PR' }) : null,
       h('span', { class: 'pill-tag', 'data-tone': prGateTone(active.status), text: active.status.replaceAll('_', ' ') })),
     h('div', { class: 'chips' },
       h('span', { class: 'sha' }, h('b', { text: 'branch' }), active.branch),
@@ -357,6 +409,7 @@ function prGatesSection(api: Api, act: Actions): Node[] {
           h('div', { class: 'diff-title', text: 'Scope violations (' + active.scope_violations.length + ')' }),
           ...active.scope_violations.map(v => h('div', { class: 'diff-row' }, h('span', { class: 'path', text: v }))))
       : null,
+    prGateEvidenceSlot(active),
     // Exactly the SHA a person is being asked to approve, and what it contains.
     active.status === 'awaiting_human_approval'
       ? h('div', { class: 'diff-well', 'data-approval': 'pending' },
@@ -368,7 +421,7 @@ function prGatesSection(api: Api, act: Actions): Node[] {
       active.status === 'awaiting_human_approval'
         ? button([icon('check', 'ic--sm'), 'Approve ' + short(active.head_sha)], () => {
             void api.approvePrGate(active.id, active.head_sha).then(async () => {
-              act.tell('Approved ' + short(active.head_sha) + '; auto-merge armed for that commit', 'info');
+              act.tell('Approved ' + short(active.head_sha), 'info');
               await act.refresh();
             }).catch((e: unknown) => {
               // A gate whose head moved refuses the old SHA: say so, do not retry.
@@ -377,12 +430,14 @@ function prGatesSection(api: Api, act: Actions): Node[] {
             });
           }, 'btn-primary', { 'data-focus-key': 'approve-pr-gate', disabled: S.pause.paused })
         : null,
-      button([icon('review', 'ic--sm'), 'Run PR Gate'], () => {
-        void api.runPrGate(active.id).then(async () => {
-          act.tell('PR Gate updated', 'info');
-          await act.refresh();
-        }).catch(act.problem);
-      }, 'btn-primary', { 'data-focus-key': 'run-pr-gate', disabled: S.pause.paused })));
+      canRunGate
+        ? button([icon('review', 'ic--sm'), 'Run PR Gate'], () => {
+            void api.runPrGate(active.id).then(async () => {
+              act.tell('PR Gate started', 'info');
+              await act.refresh();
+            }).catch(act.problem);
+          }, 'btn-primary', { 'data-focus-key': 'run-pr-gate', disabled: S.pause.paused })
+        : null));
   nodes.push(gateCard);
 
   if (active.reviews.length) {
@@ -400,7 +455,16 @@ function prGatesSection(api: Api, act: Actions): Node[] {
 async function review(api: Api, act: Actions): Promise<Node[]> {
   const sub = reviewSubtabs(api, act);
   if (S.reviewView === 'council') return [sub, ...councilSection(api, act)];
-  if (S.reviewView === 'pr_gates') return [sub, ...prGatesSection(api, act)];
+  if (S.reviewView === 'pr_gates') {
+    const activeGate = S.prGates.find(g => g.id === S.activePrGate) ?? attentionPrGates()[0] ?? S.prGates.slice(-1)[0];
+    if (activeGate && !S.details.has(activeGate.run_id)) {
+      try {
+        const detail = await api.run(activeGate.run_id);
+        S.details.set(activeGate.run_id, detail);
+      } catch { /* keep cached detail */ }
+    }
+    return [sub, ...prGatesSection(api, act)];
+  }
   const runs = visibleRuns();
   const run = activeRunDto();
   if (!run) return [sub, h('p', { class: 'empty', text: 'No Worker run selected. Dispatch a Worker from a ticket to see host verification here.' })];
@@ -476,6 +540,18 @@ async function review(api: Api, act: Actions): Promise<Node[]> {
   const ops = h('div', { class: 'actions' });
   if (r.status === 'running' || r.status === 'pending') ops.append(button([icon('stop', 'ic--sm'), 'Cancel'], () => { void api.cancelRun(r.id).then(() => { act.tell('Cancel requested', 'info'); return act.refresh(); }).catch(act.problem); }, 'btn-danger', { 'data-focus-key': 'run-cancel' }));
   if (r.status === 'failed' || r.status === 'interrupted') ops.append(button([icon('retry', 'ic--sm'), 'Retry'], () => { void api.retry(r.id).then(() => { act.tell('Retry scheduled', 'info'); return act.refresh(); }).catch(act.problem); }, 'btn-ghost', { 'data-focus-key': 'run-retry' }));
+  if (r.status === 'done' && r.result_source === 'agent' && r.result_sha) {
+    const existingGate = S.prGates.find(g => g.run_id === r.id);
+    if (existingGate) {
+      ops.append(button([icon('review', 'ic--sm'), 'View PR Gate'], () => {
+        S.activePrGate = existingGate.id;
+        S.reviewView = 'pr_gates';
+        act.setPanel('Review');
+      }, 'btn-ghost', { 'data-focus-key': 'view-pr-gate' }));
+    } else {
+      ops.append(button([icon('review', 'ic--sm'), 'Open PR Gate'], () => openPrGateDialog(api, act, r), 'btn-primary', { 'data-focus-key': 'open-pr-gate', disabled: S.pause.paused }));
+    }
+  }
   if (ops.childElementCount) decision.append(ops);
   nodes.push(decision);
 
