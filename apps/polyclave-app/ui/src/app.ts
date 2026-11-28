@@ -1,5 +1,5 @@
 import './motion/index.js';
-import { bootstrap, follow } from './api/sse.js';
+import { bootstrap, follow, reconnect, Unauthorized } from './api/sse.js';
 import type { Frame } from './api/sse.js';
 import { api as makeApi } from './api/client.js';
 import { S, attentionPrGates, awaitingCouncils, needsReview, selectedSession } from './state/store.js';
@@ -120,7 +120,15 @@ function queueSync(): void {
 
 type AgentFrame = { run_id: string; message: { kind: string; text?: string; success?: boolean } };
 async function frame(f: Frame): Promise<void> {
-  if (f.event === 'resync_required') { await sync(); return; }
+  if (f.event === 'resync_required') {
+    // The stream lost its place: drop every transient delta and re-read the
+    // snapshot, so nothing from the old connection is shown as if it were live.
+    S.live.clear();
+    if (S.selected) renderLive();
+    renderSidebar(act); renderStatus();
+    await sync();
+    return;
+  }
   if (f.event === 'change') { queueSync(); return; }
   if (f.event !== 'agent') return;
   const e = f.data as AgentFrame;
@@ -228,16 +236,46 @@ mountModelSelect(o => {
 /* ---------- start ---------- */
 loadCollapsed();
 act.rerender();
+/**
+ * A restarted daemon rotates the loopback token, so a `401` is not a network
+ * blip: re-read the connection once, and if that changes, drop every transient
+ * delta and snapshot again with the new credential. Otherwise ask the person to
+ * pair or paste a token — never keep retrying a dead one.
+ */
+async function recoverAuth(): Promise<boolean> {
+  S.live.clear();
+  if (S.selected) renderLive();
+  renderSidebar(act); renderStatus();
+  const next = await reconnect().catch(() => null);
+  const changed = next !== null && (S.connection === null || next.bearer !== S.connection.bearer || next.origin !== S.connection.origin);
+  if (!next || !changed) {
+    byId('connection').textContent = 'Daemon credential rejected';
+    renderStatus(); tokenDialog(act);
+    return false;
+  }
+  S.connection = next;
+  try { await sync(); } catch { byId('connection').textContent = 'Local daemon unreachable'; renderStatus(); return false; }
+  S.online = true;
+  byId('connection').textContent = 'Local daemon connected';
+  renderStatus(); renderSidebar(act);
+  return true;
+}
+
 void (async () => {
   try { S.connection = await bootstrap(); } catch (e) { act.problem(e); }
   if (!S.connection) {
     byId('connection').textContent = 'Local daemon not connected';
     renderStatus(); tokenDialog(act); return;
   }
-  try { await sync(); } catch (e) { byId('connection').textContent = 'Local daemon unreachable'; act.problem(e); renderStatus(); return; }
+  try { await sync(); } catch (e) {
+    if (e instanceof Unauthorized && await recoverAuth()) { void follow(S.connection!, frame, stop.signal); return; }
+    byId('connection').textContent = 'Local daemon unreachable'; act.problem(e); renderStatus(); return;
+  }
   S.online = true;
   byId('connection').textContent = 'Local daemon connected';
   renderStatus(); renderSidebar(act);
-  void follow(S.connection, frame, stop.signal);
+  void follow(S.connection, frame, stop.signal).catch(async (e: unknown) => {
+    if (e instanceof Unauthorized && await recoverAuth()) void follow(S.connection!, frame, stop.signal);
+  });
 })();
 window.addEventListener('pagehide', () => stop.abort(), { once: true });

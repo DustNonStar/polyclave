@@ -54,6 +54,17 @@ export async function bootstrap():Promise<Connection|null>{
   const bearer=sessionStorage.getItem(SESSION_KEY);
   return bearer?{origin:url.origin,bearer}:null;
 }
+/** The daemon rotated our credential (a restart): the page must re-authenticate. */
+export class Unauthorized extends Error{
+  constructor(){super('The daemon did not accept this credential');this.name='Unauthorized';}
+}
+/** Re-reads the connection the way the page did on load, so a restarted daemon's
+ * new token (or a revoked device) is picked up without a stale credential. */
+export async function reconnect():Promise<Connection|null>{
+  const runtime=native();
+  if(runtime){try{const value=await runtime.core.invoke<Connection>('local_connection');return value.origin==='http://127.0.0.1:4310'?value:null;}catch{return null;}}
+  return bootstrap();
+}
 export async function request<T>(c:Connection,path:string,body?:unknown):Promise<T>{
   if(!path.startsWith('/api/') || !trustedOrigin(c.origin))throw Error('Untrusted local endpoint');
   const res=await fetch(c.origin+path,{
@@ -61,6 +72,7 @@ export async function request<T>(c:Connection,path:string,body?:unknown):Promise
     headers:{Authorization:'Bearer '+c.bearer,...(body===undefined?{}:{'Content-Type':'application/json'})},
     method:body===undefined?'GET':'POST',body:body===undefined?undefined:JSON.stringify(body),
   });
+  if(res.status===401)throw new Unauthorized();
   if(!res.ok){
     let detail='';
     try{const body=await res.json() as {message?:unknown};if(typeof body.message==='string')detail=': '+body.message.slice(0,200);}catch{/* no JSON body */}
@@ -79,7 +91,7 @@ export async function follow(c:Connection,onFrame:(event:Frame)=>Promise<void>,s
       const headers:Record<string,string>={Authorization:'Bearer '+c.bearer,Accept:'text/event-stream'};
       if(cursor!==null)headers['Last-Event-ID']=cursor;
       const res=await fetch(c.origin+'/api/events',{headers,signal,redirect:'error'});
-      if(res.status===401)throw new Error('unauthorized');
+      if(res.status===401)throw new Unauthorized();
       if(!res.ok||!res.body||!res.headers.get('content-type')?.startsWith('text/event-stream'))throw Error('Event stream unavailable');
       reader=res.body.getReader();
       const decoder=new TextDecoder();
@@ -109,7 +121,12 @@ export async function follow(c:Connection,onFrame:(event:Frame)=>Promise<void>,s
           if(lines.length>256)throw Error('Event exceeds line limit');
         }
       }
-    }catch{if(signal.aborted)return;}
+    }catch(e){
+      if(signal.aborted)return;
+      // A rejected credential is not a transient failure: stop retrying it and
+      // let the page re-authenticate.
+      if(e instanceof Unauthorized)throw e;
+    }
     finally{void reader?.cancel().catch(()=>{});}
     await new Promise<void>(resolve=>setTimeout(resolve,delay));
     delay=Math.min(delay*2,2500);
