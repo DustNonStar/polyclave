@@ -1270,6 +1270,12 @@ pub async fn approve_pr_gate(
     {
         Ok(state) => state,
         Err(err) => {
+            // The approval could not be checked against GitHub, so it did not
+            // happen: put the gate back in the wait instead of leaving it
+            // `approved` with nothing armed and no way to approve it again.
+            let _ = deps
+                .store
+                .set_pr_gate_status(&gate.id, PrGateStatus::AwaitingHumanApproval);
             drop(guard);
             return Err(map_scm_err(err));
         }
@@ -2513,6 +2519,91 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// A GitHub stand-in whose PR read fails, so the approval cannot be checked.
+    struct UnreadableStateScm {
+        inner: Arc<RacingScm>,
+    }
+
+    impl ScmClient for UnreadableStateScm {
+        fn preflight_repo<'a>(
+            &'a self,
+            repo: &'a str,
+            base: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<PreflightReport, ScmError>> {
+            self.inner.preflight_repo(repo, base)
+        }
+        fn open_or_find_pr<'a>(
+            &'a self,
+            req: OpenPrRequest,
+        ) -> BoxFuture<'a, std::result::Result<PullRequestInfo, ScmError>> {
+            self.inner.open_or_find_pr(req)
+        }
+        fn submit_review<'a>(
+            &'a self,
+            req: SubmitReviewRequest,
+        ) -> BoxFuture<'a, std::result::Result<SubmittedReview, ScmError>> {
+            self.inner.submit_review(req)
+        }
+        fn enable_auto_merge<'a>(
+            &'a self,
+            node: &'a str,
+            head: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+            self.inner.enable_auto_merge(node, head)
+        }
+        fn disable_auto_merge<'a>(
+            &'a self,
+            node: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+            self.inner.disable_auto_merge(node)
+        }
+        fn get_pr_state<'a>(
+            &'a self,
+            _repo_slug: &'a str,
+            _pr_number: u64,
+        ) -> BoxFuture<'a, std::result::Result<PrState, ScmError>> {
+            Box::pin(async { Err(ScmError::Transport { op: "get_pr_state" }) })
+        }
+        fn list_pr_checks_and_comments<'a>(
+            &'a self,
+            repo: &'a str,
+            pr: u64,
+            head: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<PrChecksAndComments, ScmError>> {
+            self.inner.list_pr_checks_and_comments(repo, pr, head)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_approval_that_cannot_be_checked_leaves_the_gate_approvable_again() {
+        let fix = setup_git_and_store();
+        let race = RacingScm::new(EnableAnswer::Armed);
+        let mut deps = arming_deps(&fix, race.clone()).await;
+        deps.scm = Arc::new(UnreadableStateScm {
+            inner: race.clone(),
+        });
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/unchecked");
+        request.hub_session_id = Some("hub".into());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+
+        // GitHub cannot be read, so nothing is approved and nothing is armed...
+        assert!(approve_pr_gate(&deps, &gate.id, &gate.head_sha, None)
+            .await
+            .is_err());
+        let after = fix.store.pr_gate(&gate.id).unwrap();
+        assert_eq!(after.status, PrGateStatus::AwaitingHumanApproval);
+        assert!(!after.auto_merge_armed);
+        // ...and the gate is still approvable once GitHub answers again.
+        let mut deps = deps.clone();
+        race.set_head(&fix.good_head_sha);
+        race.release.add_permits(1);
+        deps.scm = race.clone();
+        let armed = approve_pr_gate(&deps, &gate.id, &gate.head_sha, None)
+            .await
+            .unwrap();
+        assert_eq!(armed.status, PrGateStatus::AutoMergeArmed);
     }
 
     #[tokio::test]
