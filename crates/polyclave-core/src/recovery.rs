@@ -4,7 +4,7 @@ use crate::{
     runs::{change, load_run, Result},
 };
 use polyclave_os::{exclude_old_supervisor, hard_stop_excludes_writers, ProcessIdentity};
-use polyclave_proto::{ChangeTopic, EndReason, WriterCheck};
+use polyclave_proto::{AttemptStatus, ChangeTopic, EndReason, WriterCheck};
 use polyclave_store::{now, Error};
 
 struct Stale {
@@ -112,6 +112,12 @@ impl TurnRunner {
                     )?)
                 })?;
                 let work = self.runs.old_work(&id, attempt_id)?;
+                if work.attempt.status == AttemptStatus::Prepared
+                    && !self.runs.attempt_has_turn(attempt_id)?
+                {
+                    self.runs.interrupt_unstarted_attempt(work.attempt)?;
+                    continue;
+                }
                 let verdict = self.runs.verdict(&work, WriterCheck::Excluded)?;
                 let rid = id.clone();
                 let sync_sha = verdict.result_sha.clone();

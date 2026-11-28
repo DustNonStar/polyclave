@@ -17,46 +17,57 @@ pub struct Workspace {
 }
 
 impl MirrorManager {
+    pub(crate) fn attempt_workspace(&self, a: &AttemptGit) -> Workspace {
+        Workspace {
+            cwd: self.root.join("worktrees").join(a.name()),
+            staging: self.staging_path(a),
+            branch: a.branch(),
+        }
+    }
+
     /// A standalone checkout has no shared writable Git metadata with either
     /// the owner's primary checkout or another Attempt.
     pub fn prepare_attempt(&self, a: &AttemptGit) -> Result<Workspace, GitError> {
         self.with_repo(&a.run.repo, |repo| {
             self.validate_run(&a.run, repo)?;
             validate_attempt(a)?;
-            let staging = self.staging_path(a);
-            let cwd = self.root.join("worktrees").join(a.name());
-            create_private_dir(&staging)?;
+            let workspace = self.attempt_workspace(a);
+            let Workspace {
+                cwd,
+                staging,
+                branch,
+            } = &workspace;
+            create_private_dir(staging)?;
             self.require(
-                &staging,
+                staging,
                 ["init", "--bare", "--template="],
                 "init Attempt staging",
             )?;
             for key in ["receive.denyDeletes", "receive.denyNonFastForwards"] {
                 self.require(
-                    &staging,
+                    staging,
                     ["config", "--local", key, "true"],
                     "set staging policy",
                 )?;
             }
-            create_private_dir(&cwd)?;
-            self.require(&cwd, ["init", "--template="], "init Attempt checkout")?;
+            create_private_dir(cwd)?;
+            self.require(cwd, ["init", "--template="], "init Attempt checkout")?;
             let base_ref = a.run.base_ref();
             self.fetch(
-                &cwd,
+                cwd,
                 &a.run.mirror,
                 &format!("{base_ref}:refs/polyclave/base"),
             )?;
-            if self.oid(&cwd, "refs/polyclave/base")? != a.run.base {
+            if self.oid(cwd, "refs/polyclave/base")? != a.run.base {
                 return Err(GitError::Invalid("checkout baseline differs from the Run"));
             }
-            let branch = a.branch();
             self.require(
-                &cwd,
+                cwd,
                 [
                     "checkout",
                     "--no-recurse-submodules",
                     "-b",
-                    &branch,
+                    branch,
                     &a.run.base,
                 ],
                 "checkout immutable base",
@@ -67,14 +78,10 @@ impl MirrorManager {
                 "polyclave-staging".into(),
                 staging.as_os_str().to_owned(),
             ];
-            self.require(&cwd, args, "set the writable staging destination")?;
-            ensure_real(&cwd)?;
-            ensure_real(&staging)?;
-            Ok(Workspace {
-                cwd,
-                staging,
-                branch,
-            })
+            self.require(cwd, args, "set the writable staging destination")?;
+            ensure_real(cwd)?;
+            ensure_real(staging)?;
+            Ok(workspace)
         })
     }
 }

@@ -524,3 +524,50 @@ fn approval_evidence_shows_the_workers_notes_and_only_the_exact_shas_results() {
     assert_eq!(evidence.test_sha.as_deref(), Some(moved.as_str()));
     assert!(evidence.test_results.is_empty());
 }
+#[test]
+fn recovery_skips_reserved_directories_from_an_attempt_without_a_turn() {
+    let (_tmp, rm, runner, req) = fixture();
+    let (run, _) = rm.accept(req).unwrap();
+    let work = rm.begin(&run.id, TurnMode::Start).unwrap();
+    // begin returned with both directories in place, but no turn has started.
+    // Model the disk contents of an interruption during initialization.
+    std::fs::remove_file(work.workspace.staging.join("HEAD")).unwrap();
+    let residual = work.workspace.cwd.join("untrusted-residual.txt");
+    std::fs::write(&residual, b"prior generation").unwrap();
+
+    assert_eq!(runner.recover().unwrap(), 0);
+    let interrupted = rm.get(&run.id).unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.current_attempt, 1);
+    let next = rm.begin(&run.id, TurnMode::Retry).unwrap();
+    assert_eq!(next.attempt.attempt_no, 2);
+    assert_ne!(next.workspace.staging, work.workspace.staging);
+    assert!(residual.is_file());
+    assert!(!next.workspace.cwd.join("untrusted-residual.txt").exists());
+    assert_eq!(
+        git(&next.workspace.cwd, &["rev-parse", "HEAD"]),
+        run.base_sha
+    );
+}
+
+#[test]
+fn failed_directory_preparation_has_a_durable_attempt_reservation() {
+    let (tmp, rm, _runner, req) = fixture();
+    let (run, _) = rm.accept(req).unwrap();
+    let residual = tmp
+        .path()
+        .join("state/staging")
+        .join(format!("{}-a1.git", run.id));
+    std::fs::create_dir(&residual).unwrap();
+
+    assert!(matches!(
+        rm.begin(&run.id, TurnMode::Start),
+        Err(Error::Invalid("cannot prepare isolated Attempt"))
+    ));
+    let interrupted = rm.get(&run.id).unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.current_attempt, 1);
+    let next = rm.begin(&run.id, TurnMode::Retry).unwrap();
+    assert_eq!(next.attempt.attempt_no, 2);
+    assert_ne!(next.workspace.staging, residual);
+}

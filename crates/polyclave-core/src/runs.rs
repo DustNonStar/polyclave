@@ -233,10 +233,11 @@ impl RunManager {
             {
                 if run.resolution.as_deref() != Some("allow_retry") {
                     if let Some(prev) = &previous {
-                        if self
-                            .git
-                            .reconcile(&self.attempt_git(&run, prev.attempt_no)?)
-                            != BranchCheck::Absent
+                        if self.attempt_has_turn(prev.id)?
+                            && self
+                                .git
+                                .reconcile(&self.attempt_git(&run, prev.attempt_no)?)
+                                != BranchCheck::Absent
                         {
                             return Err(Error::ConflictError);
                         }
@@ -294,12 +295,9 @@ impl RunManager {
             .filter(|n| *n <= run.max_attempts)
             .ok_or(Error::BudgetExceededError)?;
         let git = self.attempt_git(&run, n)?;
-        let workspace = self
-            .git
-            .prepare_attempt(&git)
-            .map_err(|_| Error::Invalid("cannot prepare isolated Attempt"))?;
-        let path = path_text(&workspace.cwd)?;
-        let branch = workspace.branch.clone();
+        let reserved = self.git.attempt_workspace(&git);
+        let path = path_text(&reserved.cwd)?;
+        let branch = reserved.branch;
         let id = id.to_owned();
         let attempt=self.store.write(move|db|{
             let stamp=now(db)?;
@@ -315,12 +313,56 @@ impl RunManager {
             change(db,ChangeTopic::Run,&id,&load_run(db,&id)?)?;
             Ok(attempt)
         })?;
+        let workspace = match self.git.prepare_attempt(&git) {
+            Ok(workspace) => workspace,
+            Err(_) => {
+                self.interrupt_unstarted_attempt(attempt)?;
+                return Err(Error::Invalid("cannot prepare isolated Attempt"));
+            }
+        };
         let run = self.get(&run.id)?;
         Ok(RunWork {
             run,
             attempt,
             id: git,
             workspace,
+        })
+    }
+
+    pub(crate) fn attempt_has_turn(&self, attempt_id: i64) -> Result<bool> {
+        self.store.read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM turns WHERE attempt_id=?1)",
+                [attempt_id],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    /// The next dispatch takes a fresh number. The abandoned files remain
+    /// isolated even if their Git layout was only partially created.
+    pub(crate) fn interrupt_unstarted_attempt(&self, attempt: AttemptDto) -> Result<()> {
+        self.store.write(move |db| {
+            let stamp = now(db)?;
+            let changed = db.execute(
+                "UPDATE attempts SET status='superseded',ended_at=?2 WHERE id=?1 AND status='prepared'
+                 AND NOT EXISTS (SELECT 1 FROM turns WHERE attempt_id=?1)",
+                params![attempt.id, stamp],
+            )?;
+            if changed != 1 {
+                return Err(Error::ConflictError);
+            }
+            let changed = db.execute(
+                "UPDATE runs SET status='interrupted',detail='Attempt did not start; safe to retry',
+                 result_sha=NULL,observed_sha=NULL,accepted_attempt_id=NULL,result_source=NULL,updated_at=?3
+                 WHERE id=?1 AND current_attempt=?2 AND status='running'",
+                params![attempt.run_id, attempt.attempt_no, stamp],
+            )?;
+            if changed != 1 {
+                return Err(Error::ConflictError);
+            }
+            change(db, ChangeTopic::Attempt, &attempt.id.to_string(), &load_attempt(db, attempt.id)?)?;
+            change(db, ChangeTopic::Run, &attempt.run_id, &load_run(db, &attempt.run_id)?)
         })
     }
 
