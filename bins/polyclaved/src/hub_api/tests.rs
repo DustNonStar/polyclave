@@ -883,26 +883,45 @@ fn setup_unreceipted_run(dir: &FsPath, hub: &Hub, run_id: &str, attempt_id: i64)
     tip
 }
 
-/// The workspace builds `polyclave-fake-agent` for the core suite; it lives in
-/// the same target directory as this test binary.
+/// The workspace builds `polyclave-fake-agent` for the core suite; in a clean
+/// CI run `polyclaved` tests may run before `polyclave-core`, so build it on
+/// demand once if absent.
 fn fake_agent_binary() -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let path = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| {
-            p.join(format!(
-                "polyclave-fake-agent{}",
-                std::env::consts::EXE_SUFFIX
-            ))
-        })
-        .unwrap();
-    assert!(
-        path.is_file(),
-        "the offline Worker fixture is missing: {}",
-        path.display()
-    );
-    path
+    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap();
+        let path = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| {
+                p.join(format!(
+                    "polyclave-fake-agent{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+            })
+            .unwrap();
+        if !path.is_file() {
+            let status = std::process::Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "--locked",
+                    "-p",
+                    "polyclave-core",
+                    "--bin",
+                    "polyclave-fake-agent",
+                ])
+                .status()
+                .expect("failed to invoke cargo build for polyclave-fake-agent");
+            assert!(status.success(), "cargo build polyclave-fake-agent failed");
+        }
+        assert!(
+            path.is_file(),
+            "the offline Worker fixture is missing: {}",
+            path.display()
+        );
+        path
+    })
+    .clone()
 }
 
 /// A Hub whose TurnRunner really spawns the offline Worker fixture and whose MCP
