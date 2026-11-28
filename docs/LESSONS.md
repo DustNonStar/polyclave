@@ -77,3 +77,13 @@
 - **根因：** 复用已有的便捷函数（`hub_enqueue`）或加便捷兜底（`header.or(body)`），没有按信任边界区分“本人显式输入”与“外部不可信数据”。
 - **流程改进：** 审查所有跨信任边界的入口（Webhook/Observer、远端 HTTP、MCP 工具、Mesh 派发）时，强制核查数据落库时的 `source` / `actor` 字段是否来自可信宿主判定，禁止外部数据写入 `source='user'`。
 - **反哺 Polyclave 设计：** 在存储层类型与 SQLite `CHECK` 约束上把 `hub_enqueue_user`（仅本地/已鉴权本人客户端可调）与 `hub_enqueue_external_event`（强制 `source='host'` 且必经 `Admission Policy`）物理拆开，从编译期堵死误用。
+
+---
+
+## 2026-11-27 · Batch 1 审查漏检复盘
+
+### 11. 审查不能只看中间层与自检绿灯，必须从最外层入口追到底并对 OS/并发做故障模型审查
+- **发生了什么：** 审查 `fix/hardening-batch1-runtime`（含自检提交 `2fdf2d6`）时，185 个测试全绿且代码整洁，初次审查给出通过结论；二次对抗复核在同一提交上发现两处实锤缺陷，且均出在自检新增代码里：① `POST /cancel` 只置内存标记，SQLite 中的 `mcp_revoked=1` 要等 Worker 退出回收后才落库，导致取消窗口内宿主 `commit_and_stage` 仍可继续写入 staging；② Windows `CommandTree::spawn` 采用 `CREATE_SUSPENDED` + `AssignProcessToJobObject` 两步绑定，两步间宿主崩溃会遗留挂起进程，且 `Drop` 只 `wait()` 主进程未确认孙进程树（如 `git-receive-pack`）已退出。
+- **根因：** ① 只看了中间层回调（`can_publish`）与直接伪造数据库撤销状态的单元测试，未从最外层 HTTP 入口（`routes.rs` → `runner.rs` → `runs.rs`）逐跳追踪取消生效的真实时序；② 对 `windows.rs` 仅做了编译/Clippy 级静态检查，未做崩溃窗口与进程树排空的故障模型推演；③ 对“作者已自检 + 测试全绿”产生确认偏误，反而放松了对自检新增代码的对抗审查。
+- **流程改进：** 合并审查强制执行三条硬检查：① 凡涉及取消、撤销、权限拦截，必须从最外层 HTTP/CLI 入口追到最底层落盘点，画出状态变更时序；② 凡改动 `polyclave-os`、锁、子进程或异步取消，强制追问三题（两步操作间宿主崩溃会遗留什么、孙进程树是否确认全退、取消/超时是否立刻对持锁方可见）；③ 对作者“自检补丁”新增的代码按最高风险面单独对抗审查。
+- **反哺 Polyclave 设计：** 取消语义必须明确区分“已收到取消请求”与“已停止写入”，受理取消时立即撤销当前 turn 的写入与 MCP 权限（不可延迟到子进程回收后）；进程树托管应在创建进程时原子绑定隔离边界（如 Windows `PROC_THREAD_ATTRIBUTE_JOB_LIST`），并在清理阶段确认整棵进程树退出归零。
