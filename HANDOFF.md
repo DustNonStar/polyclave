@@ -1592,7 +1592,7 @@ Not done:
 
 ### Audit follow-up queue (Batch 1 & Batch 2 self-review)
 
-- [ ] #1 [High] `crates/polyclave-hub/src/pr_gate.rs`: `merge_immediately` uncertain error leaves gate wedged in `approved` — restore `AwaitingHumanApproval` + regression test.
+- [x] #1 [High] `crates/polyclave-hub/src/pr_gate.rs`: `merge_immediately` uncertain error leaves gate wedged in `approved` — restore `AwaitingHumanApproval` + regression test (`15f057c`, workspace tests: 218 passed).
 - [ ] #2 [High] `bins/polyclaved/src/hub_api/http.rs` & `bins/polyclaved/src/routes.rs`: remove `Box::leak` in `map_page_err` by changing `HttpError`'s message field to `Cow<'static, str>`.
 - [ ] #3 [Medium] `apps/polyclave-app/ui/src/views/inspector.ts` & `app.ts`: refresh `S.details` for `prGateEvidenceSlot` when SSE changes arrive or cached detail lacks `activeGate.head_sha`, without clobbering an open diff panel.
 - [ ] #4 [Medium] `crates/polyclave-core/src/stage.rs`: resolve revision `from_sha` ref by matching the Attempt that produced `from_sha` (or matching `prepare_revision_attempt`) instead of assuming `attempt.number - 1`.
