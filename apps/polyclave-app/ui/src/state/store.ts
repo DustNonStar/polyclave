@@ -30,7 +30,7 @@ export const S = {
   meshNodes: [] as MeshNodeDto[],
   meshLimits: [] as MeshNodeLimitDto[],
   notificationChannels: [] as NotificationChannelDto[],
-  lastPairing: null as { ticket: PairingTicketDto; secret: string; qr_uri: string } | null,
+  lastPairing: null as { ticket: PairingTicketDto; secret: string; origin: string | null; qr_uri: string | null } | null,
   cua: { locked: false, holder_run_id: null, target_window: null, idle_threshold_secs: 30, acquired_at: null, reclaimed_at: null } as CuaLockDto,
   evolutionSuggestions: [] as EvolutionSuggestionDto[],
   localSkills: [] as LocalSkillDto[],

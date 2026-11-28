@@ -569,6 +569,27 @@ pub struct Hub {
     stream: broadcast::Sender<(String, StreamEvent)>,
     stage2: Arc<Stage2Deps>,
     mesh_policy: Arc<Mutex<Arc<polyclave_mesh::MeshPolicy>>>,
+    /// The `https://<host>` origin a phone reaches this daemon on (Tailscale
+    /// Serve). A pairing link is only useful if it names that origin, so the QR
+    /// points at it instead of at loopback.
+    pairing_origin: Arc<Mutex<Option<String>>>,
+}
+
+/// The configured Tailscale HTTPS origin, normalised to `https://<host[:port]>`.
+///
+/// Everything that is not exactly that is refused: the value ends up inside a QR
+/// code a person scans, so a path, a query, a fragment or userinfo would make the
+/// link point somewhere else than the daemon.
+pub fn pairing_origin_from_env(value: Option<String>) -> Option<String> {
+    let value = value?.trim().trim_end_matches('/').to_owned();
+    let authority = value.strip_prefix("https://")?;
+    if authority.is_empty()
+        || authority.contains(['/', '@', '?', '#', '\\'])
+        || authority.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(format!("https://{authority}"))
 }
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> HubResult<T> + Send + 'static,
@@ -627,6 +648,9 @@ impl Hub {
             stream,
             stage2,
             mesh_policy: Arc::new(Mutex::new(Arc::new(mesh_policy))),
+            pairing_origin: Arc::new(Mutex::new(pairing_origin_from_env(
+                std::env::var("POLYCLAVE_TAILSCALE_ORIGIN").ok(),
+            ))),
         };
         let app = Router::new()
             .route("/mcp", post(http::mcp))
@@ -641,6 +665,15 @@ impl Hub {
     }
     pub fn is_closed(&self) -> bool {
         self.lifecycle.shutdown.stopped()
+    }
+    /// The `https://<host>` origin a phone must use to reach this daemon, when
+    /// the operator configured one.
+    pub fn pairing_origin(&self) -> Option<String> {
+        self.pairing_origin.lock().unwrap().clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_pairing_origin(&self, origin: Option<String>) {
+        *self.pairing_origin.lock().unwrap() = origin;
     }
     pub fn set_scm(&self, scm: Arc<dyn ScmClient>) {
         *self.stage2.scm.lock().unwrap() = Some(scm);

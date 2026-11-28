@@ -104,12 +104,23 @@ function remoteDevicesSection(api: Api, act: Actions): HTMLElement {
   const showQr = () => {
     qrSlot.replaceChildren();
     if (!S.lastPairing) return;
+    const link = S.lastPairing.qr_uri;
+    if (!link) {
+      // Without a configured Tailscale HTTPS origin there is no address the phone
+      // could open, so no link and no QR are handed out.
+      qrSlot.append(h('div', { class: 'card qr-box', 'data-pairing': 'no-origin' },
+        h('div', { style: 'display:grid;gap:6px;min-width:0' },
+          h('span', { class: 'card-title', text: 'Pairing link unavailable' }),
+          h('p', { class: 'field-hint', text: 'Set POLYCLAVE_TAILSCALE_ORIGIN to the https origin this daemon is served on (for example https://polyclave.tailnet.ts.net), restart the daemon, and create a new ticket. A link without it cannot reach this machine.' }),
+          h('p', { class: 'field-hint', text: 'The ticket is valid until ' + S.lastPairing.ticket.expires_at + '.' }))));
+      return;
+    }
     qrSlot.append(h('div', { class: 'card qr-box' },
-      renderPairingMatrix(S.lastPairing.qr_uri),
+      renderPairingMatrix(link),
       h('div', { style: 'display:grid;gap:6px;min-width:0' },
         h('span', { class: 'card-title', text: '10-minute one-time pairing ticket' }),
-        h('p', { class: 'field-hint mono', style: 'overflow-wrap:anywhere', text: S.lastPairing.qr_uri }),
-        h('p', { class: 'field-hint', text: 'Expires: ' + S.lastPairing.ticket.expires_at + ' · Dual-identity enforced over Tailscale / AgentMesh.' }))));
+        h('p', { class: 'field-hint mono', style: 'overflow-wrap:anywhere', text: link, 'data-pairing': 'link' }),
+        h('p', { class: 'field-hint', text: 'Expires: ' + S.lastPairing.ticket.expires_at + ' · Scan it with the phone; the page exchanges the secret for a device token and strips it from the address bar.' }))));
   };
   showQr();
   const genBtn = button('Create 10-min QR', () => {

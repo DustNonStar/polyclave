@@ -702,16 +702,29 @@ async fn create_pairing_ticket(
     Json(body): Json<CreatePairingTicketBody>,
 ) -> Reply {
     let ttl = body.ttl_secs.unwrap_or(600);
+    let origin = hub.pairing_origin();
+    let store = hub.store.clone();
     let (ticket, secret) = run_blocking(move || {
-        hub.store
+        store
             .create_pairing_ticket(body.client_kind, body.device_label, ttl)
             .map_err(HttpError::from)
     })
     .await?;
-    let qr_uri = format!("polyclave://pair?ticket={}&id={}", secret, ticket.id);
-    Ok(Json(
-        json!({ "ticket": ticket, "secret": secret, "qr_uri": qr_uri }),
-    ))
+    // The phone scans this and opens it in a browser, so the link must name the
+    // origin that browser can actually reach: the configured Tailscale HTTPS
+    // origin. A `polyclave://` URI is undecodable by a phone browser that has no
+    // handler installed, which is exactly the dead end the audit found. With no
+    // origin configured there is no link to hand out, and the caller is told so
+    // rather than being given one that cannot work.
+    let qr_uri = origin
+        .as_ref()
+        .map(|origin| format!("{origin}/#pair={secret}"));
+    Ok(Json(json!({
+        "ticket": ticket,
+        "secret": secret,
+        "origin": origin,
+        "qr_uri": qr_uri,
+    })))
 }
 
 async fn devices(State(hub): State<Hub>) -> Reply {

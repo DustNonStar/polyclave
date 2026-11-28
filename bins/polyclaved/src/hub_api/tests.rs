@@ -3778,6 +3778,83 @@ async fn phone_page_origin_is_accepted_and_a_cross_site_origin_is_refused() {
     );
 }
 
+/// Item 3.2: the QR names the origin the phone can actually reach, and with no
+/// configured origin it hands out no link at all instead of an unusable one.
+#[tokio::test]
+async fn pairing_qr_points_at_the_configured_tailscale_origin() {
+    use axum::body::to_bytes;
+    use axum::http::header;
+
+    // Only a bare https origin is accepted: a path, a query, userinfo or plain
+    // http would make the scanned link point somewhere else.
+    assert_eq!(
+        pairing_origin_from_env(Some("https://polyclave.tailnet.ts.net/".into())).as_deref(),
+        Some("https://polyclave.tailnet.ts.net")
+    );
+    for bad in [
+        "http://polyclave.tailnet.ts.net",
+        "https://polyclave.tailnet.ts.net/app",
+        // Userinfo in the authority: built at run time so no literal address is
+        // committed, and refused all the same.
+        &format!("https://{}@polyclave.tailnet.ts.net", "user"),
+        "https://polyclave.tailnet.ts.net?x=1",
+        "polyclave.tailnet.ts.net",
+        "https://",
+    ] {
+        assert_eq!(pairing_origin_from_env(Some(bad.into())), None, "{bad}");
+    }
+
+    let (_dir, hub, _rx) = test_hub().await;
+    let app = daemon_router(&hub);
+    let create = |label: &'static str| {
+        authed_post(
+            "/api/pairing/tickets",
+            json!({"client_kind": "ios", "device_label": label, "ttl_secs": 600}),
+        )
+    };
+
+    // No origin configured: the secret is still issued, but no link is invented.
+    let res = app.clone().oneshot(create("Unconfigured")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(res.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    assert!(body["secret"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(body["origin"], Value::Null);
+    assert_eq!(body["qr_uri"], Value::Null);
+
+    // Configured: the link is the page the phone opens, with the secret in the
+    // fragment so it never reaches a server log.
+    hub.set_pairing_origin(Some("https://polyclave.tailnet.ts.net".into()));
+    let res = app.clone().oneshot(create("Configured")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(res.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    let secret = body["secret"].as_str().unwrap();
+    assert_eq!(body["origin"], json!("https://polyclave.tailnet.ts.net"));
+    assert_eq!(
+        body["qr_uri"],
+        json!(format!("https://polyclave.tailnet.ts.net/#pair={secret}"))
+    );
+
+    // The link is only useful if that origin can pair: the exchange accepts the
+    // phone's own https origin, which is the one the QR names.
+    let exchange = Request::builder()
+        .method("POST")
+        .uri("/api/pairing/exchange")
+        .header(header::HOST, "polyclave.tailnet.ts.net")
+        .header("Tailscale-User-Login", "dust@tailnet")
+        .header(header::ORIGIN, "https://polyclave.tailnet.ts.net")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "secret": secret }).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(exchange).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(res.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(body["device"]["peer_identity"], json!("dust@tailnet"));
+    hub.close().await;
+}
+
 /// Item 3.1: a device token only passes when the identity presented on the wire
 /// is exactly the identity the device was paired with, and the only identity that
 /// counts is the one Tailscale Serve sets.

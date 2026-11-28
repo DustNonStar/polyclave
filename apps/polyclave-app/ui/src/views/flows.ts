@@ -140,14 +140,33 @@ export function registerProject(api: Api, act: Actions): void {
 }
 
 export function tokenDialog(act: Actions): void {
-  const [tokL, tok] = textField('Local daemon token', { type: 'password', mono: true, autocomplete: 'off', hint: 'Printed by polyclaved at start-up after #token=.' });
+  const https = location.protocol === 'https:';
+  // On the phone the pairing link is the only way in: the loopback capability
+  // token is printed on the host's own machine and is useless here. A device
+  // token can still be pasted if the link was consumed on another tab.
+  const [tokL, tok] = textField(https ? 'Paired device token' : 'Local daemon token', {
+    type: 'password', mono: true, autocomplete: 'off',
+    hint: https ? 'Issued when the pairing link was opened. Leave empty to rescan a new link.' : 'Printed by polyclaved at start-up after #token=.',
+  });
   const err = errorLine();
-  const go = button('Connect', () => {
+  const go = button(https ? 'Reconnect' : 'Connect', () => {
     const value = tok.value.trim();
     tok.value = '';
-    if (!/^[0-9a-f]{32,64}$/i.test(value) || location.hostname !== '127.0.0.1') { err.textContent = 'Use the local daemon address (127.0.0.1) and its token.'; return; }
-    try { sessionStorage.setItem('pc-session', value); } catch { act.tell('Session storage is unavailable'); return; }
+    if (!/^[0-9a-f]{32,64}$/i.test(value)) {
+      err.textContent = https
+        ? 'Open the pairing link again to get a new device token, or paste the token this device was given.'
+        : 'Use the local daemon address (127.0.0.1) and its token.';
+      return;
+    }
+    try {
+      if (https) localStorage.setItem('pc-device', value); else sessionStorage.setItem('pc-session', value);
+    } catch { act.tell('Storage is unavailable'); return; }
     location.reload();
   }, 'btn-primary');
-  openDialog('Connect to the local daemon', [h('p', { text: 'Open the address polyclaved printed, or paste its token here. The token stays in this tab only.' }), tokL, err], { footer: [go] });
+  openDialog(https ? 'Reconnect this device' : 'Connect to the local daemon', [
+    h('p', { text: https
+      ? 'This device talks to Polyclave through the host\u2019s Tailscale HTTPS origin. Open a fresh pairing link from the host, or paste the device token it issued.'
+      : 'Open the address polyclaved printed, or paste its token here. The token stays in this tab only.' }),
+    tokL, err,
+  ], { footer: [go] });
 }

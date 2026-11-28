@@ -80,7 +80,7 @@ export function api(connection: () => Connection | null) {
     resume: () => call<PauseStateDto>('/api/resume', {}),
     pairingTickets: () => call<PairingTicketDto[]>('/api/pairing/tickets'),
     createPairingTicket: (client_kind: ClientKind, device_label: string, ttl_secs = 600) =>
-      call<{ ticket: PairingTicketDto; secret: string; qr_uri: string }>('/api/pairing/tickets', { client_kind, device_label, ttl_secs }),
+      call<{ ticket: PairingTicketDto; secret: string; origin: string | null; qr_uri: string | null }>('/api/pairing/tickets', { client_kind, device_label, ttl_secs }),
     devices: () => call<PairedDeviceDto[]>('/api/devices'),
     revokeDevice: (id: string) => call<PairedDeviceDto>('/api/devices/' + enc(id) + '/revoke', {}),
     meshNodes: () => call<MeshNodeDto[]>('/api/mesh/nodes'),
