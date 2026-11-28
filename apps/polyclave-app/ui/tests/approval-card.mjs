@@ -22,14 +22,61 @@ const run = (id, extra) => ({
   result_sha: null, observed_sha: null, result_source: null, resolution: null,
   created_at: '2026-11-27T00:00:00Z', updated_at: '2026-11-27T00:05:00Z', ...extra,
 });
+const recorded = 'd'.repeat(40);
+const conflicted = 'e'.repeat(40);
+const claimOnly = 'f'.repeat(40);
+const olderSha = 'a'.repeat(40);
 const runs = [
   run('r2', { status: 'done', result_sha: verified, observed_sha: verified, result_source: 'agent', accepted_attempt_id: 7 }),
   run('r1', { status: 'needs_review', observed_sha: tip, detail: 'mirror tip differs from the receipt' }),
+  run('r3', { status: 'done', result_sha: recorded, observed_sha: recorded, result_source: 'agent', accepted_attempt_id: 8 }),
+  run('r4', { status: 'done', result_sha: conflicted, observed_sha: conflicted, result_source: 'agent', accepted_attempt_id: 9 }),
+  run('r5', { status: 'needs_review', observed_sha: claimOnly, detail: 'mirror tip differs from the receipt' }),
 ];
 const commit = sha => ({ commits: sha.slice(0, 12) + ' fix(config): normalise Windows path separators', files: '14\t3\tcrates/config/src/load.rs\n22\t0\tcrates/config/tests/windows_paths.rs' });
+const result = (sha, source, status, name, summary) => ({ sha, source, status, name, summary, recorded_at: '2026-11-27T00:06:00Z' });
 const details = {
-  r1: { run: runs[1], commit: commit(tip), evidence: { attempt_no: 2, receipt_sha: receipt, worker_claim: 'Changed the loader to normalise separators and added a regression test. Windows path tests not run on a Windows host.' } },
-  r2: { run: runs[0], commit: commit(verified), evidence: { attempt_no: 2, receipt_sha: verified, worker_claim: null } },
+  r1: { run: runs[1], commit: commit(tip), evidence: { attempt_no: 2, receipt_sha: receipt, worker_claim: 'Changed the loader to normalise separators and added a regression test. Windows path tests not run on a Windows host.', test_sha: tip, receipt_tests: null, receipt_tests_status: null, receipt_not_done: null, test_results: [] } },
+  r2: { run: runs[0], commit: commit(verified), evidence: { attempt_no: 2, receipt_sha: verified, worker_claim: null, test_sha: verified, receipt_tests: null, receipt_tests_status: null, receipt_not_done: null, test_results: [] } },
+  // CI for the verified SHA, the Worker's claim for the same SHA, and a result
+  // recorded for an older commit that must never be shown here.
+  r3: {
+    run: runs[2], commit: commit(recorded),
+    evidence: {
+      attempt_no: 2, receipt_sha: recorded, worker_claim: 'Ran the suite locally before submitting.',
+      test_sha: recorded,
+      receipt_tests: 'cargo test: 42 passed', receipt_tests_status: 'passed',
+      receipt_not_done: 'Windows path tests not run',
+      test_results: [
+        result(olderSha, 'ci', 'failed', 'ci/old', 'ci/old: failure'),
+        result(recorded, 'ci', 'passed', 'ci/rust-test', 'ci/rust-test: success'),
+        result(recorded, 'worker_claim', 'passed', '', 'cargo test: 42 passed'),
+      ],
+    },
+  },
+  // CI failed while the Worker claimed a pass: CI wins and the claim is still shown.
+  r4: {
+    run: runs[3], commit: commit(conflicted),
+    evidence: {
+      attempt_no: 2, receipt_sha: conflicted, worker_claim: null,
+      test_sha: conflicted,
+      receipt_tests: 'all green locally', receipt_tests_status: 'passed', receipt_not_done: null,
+      test_results: [
+        result(conflicted, 'ci', 'failed', 'ci/rust-test', 'ci/rust-test: failure'),
+        result(conflicted, 'worker_claim', 'passed', '', 'all green locally'),
+      ],
+    },
+  },
+  // Only the Worker's own claim: never green.
+  r5: {
+    run: runs[4], commit: commit(claimOnly),
+    evidence: {
+      attempt_no: 2, receipt_sha: claimOnly, worker_claim: null,
+      test_sha: claimOnly,
+      receipt_tests: 'my tests pass', receipt_tests_status: 'passed', receipt_not_done: null,
+      test_results: [result(claimOnly, 'worker_claim', 'passed', '', 'my tests pass')],
+    },
+  },
 };
 const clients = new Set();
 const server = createServer(async (req, res) => {
@@ -152,6 +199,61 @@ try {
       assert.deepEqual(o2.wide, []); assert.equal(o2.body, width);
       measurements.push({ run: 'r2', width, theme, summary: r2.summary, ...o2 });
       if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r2-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
+
+      // r3: CI passed for the verified SHA, the Worker's claim is shown beside it,
+      // and the older commit's failure is not borrowed.
+      await page.locator('select.run-picker').selectOption('r3');
+      await page.waitForFunction(() => document.querySelector('[data-evidence-summary]')?.textContent.includes('tests passed for ddddddd'));
+      const r3 = await card(page);
+      assert.equal(r3.summary, 'Commit verified · tests passed for ddddddd · not judged by you');
+      assert.deepEqual(r3.rows.map(r => r.state), ['Verified', 'Passed', 'Your decision']);
+      assert.equal(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'done');
+      assert.ok(r3.rows[1].text.includes('CI: ci/rust-test — passed at ddddddd.'));
+      assert.ok(!r3.rows[1].text.includes('ci/old'), 'an older SHA result is never shown');
+      assert.ok(r3.rows[1].text.includes('A CI result wins over a claim'));
+      assert.ok(r3.rows[2].text.includes('Tests, as the Worker submitted them (passed): “cargo test: 42 passed”'));
+      assert.ok(r3.rows[2].text.includes('Not done or unverified, per the Worker: “Windows path tests not run”'));
+      const o3 = await overflow(page);
+      assert.deepEqual(o3.wide, []); assert.equal(o3.body, width);
+      measurements.push({ run: 'r3', width, theme, summary: r3.summary,
+        tests: { state: r3.rows[1].state, tone: await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone') }, ...o3 });
+      if (shots) {
+        const name = 'r3-' + (width === 375 ? 'phone' : 'desktop') + '-' + theme;
+        await page.screenshot({ path: join(shots, name + '.png') });
+        await page.locator('.evidence').screenshot({ path: join(shots, name + '-card.png') });
+      }
+
+      // r4: a failed CI check outranks the Worker's claim, which is still shown.
+      await page.locator('select.run-picker').selectOption('r4');
+      await page.waitForFunction(() => document.querySelector('[data-evidence-summary]')?.textContent.includes('tests failed for eeeeeee'));
+      const r4 = await card(page);
+      assert.equal(r4.summary, 'Commit verified · tests failed for eeeeeee · not judged by you');
+      assert.equal(r4.rows[1].state, 'Failed');
+      assert.equal(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'fail');
+      assert.ok(r4.rows[1].text.includes('CI: ci/rust-test — failed at eeeeeee.'));
+      assert.ok(r4.rows[1].text.includes('The Worker also reports: “all green locally” (passed). A CI result wins over a claim.'));
+      const o4 = await overflow(page);
+      assert.deepEqual(o4.wide, []); assert.equal(o4.body, width);
+      measurements.push({ run: 'r4', width, theme, summary: r4.summary, tests: { state: r4.rows[1].state }, ...o4 });
+      if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r4-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
+
+      // r5: only the Worker's claim is recorded, so the row stays orange and the
+      // summary never says tests passed.
+      await page.locator('select.run-picker').selectOption('r5');
+      await page.waitForFunction(() => document.querySelector('[data-evidence-summary]')?.textContent.includes('worker claim only for fffffff'));
+      const r5 = await card(page);
+      assert.equal(r5.summary, 'Commit not verified · worker claim only for fffffff · waiting for your decision');
+      assert.doesNotMatch(r5.summary, PASS_CLAIM);
+      assert.equal(r5.rows[1].state, 'Worker’s claim');
+      assert.equal(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'review');
+      assert.ok(r5.rows[1].text.includes('no CI check run is recorded for this commit'));
+      // The row may quote a claim that says "my tests pass"; what matters is that
+      // the card itself stays neutral and never turns green.
+      assert.notEqual(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'done');
+      const o5 = await overflow(page);
+      assert.deepEqual(o5.wide, []); assert.equal(o5.body, width);
+      measurements.push({ run: 'r5', width, theme, summary: r5.summary, tests: { state: r5.rows[1].state }, ...o5 });
+      if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r5-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
 
       assert.deepEqual(errors, []); assert.deepEqual(outside, []);
       console.log('approval card ' + width + 'x' + height + ' ' + theme + ' ok');

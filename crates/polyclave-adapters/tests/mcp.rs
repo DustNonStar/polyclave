@@ -235,3 +235,117 @@ async fn memory_brief_respects_serialized_json_byte_budget_and_search_requires_q
     assert!(text.len() <= 6000, "serialized json {} > 6000", text.len());
     assert!(!text.is_empty());
 }
+
+fn claim_rows(store: &Store, sha: &str) -> Vec<(String, String, String)> {
+    store
+        .read(move |db| {
+            let mut q = db.prepare(
+                "SELECT source,status,summary FROM test_results WHERE run_id='run' AND sha=?1",
+            )?;
+            let rows = q
+                .query_map([sha], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn submit_result_records_the_workers_test_claim_for_the_submitted_sha() {
+    let (_dir, store, app) = fixture(None);
+    let sha = "a".repeat(40);
+    let (status, body) = call(
+        app.clone(),
+        WORKER,
+        "submit_result",
+        json!({
+            "run_id":"run","branch":"agent/run/a1","sha":sha,
+            "tests":"cargo test: 42 passed","tests_status":"passed",
+            "not_done":"Windows path tests not run"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Accepted"));
+    assert_eq!(
+        claim_rows(&store, &sha),
+        vec![(
+            "worker_claim".to_owned(),
+            "passed".to_owned(),
+            "cargo test: 42 passed".to_owned()
+        )]
+    );
+    // The notes are kept with the receipt, so the card can show them verbatim.
+    let payload: String = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT payload_json FROM results WHERE accepted=1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(payload.contains("Windows path tests not run"), "{payload}");
+
+    // A resend that only rewords its notes is the same receipt: the first is kept.
+    let (status, body) = call(
+        app,
+        WORKER,
+        "submit_result",
+        json!({
+            "run_id":"run","branch":"agent/run/a1","sha":sha,
+            "tests":"cargo test: 42 passed, plus one flaky rerun","tests_status":"failed"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Already accepted"));
+    assert_eq!(
+        claim_rows(&store, &sha),
+        vec![(
+            "worker_claim".to_owned(),
+            "passed".to_owned(),
+            "cargo test: 42 passed".to_owned()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn submit_result_refuses_a_claim_it_cannot_understand() {
+    let (_dir, store, app) = fixture(None);
+    let sha = "a".repeat(40);
+    for bad in [
+        json!({"run_id":"run","branch":"agent/run/a1","sha":sha,"tests":"all good","tests_status":"green"}),
+        json!({"run_id":"run","branch":"agent/run/a1","sha":sha,"tests_status":"passed"}),
+    ] {
+        let (status, body) = call(app.clone(), WORKER, "submit_result", bad).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Rejected: invalid test summary"),
+            "{body}"
+        );
+    }
+    assert_eq!(accepted(&store), 0);
+    assert!(claim_rows(&store, &sha).is_empty());
+
+    // A plain submission with no notes still works and records no claim.
+    let (status, body) = call(
+        app,
+        WORKER,
+        "submit_result",
+        json!({"run_id":"run","branch":"agent/run/a1","sha":sha}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(accepted(&store), 1, "{body}");
+    assert!(claim_rows(&store, &sha).is_empty());
+}

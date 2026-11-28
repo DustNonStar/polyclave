@@ -259,11 +259,81 @@ pub struct AttemptDto {
     pub ended_at: Option<String>,
 }
 
+/// Where a recorded test result came from.
+///
+/// Only `ci` and `host_run` are host-observed. `worker_claim` is the Worker's own
+/// statement and is always labelled as such.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TestResultSource {
+    WorkerClaim,
+    HostRun,
+    Ci,
+}
+
+impl TestResultSource {
+    /// The spelling stored in the ledger.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerClaim => "worker_claim",
+            Self::HostRun => "host_run",
+            Self::Ci => "ci",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "worker_claim" => Self::WorkerClaim,
+            "host_run" => Self::HostRun,
+            "ci" => Self::Ci,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TestStatus {
+    Passed,
+    Failed,
+    Pending,
+}
+
+impl TestStatus {
+    /// The spelling stored in the ledger.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Pending => "pending",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "passed" => Self::Passed,
+            "failed" => Self::Failed,
+            "pending" => Self::Pending,
+            _ => return None,
+        })
+    }
+}
+
+/// One recorded result for one SHA.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct TestResultDto {
+    pub sha: String,
+    pub source: TestResultSource,
+    pub status: TestStatus,
+    /// Check-run name for `ci`; empty for a claim.
+    pub name: String,
+    pub summary: String,
+    pub recorded_at: String,
+}
+
 /// Evidence the approval card shows for a Run's current Attempt.
 ///
 /// Every field is read for that Attempt only, so a receipt or a claim from an
-/// older Attempt (and so an older SHA) is never shown as current evidence. The
-/// host records no test results, so this type has no test field.
+/// older Attempt (and so an older SHA) is never shown as current evidence, and
+/// `test_results` holds rows for exactly one SHA — the one in `test_sha`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 pub struct RunEvidenceDto {
     // The Attempt this evidence belongs to.
@@ -274,6 +344,17 @@ pub struct RunEvidenceDto {
     // Latest `report_progress` text from this Attempt's turns: the Worker's own
     // claim, never a host check.
     pub worker_claim: Option<String>,
+    // The SHA the `test_results` rows belong to: the Run's R1-verified
+    // `result_sha`, or its `observed_sha` while nothing is verified yet.
+    pub test_sha: Option<String>,
+    // The Worker's own test summary from the accepted receipt, and its claimed
+    // status. Never a host check.
+    pub receipt_tests: Option<String>,
+    pub receipt_tests_status: Option<TestStatus>,
+    // What the Worker said it did not finish.
+    pub receipt_not_done: Option<String>,
+    // One row per recorded result for exactly `test_sha`; never another SHA.
+    pub test_results: Vec<TestResultDto>,
 }
 
 /// Public projection. The host-only authorization secret is not part of this type.

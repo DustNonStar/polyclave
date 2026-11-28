@@ -43,6 +43,9 @@ mod tests {
             RunDto,
             AttemptDto,
             RunEvidenceDto,
+            TestResultDto,
+            TestResultSource,
+            TestStatus,
             TurnDto,
             MemoryItemDto,
             ProviderProfileDto,
@@ -125,21 +128,66 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | {{ [key
     }
 
     #[test]
-    fn run_evidence_serializes_missing_receipt_and_claim_as_null_and_has_no_test_field() {
+    fn run_evidence_serializes_absent_evidence_as_null_and_empty_results() {
         let evidence = RunEvidenceDto {
             attempt_no: 2,
             receipt_sha: None,
             worker_claim: None,
+            test_sha: None,
+            receipt_tests: None,
+            receipt_tests_status: None,
+            receipt_not_done: None,
+            test_results: Vec::new(),
         };
         let value = serde_json::to_value(&evidence).unwrap();
-        // Exact equality: the host records no test results, so there is no test field.
+        // Exact equality: nothing is recorded, so every optional field is null and
+        // the per-SHA list is empty rather than absent.
         assert_eq!(
             value,
-            serde_json::json!({"attempt_no": 2, "receipt_sha": null, "worker_claim": null})
+            serde_json::json!({
+                "attempt_no": 2,
+                "receipt_sha": null,
+                "worker_claim": null,
+                "test_sha": null,
+                "receipt_tests": null,
+                "receipt_tests_status": null,
+                "receipt_not_done": null,
+                "test_results": []
+            })
         );
         assert_eq!(
             serde_json::from_value::<RunEvidenceDto>(value).unwrap(),
             evidence
         );
+    }
+
+    #[test]
+    fn test_result_serializes_as_the_ledger_spells_it() {
+        for (source, raw) in [
+            (TestResultSource::WorkerClaim, "worker_claim"),
+            (TestResultSource::HostRun, "host_run"),
+            (TestResultSource::Ci, "ci"),
+        ] {
+            assert_eq!(source.as_str(), raw);
+            assert_eq!(
+                serde_json::to_value(source).unwrap(),
+                serde_json::json!(raw)
+            );
+            assert_eq!(TestResultSource::parse(raw), Some(source));
+        }
+        for (status, raw) in [
+            (TestStatus::Passed, "passed"),
+            (TestStatus::Failed, "failed"),
+            (TestStatus::Pending, "pending"),
+        ] {
+            assert_eq!(status.as_str(), raw);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(raw)
+            );
+            assert_eq!(TestStatus::parse(raw), Some(status));
+        }
+        assert_eq!(TestResultSource::parse("chat"), None);
+        assert_eq!(TestStatus::parse("green"), None);
     }
 }

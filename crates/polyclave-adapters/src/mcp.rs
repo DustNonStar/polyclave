@@ -176,11 +176,15 @@ impl Mcp {
                 {
                     return Ok(tool_text("Rejected: invalid commit id", true));
                 }
+                let claim = match claim_notes(&data, token) {
+                    Ok(claim) => claim,
+                    Err(()) => return Ok(tool_text("Rejected: invalid test summary", true)),
+                };
                 if let Some(accepted) = self.store.read(|db| receipt(db, attempt.id))? {
                     if self.auth(token)? != Some(turn) {
                         return Err(CallError::Expired);
                     }
-                    return Ok(if accepted == data {
+                    return Ok(if accepted.same_receipt(&data) {
                         tool_text("Already accepted.", false)
                     } else {
                         different_receipt()
@@ -196,12 +200,39 @@ impl Mcp {
                         true,
                     ));
                 }
+                // The claim is recorded for the submitted SHA only, labelled as
+                // the Worker's own statement.
+                let claim_row = claim.tests.map(|summary| {
+                    (
+                        data.run_id.clone(),
+                        data.sha.clone(),
+                        claim.status.unwrap_or(polyclave_proto::TestStatus::Pending),
+                        summary,
+                    )
+                });
                 let (id, token, host) = (attempt.id, token.to_owned(), self.host_id.clone());
                 let outcome=self.store.write(move |db| {
                     if active(db,&token,&host)? != Some(turn.clone()) {return Ok(None);}
-                    if let Some(previous)=receipt(db,id)? {return Ok(Some(if previous == data {1} else {2}));}
+                    if let Some(previous)=receipt(db,id)? {return Ok(Some(if previous.same_receipt(&data) {
+                        // A resend that only rewords its notes does not replace the
+                        // first receipt, so the same claim is kept once.
+                        return Ok(Some(1));
+                    } else {2}));}
                     db.execute("INSERT INTO results(run_id,attempt_id,turn_id,accepted,payload_json,created_at) VALUES(?1,?2,?3,1,?4,?5)",
                         params![data.run_id,id,turn.id,serde_json::to_string(&data)?,now(db)?])?;
+                    if let Some((run, sha, status, summary)) = claim_row {
+                        polyclave_store::record_test_result(
+                            db,
+                            &polyclave_store::NewTestResult {
+                                run_id: run,
+                                sha,
+                                source: polyclave_proto::TestResultSource::WorkerClaim,
+                                name: String::new(),
+                                status,
+                                summary,
+                            },
+                        )?;
+                    }
                     Ok(Some(0))
                 })?;
                 match outcome {
@@ -414,13 +445,62 @@ fn safe_text(text: String, token: &str, max: usize) -> std::result::Result<Strin
     }
 }
 
-#[derive(Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Submit {
     run_id: String,
     branch: String,
     sha: String,
+    /// The Worker's own test summary. Never a host check; stored labelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tests: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tests_status: Option<String>,
+    /// What the Worker did not finish or could not verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    not_done: Option<String>,
 }
+
+impl Submit {
+    /// The identity of a submission. `tests`, `tests_status` and `not_done` are
+    /// the Worker's notes: a resend that words them differently is still the same
+    /// receipt, so the first accepted receipt stays authoritative.
+    fn same_receipt(&self, other: &Self) -> bool {
+        self.run_id == other.run_id && self.branch == other.branch && self.sha == other.sha
+    }
+}
+/// The Worker's optional notes, validated. `None` means "not sent".
+#[derive(Default)]
+struct ClaimNotes {
+    tests: Option<String>,
+    status: Option<polyclave_proto::TestStatus>,
+}
+
+/// Rejects a note that is too long or carries the turn token, and a claimed
+/// status that is not one the approval card knows. A blank note counts as not
+/// sent.
+fn claim_notes(data: &Submit, token: &str) -> std::result::Result<ClaimNotes, ()> {
+    let note = |v: Option<&str>, max: usize| -> std::result::Result<Option<String>, ()> {
+        match v.map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(v) => safe_text(v.to_owned(), token, max)
+                .map(Some)
+                .map_err(|_| ()),
+        }
+    };
+    let tests = note(data.tests.as_deref(), 2000)?;
+    // `not_done` needs no storage of its own: the whole receipt is kept.
+    let _ = note(data.not_done.as_deref(), 4000)?;
+    let status = match data.tests_status.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(polyclave_proto::TestStatus::parse(raw).ok_or(())?),
+    };
+    if status.is_some() && tests.is_none() {
+        return Err(());
+    }
+    Ok(ClaimNotes { tests, status })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Progress {
@@ -468,7 +548,8 @@ fn definitions(read_only: bool) -> Vec<Value> {
         tool(
             "submit_result",
             "Submit a pushed commit for host verification",
-            json!({"run_id":str_type,"branch":str_type,"sha":str_type}),
+            json!({"run_id":str_type,"branch":str_type,"sha":str_type,
+                "tests":str_type,"tests_status":str_type,"not_done":str_type}),
             json!(["run_id", "branch", "sha"]),
         );
         tool(

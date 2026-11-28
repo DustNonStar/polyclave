@@ -5,6 +5,7 @@ pub mod mesh_limits;
 mod publish;
 pub mod remote_dispatch;
 mod scm_cursors;
+pub mod test_results;
 pub use hub::{ApiHistoryRow, HubCompletion, HubMessage, HubTurn, ThreadDelta, TicketIntent};
 pub use publish::{insert_run_origin_snapshot, OriginSnapshot};
 mod stage2;
@@ -17,6 +18,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 pub use stage2::{CouncilCheckpoint, NewCouncil, NewPrGate, NewPrReview, NewProposal, ScmCursor};
 pub use stage4::local_embedding;
+pub use test_results::{record_test_result, test_results_for_sha, NewTestResult};
 pub use writer::{Changes, Store};
 
 #[derive(Debug, thiserror::Error)]

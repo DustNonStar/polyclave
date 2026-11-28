@@ -131,6 +131,7 @@ impl Store {
         crate::mesh_limits::upgrade(&migration)?;
         crate::remote_dispatch::upgrade(&migration)?;
         crate::scm_cursors::upgrade(&migration)?;
+        crate::test_results::upgrade(&migration)?;
         migration.commit()?;
         let (tx, rx) = mpsc::sync_channel::<Job>(128);
         let thread = std::thread::Builder::new()

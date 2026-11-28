@@ -2,11 +2,11 @@
 //! (`[agent-reviewer · …]`), updating `scm_observer_cursors`, and forwarding
 //! external events into the Hub inbox (`change_log` + triage).
 use crate::{
-    scm::{is_agent_reviewer_marker, ScmClient, ScmError},
+    scm::{is_agent_reviewer_marker, CheckRunInfo, ScmClient, ScmError},
     Error, Result,
 };
-use polyclave_proto::{ChangeTopic, PrGateStatus};
-use polyclave_store::{ScmCursor, Store};
+use polyclave_proto::{ChangeTopic, PrGateStatus, TestResultSource, TestStatus};
+use polyclave_store::{NewTestResult, ScmCursor, Store};
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
@@ -28,6 +28,20 @@ pub struct ObservedEvent {
     pub pr_number: u32,
     pub kind: ObservedEventKind,
     pub summary: String,
+}
+
+/// A check run's conclusion as the approval card reports it: only an explicit
+/// success is a pass, and anything not finished is still pending.
+fn check_status(check: &CheckRunInfo) -> TestStatus {
+    if check.status != "completed" {
+        return TestStatus::Pending;
+    }
+    match check.conclusion.as_deref() {
+        Some("success") => TestStatus::Passed,
+        Some("failure" | "timed_out" | "action_required" | "cancelled") => TestStatus::Failed,
+        // neutral, skipped, or a conclusion GitHub has not set.
+        _ => TestStatus::Pending,
+    }
 }
 
 #[derive(Clone)]
@@ -232,6 +246,35 @@ impl ScmObserver {
                         events.push(ev);
                     }
                 }
+            }
+
+            // Record every check run for exactly the SHA this Run's evidence is
+            // about. A later push carries a different SHA, so it can add rows but
+            // never rewrite these. Nothing is recorded while the Run has no SHA.
+            let test_sha = self
+                .store
+                .run_test_sha(&gate.run_id)
+                .map_err(map_store_err)?;
+            if test_sha.as_deref() == Some(pr_state.head_sha.as_str()) {
+                let rows: Vec<NewTestResult> = details
+                    .check_runs
+                    .iter()
+                    .map(|check| NewTestResult {
+                        run_id: gate.run_id.clone(),
+                        sha: pr_state.head_sha.clone(),
+                        source: TestResultSource::Ci,
+                        name: check.name.clone(),
+                        status: check_status(check),
+                        summary: format!(
+                            "{}: {}",
+                            check.name,
+                            check.conclusion.as_deref().unwrap_or(&check.status)
+                        ),
+                    })
+                    .collect();
+                self.store
+                    .record_test_results(rows)
+                    .map_err(map_store_err)?;
             }
 
             let mut max_seen_id = cursor.last_comment_id.unwrap_or(0);
@@ -703,6 +746,115 @@ mod tests {
             PrGateStatus::Merged
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn check_runs_are_recorded_only_for_the_shas_this_run_is_about() {
+        use polyclave_proto::TestStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("ledger")).unwrap();
+        create_gate(&store);
+        let verified = "a".repeat(40);
+        let next = "b".repeat(40);
+        let (run, sha) = ("run1".to_owned(), verified.clone());
+        store
+            .write(move |db| {
+                db.execute("UPDATE runs SET result_sha=?2 WHERE id=?1", [&run, &sha])?;
+                Ok(())
+            })
+            .unwrap();
+
+        async fn serve(
+            head: String,
+            checks: serde_json::Value,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let pr_head = head.clone();
+            let router = Router::new()
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}",
+                get(move || {
+                    let pr_head = pr_head.clone();
+                    async move {
+                        Json(json!({
+                            "number": 42, "node_id": "PR_node_42", "state": "open", "merged": false,
+                            "mergeable": true, "mergeable_state": "clean",
+                            "html_url": "https://github.com/org/repo/pull/42",
+                            "head": { "sha": pr_head }, "auto_merge": null
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                get(move || {
+                    let checks = checks.clone();
+                    async move { Json(json!({ "check_runs": checks })) }
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/issues/{num}/comments",
+                get(|| async { Json(json!([])) }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}/reviews",
+                get(|| async { Json(json!([])) }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            (format!("http://{addr}"), server)
+        }
+
+        let (base_url, server) = serve(
+        verified.clone(),
+        json!([
+            { "id": 1, "name": "ci/rust-test", "status": "completed", "conclusion": "success", "html_url": null },
+            { "id": 2, "name": "ci/lint", "status": "completed", "conclusion": "failure", "html_url": null },
+            { "id": 3, "name": "ci/windows", "status": "in_progress", "conclusion": null, "html_url": null },
+            { "id": 4, "name": "ci/docs", "status": "completed", "conclusion": "skipped", "html_url": null }
+        ]),
+    )
+    .await;
+        observer_for(&store, &base_url).poll_once().await.unwrap();
+
+        let rows = store.test_results_for_sha("run1", &verified).unwrap();
+        let summarised: Vec<(&str, TestStatus)> =
+            rows.iter().map(|r| (r.name.as_str(), r.status)).collect();
+        assert_eq!(
+            summarised,
+            vec![
+                ("ci/docs", TestStatus::Pending),
+                ("ci/lint", TestStatus::Failed),
+                ("ci/rust-test", TestStatus::Passed),
+                ("ci/windows", TestStatus::Pending),
+            ],
+            "only an explicit success is a pass; skipped and unfinished stay pending"
+        );
+        assert!(rows.iter().all(|r| r.sha == verified));
+        assert!(rows
+            .iter()
+            .all(|r| r.source == polyclave_proto::TestResultSource::Ci));
+        server.abort();
+
+        // The PR moves on: the old rows stay, and nothing is recorded for the new
+        // commit because the Run is still about the old SHA.
+        let (base_url, server) = serve(
+        next.clone(),
+        json!([
+            { "id": 9, "name": "ci/rust-test", "status": "completed", "conclusion": "success", "html_url": null }
+        ]),
+    )
+    .await;
+        observer_for(&store, &base_url).poll_once().await.unwrap();
+        assert_eq!(store.test_results_for_sha("run1", &next).unwrap().len(), 0);
+        assert_eq!(
+            store.test_results_for_sha("run1", &verified).unwrap().len(),
+            4
+        );
         server.abort();
     }
 }

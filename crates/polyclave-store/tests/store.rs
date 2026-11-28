@@ -967,3 +967,175 @@ fn mesh_concurrency_column_upgrades_an_existing_ledger_with_default_three() {
         16
     );
 }
+
+#[test]
+fn test_results_are_keyed_by_sha_and_never_borrow_another_commit() {
+    use polyclave_proto::{TestResultSource, TestStatus};
+    use polyclave_store::NewTestResult;
+
+    let (_dir, store) = fixture();
+    let older = "a".repeat(40);
+    let current = "b".repeat(40);
+    let claim = NewTestResult {
+        run_id: "run".into(),
+        sha: current.clone(),
+        source: TestResultSource::WorkerClaim,
+        name: String::new(),
+        status: TestStatus::Passed,
+        summary: "cargo test: 12 passed".into(),
+    };
+    let ci = NewTestResult {
+        run_id: "run".into(),
+        sha: current.clone(),
+        source: TestResultSource::Ci,
+        name: "ci/rust-test".into(),
+        status: TestStatus::Pending,
+        summary: "ci/rust-test: queued".into(),
+    };
+    store.record_test_results(vec![claim, ci.clone()]).unwrap();
+
+    // A row for an older commit is recorded and stays separate.
+    store
+        .record_test_result(NewTestResult {
+            run_id: "run".into(),
+            sha: older.clone(),
+            source: TestResultSource::Ci,
+            name: "ci/rust-test".into(),
+            status: TestStatus::Failed,
+            summary: "ci/rust-test: failure".into(),
+        })
+        .unwrap();
+
+    let rows = store.test_results_for_sha("run", &current).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // Host checks lead; the Worker's claim never comes first.
+    assert_eq!(rows[0].source, TestResultSource::Ci);
+    assert_eq!(rows[0].status, TestStatus::Pending);
+    assert_eq!(rows[1].source, TestResultSource::WorkerClaim);
+    assert_eq!(rows[1].status, TestStatus::Passed);
+    assert!(rows.iter().all(|r| r.sha == current));
+
+    // The same check moving to completed replaces only its own row.
+    store
+        .record_test_result(NewTestResult {
+            status: TestStatus::Passed,
+            summary: "ci/rust-test: success".into(),
+            ..ci
+        })
+        .unwrap();
+    let rows = store.test_results_for_sha("run", &current).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].status, TestStatus::Passed);
+    assert_eq!(rows[0].summary, "ci/rust-test: success");
+
+    // The older commit keeps its own (failed) row and is never mixed in.
+    let older_rows = store.test_results_for_sha("run", &older).unwrap();
+    assert_eq!(older_rows.len(), 1);
+    assert_eq!(older_rows[0].status, TestStatus::Failed);
+
+    // Nothing is recorded for an unrelated SHA.
+    assert!(store
+        .test_results_for_sha("run", &"c".repeat(40))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_results_reject_a_bad_sha_empty_summary_or_unknown_run() {
+    use polyclave_proto::{TestResultSource, TestStatus};
+    use polyclave_store::NewTestResult;
+
+    let (_dir, store) = fixture();
+    let good = NewTestResult {
+        run_id: "run".into(),
+        sha: "d".repeat(40),
+        source: TestResultSource::Ci,
+        name: "ci/test".into(),
+        status: TestStatus::Failed,
+        summary: "ci/test: failure".into(),
+    };
+    assert!(matches!(
+        store.record_test_result(NewTestResult {
+            sha: "D".repeat(40),
+            ..good.clone()
+        }),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.record_test_result(NewTestResult {
+            summary: "  ".into(),
+            ..good.clone()
+        }),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.record_test_result(NewTestResult {
+            run_id: "missing".into(),
+            ..good
+        }),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
+fn run_test_sha_prefers_the_verified_result_and_falls_back_to_observed() {
+    let (_dir, store) = fixture();
+    assert_eq!(store.run_test_sha("run").unwrap(), None);
+
+    let observed = "e".repeat(40);
+    let verified = "f".repeat(40);
+    let observed_write = observed.clone();
+    store
+        .write(move |db| {
+            db.execute(
+                "UPDATE runs SET observed_sha=?1 WHERE id='run'",
+                [&observed_write],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store.run_test_sha("run").unwrap().as_deref(),
+        Some(observed.as_str())
+    );
+
+    let verified_write = verified.clone();
+    store
+        .write(move |db| {
+            db.execute(
+                "UPDATE runs SET result_sha=?1 WHERE id='run'",
+                [&verified_write],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store.run_test_sha("run").unwrap().as_deref(),
+        Some(verified.as_str()),
+        "a verified result always wins over the observed tip"
+    );
+}
+
+#[test]
+fn test_results_table_upgrades_without_moving_the_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.sqlite");
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 10);
+    // Reopening runs the additive step again and must stay harmless.
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let columns: i64 = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM pragma_table_info('test_results')",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(columns, 7);
+}

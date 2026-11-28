@@ -6,7 +6,8 @@ use crate::{
 use polyclave_adapters::mcp::{AttemptScope, HostTools};
 use polyclave_os::canonical_real_path;
 use polyclave_proto::{
-    AttemptDto, ChangeTopic, RunDto, RunEvidenceDto, RunStatus, TurnMode, Vendor, WriterCheck,
+    AttemptDto, ChangeTopic, RunDto, RunEvidenceDto, RunStatus, TestStatus, TurnMode, Vendor,
+    WriterCheck,
 };
 use polyclave_store::{
     decode_enum, enum_value, insert_run_origin_snapshot, new_id, now, parse_json, reserve_ticket,
@@ -30,6 +31,14 @@ pub trait AdmissionGuard: Send + Sync + 'static {
     /// An error rolls the whole admission back.
     fn admitted(&self, db: &Connection, run_id: &str) -> Result<()>;
 }
+
+/// `(sha, tests, tests_status, not_done)` as `submit_result` stored them.
+type ReceiptRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Clone)]
 pub struct RunManager {
@@ -326,11 +335,27 @@ impl RunManager {
     }
 
     /// Approval evidence for the Run's current Attempt only: the accepted
-    /// `submit_result` receipt and the latest `report_progress` claim. Nothing
-    /// from an older Attempt is returned.
+    /// `submit_result` receipt (with the Worker's own notes), the latest
+    /// `report_progress` claim, and every test result recorded for exactly one
+    /// SHA. Nothing from an older Attempt, and no result from another SHA, is
+    /// returned.
     pub fn evidence_for_run(&self, run: &RunDto) -> Result<RunEvidenceDto> {
         let (id, number) = (run.id.clone(), run.current_attempt);
         self.store.read(move |db| {
+            // The SHA the test rows belong to: verified result first, else the
+            // observed tip. Both come from the Run, never from a message.
+            let test_sha: Option<String> = db
+                .query_row(
+                    "SELECT COALESCE(result_sha, observed_sha) FROM runs WHERE id=?1",
+                    [&id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            let test_results = match &test_sha {
+                Some(sha) => polyclave_store::test_results_for_sha(db, &id, sha)?,
+                None => Vec::new(),
+            };
             let attempt: Option<i64> = db
                 .query_row(
                     "SELECT id FROM attempts WHERE run_id=?1 AND attempt_no=?2",
@@ -343,17 +368,35 @@ impl RunManager {
                     attempt_no: number,
                     receipt_sha: None,
                     worker_claim: None,
+                    test_sha,
+                    receipt_tests: None,
+                    receipt_tests_status: None,
+                    receipt_not_done: None,
+                    test_results,
                 });
             };
-            let receipt_sha = db
+            let receipt: Option<ReceiptRow> = db
                 .query_row(
-                    "SELECT json_extract(payload_json,'$.sha') FROM results
-                     WHERE attempt_id=?1 AND accepted=1 ORDER BY id DESC LIMIT 1",
+                    "SELECT json_extract(payload_json,'$.sha'),
+                            json_extract(payload_json,'$.tests'),
+                            json_extract(payload_json,'$.tests_status'),
+                            json_extract(payload_json,'$.not_done')
+                     FROM results WHERE attempt_id=?1 AND accepted=1
+                     ORDER BY id DESC LIMIT 1",
                     [attempt],
-                    |r| r.get::<_, Option<String>>(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
-                .optional()?
-                .flatten();
+                .optional()?;
+            let (receipt_sha, receipt_tests, receipt_tests_status, receipt_not_done) = match receipt
+            {
+                Some((sha, tests, status, not_done)) => (
+                    sha,
+                    tests,
+                    status.as_deref().and_then(TestStatus::parse),
+                    not_done,
+                ),
+                None => (None, None, None, None),
+            };
             let worker_claim = db
                 .query_row(
                     "SELECT json_extract(e.payload_json,'$.text') FROM events e
@@ -369,6 +412,11 @@ impl RunManager {
                 attempt_no: number,
                 receipt_sha,
                 worker_claim,
+                test_sha,
+                receipt_tests,
+                receipt_tests_status,
+                receipt_not_done,
+                test_results,
             })
         })
     }

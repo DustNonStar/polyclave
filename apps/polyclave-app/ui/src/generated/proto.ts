@@ -47,7 +47,17 @@ export type RunDto = { id: string, ticket_id: string, hub_session_id: string, wo
 
 export type AttemptDto = { id: number, run_id: string, attempt_no: number, branch: string, worktree_path: string, agent_thread_id: string | null, corrections: number, status: AttemptStatus, created_at: string, ended_at: string | null, };
 
-export type RunEvidenceDto = { attempt_no: number, receipt_sha: string | null, worker_claim: string | null, };
+export type RunEvidenceDto = { attempt_no: number, receipt_sha: string | null, worker_claim: string | null, test_sha: string | null, receipt_tests: string | null, receipt_tests_status: TestStatus | null, receipt_not_done: string | null, test_results: Array<TestResultDto>, };
+
+export type TestResultDto = { sha: string, source: TestResultSource, status: TestStatus, 
+/**
+ * Check-run name for `ci`; empty for a claim.
+ */
+name: string, summary: string, recorded_at: string, };
+
+export type TestResultSource = "worker_claim" | "host_run" | "ci";
+
+export type TestStatus = "passed" | "failed" | "pending";
 
 export type TurnDto = { id: number, session_id: string, run_id: string | null, attempt_id: number | null, parent_turn_id: number | null, mode: TurnMode, status: TurnStatus, phase: TurnPhase, exit_code: number | null, end_reason: EndReason | null, writer_check: WriterCheck | null, started_at: string, ended_at: string | null, };
 

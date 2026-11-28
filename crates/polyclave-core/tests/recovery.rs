@@ -408,6 +408,11 @@ fn approval_evidence_reads_only_the_current_attempt_and_never_an_older_receipt()
             attempt_no: 1,
             receipt_sha: Some(receipt),
             worker_claim: Some("Changed the parser; Windows tests not run".into()),
+            test_sha: None,
+            receipt_tests: None,
+            receipt_tests_status: None,
+            receipt_not_done: None,
+            test_results: Vec::new(),
         }
     );
 
@@ -424,6 +429,98 @@ fn approval_evidence_reads_only_the_current_attempt_and_never_an_older_receipt()
             attempt_no: 2,
             receipt_sha: None,
             worker_claim: None,
+            test_sha: None,
+            receipt_tests: None,
+            receipt_tests_status: None,
+            receipt_not_done: None,
+            test_results: Vec::new(),
         }
     );
+}
+
+#[test]
+fn approval_evidence_shows_the_workers_notes_and_only_the_exact_shas_results() {
+    use polyclave_proto::{TestResultSource, TestStatus};
+    use polyclave_store::NewTestResult;
+
+    let (_tmp, rm, _runner, req) = fixture();
+    let (r, _) = rm.accept(req).unwrap();
+    let w = rm.begin(&r.id, TurnMode::Start).unwrap();
+    let turn = crashed(&rm, &w, "previous-boot".into());
+    let (id, attempt) = (r.id.clone(), w.attempt.id);
+    let observed = "b".repeat(40);
+    let older = "a".repeat(40);
+
+    let (run, sha, observed_write) = (id.clone(), observed.clone(), observed.clone());
+    rm.store
+        .write(move |db| {
+            db.execute("UPDATE runs SET observed_sha=?2 WHERE id=?1", params![run, observed_write])?;
+            db.execute("INSERT INTO results(run_id,attempt_id,turn_id,accepted,payload_json,created_at) VALUES(?1,?2,?3,1,?4,'now')",
+                params![run, attempt, turn, serde_json::json!({
+                    "run_id": run, "branch": "agent/run/a1", "sha": sha,
+                    "tests": "cargo test: 12 passed", "tests_status": "passed",
+                    "not_done": "Windows path tests not run"
+                }).to_string()])?;
+            Ok(())
+        })
+        .unwrap();
+    rm.store
+        .record_test_results(vec![
+            NewTestResult {
+                run_id: id.clone(),
+                sha: observed.clone(),
+                source: TestResultSource::Ci,
+                name: "ci/rust-test".into(),
+                status: TestStatus::Passed,
+                summary: "ci/rust-test: success".into(),
+            },
+            NewTestResult {
+                run_id: id.clone(),
+                sha: older,
+                source: TestResultSource::Ci,
+                name: "ci/rust-test".into(),
+                status: TestStatus::Failed,
+                summary: "ci/rust-test: failure".into(),
+            },
+        ])
+        .unwrap();
+
+    let evidence = rm.evidence_for_run(&rm.get(&id).unwrap()).unwrap();
+    assert_eq!(evidence.test_sha.as_deref(), Some(observed.as_str()));
+    assert_eq!(
+        evidence.receipt_tests.as_deref(),
+        Some("cargo test: 12 passed")
+    );
+    assert_eq!(evidence.receipt_tests_status, Some(TestStatus::Passed));
+    assert_eq!(
+        evidence.receipt_not_done.as_deref(),
+        Some("Windows path tests not run")
+    );
+    // Only the rows for this exact SHA, and the failed row of the older commit
+    // never appears.
+    assert_eq!(
+        evidence.test_results.len(),
+        1,
+        "{:?}",
+        evidence.test_results
+    );
+    assert_eq!(evidence.test_results[0].sha, observed);
+    assert_eq!(evidence.test_results[0].status, TestStatus::Passed);
+
+    // Moving the Run's verified result to another commit drops the old rows from
+    // the card instead of showing them as current evidence.
+    let moved = "c".repeat(40);
+    let (moved_write, run_id) = (moved.clone(), id.clone());
+    rm.store
+        .write(move |db| {
+            db.execute(
+                "UPDATE runs SET result_sha=?2 WHERE id=?1",
+                params![run_id, moved_write],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let evidence = rm.evidence_for_run(&rm.get(&r.id).unwrap()).unwrap();
+    assert_eq!(evidence.test_sha.as_deref(), Some(moved.as_str()));
+    assert!(evidence.test_results.is_empty());
 }

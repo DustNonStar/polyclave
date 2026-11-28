@@ -1,10 +1,12 @@
 // Approval evidence: three separate judgments about one SHA, so the user knows
 // exactly what an Accept covers.
 //   1. Delivery (R1): the host's own check, read from Run classification.
-//   2. Tests for this exact SHA: only what the host recorded for that SHA.
+//   2. Tests for this exact SHA: only rows recorded for that SHA. Only a CI (or
+//      future host-run) result for the Run's verified `result_sha` may turn green;
+//      the Worker's claim is always labelled as a claim.
 //   3. Request satisfied: always the user's judgment; the Worker's text is shown
 //      as its claim, never as a check.
-import type { RunDto, RunEvidenceDto } from '../generated/proto.js';
+import type { RunDto, RunEvidenceDto, TestResultDto } from '../generated/proto.js';
 import { h, short } from './elements.js';
 
 export type EvidenceTone = 'done' | 'review' | 'fail' | 'none';
@@ -50,22 +52,85 @@ function delivery(r: RunDto, ev: RunEvidenceDto | null, sha: string | null): [Ev
   return [{ key: 'delivery', label: 'Delivery verified (R1)', state: 'Not verified', tone: 'fail', facts: ['Reason: ' + reason + '.', ...facts], source }, 'commit not verified'];
 }
 
-function tests(sha: string | null): [EvidenceRow, string] {
-  // The host records no test result for any SHA (see PLAN-ISSUES.md), so this row
-  // never shows a result and never borrows one from another SHA.
-  const fact = sha ? 'No test result recorded for ' + short(sha) + '.' : 'No commit to test yet.';
+const STATUS_WORD: Record<string, string> = { passed: 'passed', failed: 'failed', pending: 'pending' };
+
+function sourceName(row: TestResultDto): string {
+  return row.source === 'ci' ? 'CI' : row.source === 'host_run' ? 'Host run' : 'Worker’s claim';
+}
+
+function clip(text: string, max: number): string {
+  const trimmed = text.trim();
+  return trimmed.length > max ? trimmed.slice(0, max) + '…' : trimmed;
+}
+
+function tests(r: RunDto, ev: RunEvidenceDto | null, sha: string | null): [EvidenceRow, string] {
+  const label = 'Tests for this exact SHA';
+  const target = ev?.test_sha ?? sha;
+  // Only rows recorded for the SHA this card is about; an older commit's result
+  // can never be borrowed, because the comparison is exact.
+  const rows = (ev?.test_results ?? []).filter(t => target !== null && t.sha === target);
+  const checks = rows.filter(t => t.source === 'ci' || t.source === 'host_run');
+  const claims = rows.filter(t => t.source === 'worker_claim');
+  const claimFacts = claims.map(c => 'Worker’s claim: “' + clip(c.summary, 300) + '” (' + (STATUS_WORD[c.status] ?? c.status) + ').');
+
+  if (rows.length === 0) {
+    const fact = target ? 'No test result recorded for ' + short(target) + '.' : 'No commit to test yet.';
+    return [{
+      key: 'tests', label, state: 'No result recorded', tone: 'none', facts: [fact],
+      source: 'CI check runs are recorded per SHA when they finish; a test summary from submit_result is shown as the Worker’s claim, never as a host check.',
+    }, target ? 'no test result for ' + short(target) : 'no commit to test'];
+  }
+
+  if (checks.length === 0) {
+    // The Worker's own claim only: never green, whatever it says.
+    return [{
+      key: 'tests', label, state: 'Worker’s claim', tone: 'review',
+      facts: [
+        ...claimFacts,
+        'Nothing host-side has checked ' + short(target ?? '') + ': no CI check run is recorded for this commit.',
+      ],
+      source: 'submit_result is the Worker speaking. Only CI (or a future host run) for this exact SHA can report a pass.',
+    }, 'worker claim only for ' + short(target ?? '')];
+  }
+
+  const failed = checks.filter(t => t.status === 'failed');
+  const pending = checks.filter(t => t.status === 'pending');
+  const verified = target !== null && r.result_sha === target;
+  const state = failed.length ? 'Failed' : pending.length ? 'Running' : verified ? 'Passed' : 'Reference only';
+  const tone: EvidenceTone = failed.length ? 'fail' : pending.length ? 'review' : verified ? 'done' : 'review';
+  const facts = checks.map(t =>
+    sourceName(t) + ': ' + (t.name || 'check') + ' — ' + (STATUS_WORD[t.status] ?? t.status) + ' at ' + short(t.sha) + '.');
+  if (!verified && !failed.length) {
+    facts.push('This is a reference, not a pass: the host has not verified ' + short(target ?? '') +
+      (r.result_sha ? ', it verified ' + short(r.result_sha) : ', nothing is verified yet') + '.');
+  }
+  const claim0 = claims[0];
+  if (claim0) {
+    facts.push('The Worker also reports: “' + clip(claim0.summary, 300) + '” (' + (STATUS_WORD[claim0.status] ?? claim0.status) + '). A CI result wins over a claim.');
+  }
+  const tail = failed.length ? 'tests failed for ' + short(target ?? '')
+    : pending.length ? 'tests still running for ' + short(target ?? '')
+    : verified ? 'tests passed for ' + short(target ?? '')
+    : 'tests recorded, not verified, for ' + short(target ?? '');
   return [{
-    key: 'tests', label: 'Tests for this exact SHA', state: 'No result recorded', tone: 'none', facts: [fact],
-    source: 'Nothing records tests per SHA: submit_result carries no test summary, and the SCM observer does not store check results.',
-  }, sha ? 'no test result for ' + short(sha) : 'no commit to test'];
+    key: 'tests', label, state, tone, facts,
+    source: 'Recorded by the host from GitHub check runs, keyed by the exact SHA; only the Run’s verified result can turn this green.',
+  }, tail];
 }
 
 function decision(r: RunDto, ev: RunEvidenceDto | null, sha: string | null): [EvidenceRow, string] {
   const raw = ev?.worker_claim?.trim();
   const claim = raw && raw.length > 600 ? raw.slice(0, 600) + '…' : raw;
+  const submitted = ev?.receipt_tests?.trim();
+  const notDone = ev?.receipt_not_done?.trim();
   const facts = [
     claim ? 'Worker’s claim: “' + claim + '”' : 'The Worker sent no progress report for attempt ' + (ev?.attempt_no ?? r.current_attempt) + '.',
-    'Not done or unverified items: the Worker has no field to list them; submit_result carries only the run, branch and SHA.',
+    submitted
+      ? 'Tests, as the Worker submitted them' + (ev?.receipt_tests_status ? ' (' + (STATUS_WORD[ev.receipt_tests_status] ?? ev.receipt_tests_status) + ')' : '') + ': “' + clip(submitted, 400) + '”.'
+      : 'The Worker submitted no test summary.',
+    notDone
+      ? 'Not done or unverified, per the Worker: “' + clip(notDone, 400) + '”.'
+      : 'The Worker listed no unfinished or unverified items.',
   ];
   let tail: string;
   if (r.status === 'needs_review' || r.status === 'interrupted') tail = sha ? 'waiting for your decision' : 'nothing to accept';
@@ -83,7 +148,7 @@ export function approvalEvidence(r: RunDto, ev: RunEvidenceDto | null | undefine
   const sha = r.observed_sha ?? r.result_sha;
   const e = ev ?? null;
   const [d, ds] = delivery(r, e, sha);
-  const [t, ts] = tests(sha);
+  const [t, ts] = tests(r, e, sha);
   const [u, us] = decision(r, e, sha);
   const summary = ds.charAt(0).toUpperCase() + ds.slice(1) + ' · ' + ts + ' · ' + us;
   return { sha, summary, rows: [d, t, u] };
