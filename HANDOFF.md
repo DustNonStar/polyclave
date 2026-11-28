@@ -1071,3 +1071,15 @@ Cleanup: 没有起任何 host、fake codex 或浏览器；测试用的临时目�
 Privacy scan: `privacy-scan: clean (origin/main..HEAD)`。
 
 Not done: Windows CI；真实环境验收（本轮一项都没跑）；按 SHA 记录测试结果；`dsh` 的 `mcp_url` 与模型选择；`REVIEWER.md`、`AGENTS.md` 和 v5 规范里过时的内容（属于所有者确认后才能改的规则/设计文档）。
+
+### 自检（交 Gemini Neon 之前）
+
+写完这 8 个提交后逐条重读了自己的改动，找出并修掉了三个问题，另有一项残余风险如实记下。全部都在这一个补充提交里：
+
+- `03feffe fix: self-review round — pairing origin rule, precise publish refusal, one policy read per gate`
+  1. **配对交换的原生回归**（我自己引入的）：`exchange_pairing` 起初只接受"同源 https"，于是桌面页面自己（`http://127.0.0.1:<port>`）和 Tauri 外壳去交换票券会被 403。改为复用 API 的同一套 `origin_allowed` 判断，两条路径共用一条规则，不会再漂移。
+  2. **拒绝原因不精确**：首次推送的 `Error::Policy` 既可能是"分支属于别人"，也可能是"SHA 不在镜像里/分支名非法"，但我把它们都写成了"分支不空"。新增 `polyclave_hub::Error::Publish` 只表示"目标分支不是本门禁的"，两种情况分别转人工、分别写文案；返工推送的租约失败也一并按 `Publish` 转人工并通知 Hub（原来会直接冒泡成错误）。`map_hub_err` 把它映射为 409。新增测试 `a_branch_that_moved_under_a_revise_escalates_instead_of_being_forced`。
+  3. **每个事件两次数据库读**：`admits` 原来对每个事件各查一次 `runs.repo_cwd` 和 `admission_policies`，现在每个 gate 只读一次策略再传下去；顺手把 review 游标保存时的重复读去掉，并清理了 `emit_event` 里多余的嵌套块。
+  4. **残余风险（未改，如实记录）**：Hub provider 仍把 `source='host'` 的消息按 **user** 角色交给模型（`crates/polyclave-hub/src/provider.rs:157`、`cli_provider.rs:214`），所以一条外部 PR 评论在模型的对话里仍是一条"用户"发言——只是它在账本里不是用户消息、也永远无法充当工单依据。这一层属于"要不要在历史里给外部消息单独加标签"的产品决定，已作为 `direction` 记进 `PLAN-ISSUES.md`；本轮不动 prompt 构造。
+
+自检后分支顶端：**164 passed, 0 failed**（新增 1 个测试，自检提交自身也过了 fmt / Clippy `-D warnings` / workspace 测试）。文档同步：`README.md` 增加了"Reaching the daemon from a phone"一节（loopback + Tailscale Serve、身份头、同源规则），并更新了验证状态表里 PR 门禁、手机配对、SCM 观察器、mesh 四行。

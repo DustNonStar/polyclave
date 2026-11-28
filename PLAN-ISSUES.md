@@ -290,3 +290,17 @@ Decisions the owner must make before that work starts:
 ## [detail] `dsh` still gets no `mcp_url`, and choosing its model still needs a real run
 
 Sections 9–10 of `docs/LESSONS.md` and the existing `dsh` item above stand. Two facts from the 2026-11-27 round: `crates/polyclave-adapters/src/dsh.rs` still sets only `DSH_HOME` and `POLYCLAVE_MCP_TOKEN`, so a real `dsh` Worker cannot call `submit_result`; and the model key cannot be established from `--help` or `--dump-config-schema` alone. Both need one real `dsh` run under an isolated `DSH_HOME`, which no job has authorised yet. Not attempted this round.
+
+## [direction] External SCM events still reach the model as a user turn
+
+The 2026-11-27 round made `ScmObserver` write Hub input with `source='host'` (`store.hub_enqueue_external`), which closes two things: an external PR comment or review can no longer be read as the user's own message in the ledger, and it can never satisfy a Ticket's basis (`hub_ticket` requires `source='user'`, so no Run can be authorised by an injected comment).
+
+What is unchanged: both Hub providers still map every non-`agent` message to `Role::User` when they build the prompt (`crates/polyclave-hub/src/provider.rs:157`, `crates/polyclave-hub/src/cli_provider.rs:214`). A PR comment still therefore arrives at the model as a user-role turn. The text is labelled by construction ("PR #42 (org/repo) comment by alice: …"), and the authorisation chain above stops it from becoming a Ticket on its own, but the model itself cannot tell "the user said this" from "GitHub said this".
+
+Options for the owner:
+
+- **A (recommended if this matters):** carry the reason in `messages.metadata_json` (already a column) and have both providers render a `source='host'` message with an explicit prefix such as `[host observation, not from the user]`. It touches prompt construction and every provider test that asserts message text, so it needs its own work list.
+- **B:** render the two existing internal host messages (`The prior conversation was interrupted.`, the lifecycle notices) differently from SCM observations, which requires the metadata split above anyway.
+- **C:** leave it. The ledger identity, the basis rule and the admission policy already stop an external comment from authorising anything.
+
+Nothing is implemented. This does not affect R1, and no test asserts the current role mapping for host messages.

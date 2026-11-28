@@ -58,6 +58,22 @@ Or run the desktop shell (`target/debug/polyclave-app`). It looks for a running 
 
 Only one daemon can own a state directory at a time.
 
+### Reaching the daemon from a phone
+
+The daemon listens on loopback only. A phone reaches it through Tailscale Serve on the same machine, which terminates TLS and adds the identity header (`Tailscale-User-Login`) the daemon trusts:
+
+```sh
+# Serve the daemon's loopback port on the tailnet (Tailscale adds TLS and the
+# identity header); the exact flags depend on your Tailscale version.
+tailscale serve --bg 4310
+```
+
+Three rules follow from that setup, and all three are enforced by the daemon, not by the page:
+
+- A request without the loopback `Host` must carry a trusted identity header, and a device token for that same identity (the mesh routes use `x-agentmesh-node` instead).
+- A browser `Origin` is accepted only when it is this daemon's own page (`http://127.0.0.1:<port>`), the Tauri shell, or — with a trusted identity header — the very same `https://<host>` the request addresses. A cross-site page is refused even with a valid token.
+- `POST /api/pairing/exchange` needs no token — the phone has none yet — so it accepts only a loopback `Host` or a proxy-tagged request, and it never reads an identity from the request body. The paired device records the identity the proxy asserted.
+
 Vendor CLIs keep their normal login. The adapters read it from `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `AGY_HOME` (or `GEMINI_HOME`) and `DSH_HOME`, falling back to `~/.codex`, `~/.claude`, `~/.gemini` and `~/.dsh`.
 
 ### State directory
@@ -106,7 +122,7 @@ Once a Run is `done`, the host fetches the verified SHA into your repository as 
 
 ## Verification status
 
-What the records show today. "Offline" means tests with fake CLIs, fake HTTP servers and local bare repositories. Native CI last passed on `3dec8e4` (the current `origin/main`). The commits merged locally after it (PR gate fixes, pairing QR, publish target, mesh `request_id`, mesh budget A + C, the `dsh` model fix, the approval evidence card) were checked on macOS only; Windows CI has not run on them.
+What the records show today. "Offline" means tests with fake CLIs, fake HTTP servers and local bare repositories. Native CI last passed on `3dec8e4` (the current `origin/main`). The commits merged locally after it (PR gate fixes, pairing QR, publish target, mesh `request_id`, mesh budget A + C, the `dsh` model fix, the approval evidence card, and the 2026-11-27 audit fixes on `fix/audit-2026-11-27`) were checked on macOS only; Windows CI has not run on them.
 
 Nothing below has passed a real-environment acceptance. The pending list is in `HANDOFF.md` under "v5 Phase 1B Hub and optical desktop review handoff" (hand checks 1 to 5) and "v5 Phase 1B review: passed, merged".
 
@@ -118,9 +134,10 @@ Nothing below has passed a real-environment acceptance. The pending list is in `
 | CLI Hub (Codex, Claude) | Thread resume, delta continuation and dual-write tests ("v5 Phase 1B review") | Real CLI Hub probe (hand check 5) |
 | API Hub (DeepSeek) | Stream and tool-call parsing, durable reasoning replay against a local fake endpoint ("Final DeepSeek follow-up") | Live `deepseek-flash` and `deepseek-v4-pro` calls (hand check 5, "Local addendum") |
 | Desktop app and page | Offline Chrome checks at 1440×900 and 375×812 in CI | Installed WKWebView and WebView2, tray, notifications, keychain (hand checks 1 to 3) |
-| PR gate | Pushes the exact R1-verified SHA, full-range review, reviewer preflight, origin-based target, one-shot token helper; tested against local bare remotes ("PR gate fixes review", "PR push target from origin review") | Has never pushed to real GitHub. No real PR, auto-merge, or bot-token login over HTTPS |
-| Phone pairing | The pairing QR decodes back to the exact URI in Chrome (`tests/qr-roundtrip.mjs`, "Pairing QR fix review") | Never scanned by a phone. Pairing approval and revocation on a real device not checked |
-| Mesh dispatch | `worker_run` and `run_status` end to end in daemon tests, with token scope checks; `request_id` idempotency ("Mesh worker_run idempotency review") | No two-machine run. Remote Runs are charged to the primary Ticket, and each receiver caps concurrent Runs per sending node (default 3); tested in one process over loopback only |
+| PR gate | Pushes the exact R1-verified SHA, full-range review, reviewer preflight, origin-based target, one-shot token helper; a first push may not overwrite a branch the gate did not create, the 24 KB range limit is decided before any push, and a revise that leaves the Run's paths or loses the branch to someone else escalates with a Hub notice; tested against local bare remotes ("PR gate fixes review", "PR push target from origin review", "2026-11-27 审计修复") | Has never pushed to real GitHub. No real PR, auto-merge, or bot-token login over HTTPS |
+| Phone pairing | The pairing QR decodes back to the exact URI in Chrome (`tests/qr-roundtrip.mjs`); the phone's own `https://<host>` origin is accepted for approvals and cross-site origins are refused; the exchange trusts only the proxy identity header ("2026-11-27 审计修复") | Never scanned by a phone. Pairing approval and revocation on a real device not checked |
+| SCM observer | External PR comments and reviews enter the Hub as `source='host'` (never as the user, never as a Ticket basis), bot actors are dropped, reviews and comments use separate cursors, and an observed CI failure, merge conflict or human review wakes the phone ("2026-11-27 审计修复") | Never polled against real GitHub |
+| Mesh dispatch | `worker_run` and `run_status` end to end in daemon tests, with token scope checks; `request_id` idempotency, namespaced by the calling Hub session so two sessions cannot collide ("Mesh worker_run idempotency review", "2026-11-27 审计修复") | No two-machine run. Remote Runs are charged to the primary Ticket, and each receiver caps concurrent Runs per sending node (default 3); tested in one process over loopback only. A dispatch the receiver refuses with 429 still spends its run: see `PLAN-ISSUES.md` |
 | Memory | FTS5 search, candidate and verified states, fused with a local vector score (store tests) | No real-use record. The vector is a 128-dimension hashed byte-trigram count, not a learned embedding |
 
 ## Checks
