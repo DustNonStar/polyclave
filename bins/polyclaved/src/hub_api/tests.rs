@@ -1945,6 +1945,9 @@ async fn stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notificat
     );
 
     // 1. Create a 10-minute one-time pairing ticket with loopback capability token.
+    // The link names the origin the phone opens, which is what Item 3.2 changed:
+    // a `polyclave://` URI has no handler on a phone browser.
+    hub.set_pairing_origin(Some("https://polyclave.tailnet.ts.net".into()));
     let req = Request::builder()
         .method("POST")
         .uri("/api/pairing/tickets")
@@ -1960,10 +1963,10 @@ async fn stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notificat
     let body: Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), 1024 * 1024).await.unwrap()).unwrap();
     let secret = body["secret"].as_str().unwrap().to_owned();
-    assert!(body["qr_uri"]
-        .as_str()
-        .unwrap()
-        .starts_with("polyclave://pair?ticket="));
+    assert_eq!(
+        body["qr_uri"],
+        json!(format!("https://polyclave.tailnet.ts.net/#pair={secret}"))
+    );
 
     // 2. Exchange the ticket for a device bearer token bound to a Tailscale identity.
     let ex_req = Request::builder()
