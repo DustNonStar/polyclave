@@ -60,12 +60,12 @@ Several agents build this project. The user relays messages between them by hand
    - the end of `HANDOFF.md`, which holds the latest verdict;
    - any open item in `PLAN-ISSUES.md`.
 
-   For v5, apply the Rust spec, current work list and recorded owner decisions. Preserve R1 and R3 through the authoritative mirror. v5 replaces whole-session freeze with Attempt isolation. Keep the Node tests unchanged until the Phase 1B transfer tests are complete and deletion is approved.
+   For v5, apply the Rust spec, current work list and recorded owner decisions. Preserve R1 and R3 through the authoritative mirror. v5 replaces whole-session freeze with Attempt isolation. The legacy Node archive was removed in `01c8645` (recoverable from `01c8645^`); all active runtime and test gates are Rust + Tauri v2.
 2. **Branch and commits.**
    - Work on the branch `NEXT.md` names.
    - Make one commit per item, with the message the work list gives.
    - Stage explicit paths with `git add <paths>`. Never use `git commit -a` or `git add -A`.
-3. **For v5, run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings` and `cargo test --locked --workspace` after each task.** For archived Node-only work, use the legacy check.
+3. **For v5, run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings` and `cargo test --locked --workspace` after each task.** When protocol types or UI files change, also check `git diff --exit-code -- apps/polyclave-app/ui/src/generated/proto.ts` and run `tsc --noEmit`, `npm run build`, and `npm run test:browser` under `apps/polyclave-app/ui`.
 4. **Tests are the contract.**
    - Do not rename, weaken, skip or delete a test.
    - Do not change an existing test unless the work list names that exact change.
