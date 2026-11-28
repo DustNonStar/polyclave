@@ -344,6 +344,9 @@ struct MockScmState {
     disabled_nodes: Mutex<Vec<String>>,
     enabled_nodes: Mutex<Vec<(String, String)>>,
     submitted_reviews: Mutex<Vec<SubmitReviewRequest>>,
+    /// The head this stand-in reports for the PR. `None` keeps the old fixed
+    /// value, so tests that do not approve anything are unchanged.
+    head_sha: Mutex<Option<String>>,
 }
 
 struct MockScmClient {
@@ -450,7 +453,13 @@ impl ScmClient for MockScmClient {
                 merged: false,
                 mergeable: Some(true),
                 mergeable_state: Some("clean".into()),
-                head_sha: "sha_observed".into(),
+                head_sha: self
+                    .state
+                    .head_sha
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "sha_observed".to_owned()),
                 auto_merge_enabled: true,
                 html_url: format!("https://github.com/org/repo/pull/{pr_number}"),
             })
@@ -1575,6 +1584,8 @@ async fn pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge() {
     });
     let pusher = Arc::new(MockPusher::new());
     hub.set_scm(scm);
+    // A real PR reports the head the gate pushed; the approval compares it.
+    *scm_state.head_sha.lock().unwrap() = Some(head_sha.clone());
     hub.set_reviewer(Arc::new(MockReviewer));
     hub.set_pusher(pusher.clone());
     hub.set_default_reviewers(vec![ReviewerSpec {
@@ -1598,14 +1609,70 @@ async fn pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge() {
     assert_eq!(run_res.status(), StatusCode::OK);
     let gate: Value =
         serde_json::from_slice(&run_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(gate["status"], "auto_merge_armed");
-    assert_eq!(gate["auto_merge_armed"], true);
+    // Heterogeneous approval is not a human approval: the gate waits, and nothing
+    // is armed or sent to GitHub.
+    assert_eq!(gate["status"], "awaiting_human_approval");
+    assert_eq!(gate["auto_merge_armed"], false);
+    assert!(scm_state.enabled_nodes.lock().unwrap().is_empty());
     assert_eq!(gate["pr_number"], 42);
     assert_eq!(gate["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(gate["reviews"][0]["reviewed_sha"], head_sha);
     assert!(gate["scope_violations"].as_array().unwrap().is_empty());
 
     let gate_id = gate["id"].as_str().unwrap().to_owned();
+    // The exact-SHA diff the card shows: the range the reviewer read, from the
+    // mirror, with truncation reported rather than hidden.
+    let diff_res = app
+        .clone()
+        .oneshot(authed_get(&format!("/api/pr-gates/{gate_id}/diff")))
+        .await
+        .unwrap();
+    assert_eq!(diff_res.status(), StatusCode::OK);
+    let diff: Value =
+        serde_json::from_slice(&diff_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(diff["head_sha"], head_sha.as_str());
+    assert_eq!(diff["truncated"], false);
+    assert!(
+        diff["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("src/lib.rs")),
+        "{diff}"
+    );
+
+    // A stale SHA is refused without arming anything.
+    let stale = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{gate_id}/approve"),
+            json!({"expected_sha": "0".repeat(40)}),
+        ))
+        .await
+        .unwrap();
+    assert!(stale.status().is_client_error(), "{}", stale.status());
+    assert!(scm_state.enabled_nodes.lock().unwrap().is_empty());
+    assert_eq!(
+        hub.store.pr_gate(&gate_id).unwrap().status,
+        polyclave_proto::PrGateStatus::AwaitingHumanApproval
+    );
+
+    // A person approving exactly this SHA is what arms it.
+    let approved = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{gate_id}/approve"),
+            json!({"expected_sha": head_sha}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    let approved: Value =
+        serde_json::from_slice(&approved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(approved["status"], "auto_merge_armed");
+    assert_eq!(approved["auto_merge_armed"], true);
+    assert_eq!(
+        scm_state.enabled_nodes.lock().unwrap().as_slice(),
+        &[("PR_node_42".to_owned(), head_sha.clone())]
+    );
     let list_res = app
         .clone()
         .oneshot(authed_get("/api/pr-gates"))
@@ -1780,7 +1847,7 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
     assert!(!manager_tools.iter().any(|t| t["name"] == "start_council"));
     assert!(!manager_tools.iter().any(|t| t["name"] == "run_pr_gate"));
 
-    let (run_id, _base, _head) = setup_git_run_fixture(dir.path(), &hub);
+    let (run_id, _base, head_sha) = setup_git_run_fixture(dir.path(), &hub);
     hub.set_council_participants(vec![CouncilParticipant {
         vendor: Vendor::Codex,
         model: "gpt-5".into(),
@@ -1791,7 +1858,7 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
     }]);
     let scm_state = Arc::new(MockScmState::default());
     hub.set_scm(Arc::new(MockScmClient {
-        state: scm_state,
+        state: scm_state.clone(),
         polled: None,
     }));
     hub.set_reviewer(Arc::new(MockReviewer));
@@ -1800,6 +1867,8 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
         vendor: Vendor::Claude,
         model: "claude-sonnet-4-6".into(),
     }]);
+    // A real PR reports the head the gate pushed; the approval compares it.
+    *scm_state.head_sha.lock().unwrap() = Some(head_sha.clone());
 
     hub.store
         .hub_enqueue("hub", "req-tools", "run tools")
@@ -1842,8 +1911,22 @@ async fn hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direct
         )
         .await
         .unwrap();
-    assert_eq!(gate_val["status"], "auto_merge_armed");
-    assert_eq!(gate_val["auto_merge_armed"], true);
+    // Reviewers approved; a person has not, so nothing is armed yet.
+    assert_eq!(gate_val["status"], "awaiting_human_approval");
+    assert_eq!(gate_val["auto_merge_armed"], false);
+    let approved = hub
+        .approve_pr_gate(
+            gate_val["id"].as_str().unwrap(),
+            gate_val["head_sha"].as_str().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        approved.status,
+        polyclave_proto::PrGateStatus::AutoMergeArmed
+    );
+    assert!(approved.auto_merge_armed);
 
     // Global Pause blocks dispatch_task, start_council, and run_pr_gate tools
     hub.store.set_pause(true, Some("paused".into())).unwrap();

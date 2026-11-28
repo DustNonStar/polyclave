@@ -485,12 +485,30 @@ pub enum PrGateStatus {
     ScopeViolation,
     Reviewing,
     ReviseRequested,
+    /// Heterogeneous reviewers approved the exact head SHA, and the gate is
+    /// waiting for a person to approve that same SHA. Nothing is armed here.
+    AwaitingHumanApproval,
     Approved,
     AutoMergeArmed,
     Merged,
     Escalated,
     Paused,
     Failed,
+}
+
+/// The mirror diff for one gate's exact `base_sha..head_sha`, bounded for a page.
+///
+/// `truncated` is never silent: the card shows it, and `bytes` is the full size,
+/// so a partial view can not be mistaken for the whole change.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+pub struct PrGateDiffDto {
+    pub gate_id: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub text: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

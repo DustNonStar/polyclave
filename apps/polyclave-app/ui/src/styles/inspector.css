@@ -132,3 +132,8 @@
   .file-form { flex-wrap: wrap; }
   .file-form button { flex: 1; }
 }
+/* Exact-SHA approval: the diff a person approves, bounded and honest about it. */
+.approval-diff { display: grid; gap: 8px; padding: 10px; }
+.diff-panel { display: grid; gap: 6px; min-width: 0; }
+.diff-body { margin: 0; max-height: 320px; overflow: auto; overscroll-behavior: contain; padding: 8px 10px; border-radius: var(--r-sm); background: var(--ground); border: 1px solid var(--line-soft); font: 500 var(--fs-xs)/1.5 var(--mono); color: var(--ink-2); white-space: pre; }
+@media (max-width: 640px) { .diff-body { max-height: 240px; } }

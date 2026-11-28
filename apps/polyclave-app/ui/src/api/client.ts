@@ -1,5 +1,6 @@
 // Typed wrappers for the local daemon API. Every call goes through the authenticated loopback connection.
 import { request } from './sse.js';
+import type { PrGateDiffDto } from '../generated/proto.js';
 import type { Connection } from './sse.js';
 import type {
   ClientKind, CommunityDraftDto, CouncilDto, CouncilLevel, CuaLockDto, EvolutionSuggestionDto,
@@ -74,6 +75,9 @@ export function api(connection: () => Connection | null) {
       call<CouncilDto>('/api/councils/' + enc(id) + '/resolve', { chosen_label, decision_note: decision_note || null }),
     prGates: () => call<PrGateDto[]>('/api/pr-gates'),
     prGate: (id: string) => call<PrGateDto>('/api/pr-gates/' + enc(id)),
+    prGateDiff: (id: string) => call<PrGateDiffDto>('/api/pr-gates/' + enc(id) + '/diff'),
+    approvePrGate: (id: string, expected_sha: string) =>
+      call<PrGateDto>('/api/pr-gates/' + enc(id) + '/approve', { expected_sha }),
     runPrGate: (id: string, body?: Record<string, unknown>) => call<PrGateDto>('/api/pr-gates/' + enc(id) + '/run', body ?? {}),
     pauseState: () => call<PauseStateDto>('/api/pause'),
     pause: (reason?: string | null) => call<PauseStateDto>('/api/pause', reason ? { reason } : {}),

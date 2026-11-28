@@ -6,7 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs --clean && tsc && node build.mjs",
-    "test:browser": "node tests/offline-browser.mjs && node tests/qr-roundtrip.mjs && node tests/approval-card.mjs && node tests/pairing-flow.mjs"
+    "test:browser": "node tests/offline-browser.mjs && node tests/qr-roundtrip.mjs && node tests/approval-card.mjs && node tests/pairing-flow.mjs && node tests/pr-gate-approval.mjs"
   },
   "devDependencies": {
     "jsqr": "1.4.0",

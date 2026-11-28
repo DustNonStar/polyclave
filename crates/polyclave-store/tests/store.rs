@@ -1397,3 +1397,92 @@ fn a_ledger_with_rows_upgrades_to_the_check_id_key_without_losing_them() {
         .unwrap();
     assert_eq!(store.test_results_for_sha("run", &sha).unwrap().len(), 3);
 }
+
+#[test]
+fn pr_gates_gains_the_awaiting_state_and_keeps_its_rows_and_reviews() {
+    use polyclave_proto::PrGateStatus;
+
+    let (dir, store) = fixture();
+    let path = dir.path().join("state.sqlite");
+    let gate = store
+        .create_pr_gate(polyclave_store::NewPrGate {
+            run_id: "run".into(),
+            repo_slug: "org/repo".into(),
+            branch: "feat/x".into(),
+            base_sha: "base".into(),
+            head_sha: "head".into(),
+            touched_paths: vec!["src/**".into()],
+        })
+        .unwrap();
+    store
+        .record_pr_opened(&gate.id, 42, "https://example.invalid/42")
+        .unwrap();
+    store
+        .record_pr_review(
+            &gate.id,
+            polyclave_store::NewPrReview {
+                reviewer_vendor: polyclave_proto::Vendor::Claude,
+                reviewer_model: "sonnet".into(),
+                reviewed_sha: "head".into(),
+                verdict: polyclave_proto::ReviewVerdict::Approve,
+                comments: "Clean".into(),
+                github_review_id: Some(7),
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    // Rewrite the ledger the way it looked before this state existed: the CHECK
+    // does not accept `awaiting_human_approval`, and no column changes.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE pr_gates_old (
+               id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+               ticket_id TEXT NOT NULL REFERENCES tickets(id), repo_slug TEXT NOT NULL,
+               branch TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+               pr_number INTEGER, pr_url TEXT,
+               status TEXT NOT NULL CHECK (status IN ('pending','scope_violation','reviewing','revise_requested',
+                    'approved','auto_merge_armed','merged','escalated','paused','failed')),
+               touched_paths_json TEXT NOT NULL DEFAULT '[]',
+               scope_violations_json TEXT NOT NULL DEFAULT '[]',
+               revise_rounds INTEGER NOT NULL DEFAULT 0,
+               auto_merge_armed INTEGER NOT NULL DEFAULT 0,
+               remote_intent TEXT,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             INSERT INTO pr_gates_old SELECT * FROM pr_gates;
+             CREATE TEMP TABLE reviews_parked AS SELECT * FROM pr_reviews;
+             DELETE FROM pr_reviews;
+             DROP TABLE pr_gates;
+             ALTER TABLE pr_gates_old RENAME TO pr_gates;
+             INSERT INTO pr_reviews SELECT * FROM reviews_parked;
+             DROP TABLE reviews_parked;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    // The rebuild kept the gate and the review, and the new state is accepted.
+    let gate = store.pr_gate(&gate.id).unwrap();
+    assert_eq!(gate.reviews.len(), 1, "{gate:?}");
+    assert_eq!(gate.pr_number, Some(42));
+    let approved = store
+        .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+        .unwrap();
+    assert_eq!(approved.status, PrGateStatus::Approved);
+    let waiting = store.await_human_approval(&gate.id, "head").unwrap();
+    assert_eq!(waiting.status, PrGateStatus::AwaitingHumanApproval);
+    assert!(!waiting.auto_merge_armed);
+    // Arming from the wait is refused (the gate is not `approved`): only a
+    // person's approval of this SHA may arm it.
+    assert!(store.arm_auto_merge(&gate.id, "head").is_err());
+    let approved = store.approve_pr_gate(&gate.id, "head").unwrap();
+    assert_eq!(approved.status, PrGateStatus::Approved);
+    assert!(store
+        .arm_auto_merge(&gate.id, "head")
+        .unwrap()
+        .is_some_and(|g| g.auto_merge_armed));
+    let version: i64 = store
+        .read(|db| Ok(db.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 10);
+}

@@ -77,13 +77,15 @@ export type CouncilProposalDto = { label: string, payload: ProposalPayload, vend
 
 export type CouncilDto = { id: string, ticket_id: string | null, repo_cwd: string, level: CouncilLevel, status: CouncilStatus, prompt: string, escalation_reasons: Array<string>, chosen_label: string | null, decision_note: string | null, proposals: Array<CouncilProposalDto>, created_at: string, decided_at: string | null, };
 
-export type PrGateStatus = "pending" | "scope_violation" | "reviewing" | "revise_requested" | "approved" | "auto_merge_armed" | "merged" | "escalated" | "paused" | "failed";
+export type PrGateStatus = "pending" | "scope_violation" | "reviewing" | "revise_requested" | "awaiting_human_approval" | "approved" | "auto_merge_armed" | "merged" | "escalated" | "paused" | "failed";
 
 export type ReviewVerdict = "approve" | "revise";
 
 export type PrReviewDto = { id: string, pr_gate_id: string, reviewer_vendor: Vendor, reviewer_model: string, reviewed_sha: string, verdict: ReviewVerdict, comments: string, github_review_id: number | null, created_at: string, };
 
 export type PrGateDto = { id: string, run_id: string, ticket_id: string, repo_slug: string, branch: string, base_sha: string, head_sha: string, pr_number: number | null, pr_url: string | null, status: PrGateStatus, scope_violations: Array<string>, revise_rounds: number, auto_merge_armed: boolean, reviews: Array<PrReviewDto>, updated_at: string, };
+
+export type PrGateDiffDto = { gate_id: string, base_sha: string, head_sha: string, text: string, bytes: number, truncated: boolean, };
 
 export type PauseStateDto = { paused: boolean, reason: string | null, updated_at: string, };
 

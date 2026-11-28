@@ -98,6 +98,8 @@ pub fn router(hub: Hub) -> Router {
         .route("/pr-gates", axum::routing::get(pr_gates))
         .route("/pr-gates/{id}", axum::routing::get(pr_gate))
         .route("/pr-gates/{id}/run", post(run_pr_gate))
+        .route("/pr-gates/{id}/diff", axum::routing::get(pr_gate_diff))
+        .route("/pr-gates/{id}/approve", post(approve_pr_gate))
         .route("/pause", axum::routing::get(pause_state).post(pause))
         .route("/resume", post(resume))
         .route(
@@ -571,6 +573,71 @@ async fn resolve_council(
 async fn pr_gates(State(hub): State<Hub>) -> Reply {
     let list = run_blocking(move || hub.store.list_pr_gates().map_err(HttpError::from)).await?;
     Ok(Json(json!(list)))
+}
+
+/// The mirror diff for exactly the gate's `base_sha..head_sha`. A change bigger
+/// than the page budget is cut and marked `truncated`, never silently shortened.
+const MAX_PAGE_DIFF_BYTES: usize = 65_536;
+
+/// Maps a [\`Hub\`] error to one HTTP error, so a refused or missing gate is a 4xx
+/// rather than an opaque 500.
+fn map_page_err(err: super::Error) -> HttpError {
+    match err {
+        super::Error::Policy => HttpError(
+            StatusCode::CONFLICT,
+            "policy",
+            "The host refused this operation",
+        ),
+        _ => HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "Host operation failed",
+        ),
+    }
+}
+
+async fn pr_gate_diff(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
+    let diff = run_blocking(move || {
+        hub.pr_gate_diff(&id, MAX_PAGE_DIFF_BYTES)
+            .map_err(map_page_err)
+    })
+    .await?;
+    Ok(Json(json!(diff)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovePrGateBody {
+    /// The SHA the person saw. `seen_sha` is the same field under its older name.
+    #[serde(alias = "seen_sha")]
+    expected_sha: String,
+    hub_session_id: Option<String>,
+}
+
+/// A person approving one exact SHA. Nothing is armed before this call, and this
+/// call arms only that SHA.
+async fn approve_pr_gate(
+    State(hub): State<Hub>,
+    Path(id): Path<String>,
+    Json(body): Json<ApprovePrGateBody>,
+) -> Reply {
+    if body.expected_sha.len() != 40
+        || !body
+            .expected_sha
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "invalid_sha",
+            "expected_sha must be a full commit id",
+        ));
+    }
+    let gate = hub
+        .approve_pr_gate(&id, &body.expected_sha, body.hub_session_id)
+        .await
+        .map_err(map_page_err)?;
+    Ok(Json(json!(gate)))
 }
 
 async fn pr_gate(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {

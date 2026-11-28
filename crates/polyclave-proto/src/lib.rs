@@ -59,6 +59,7 @@ mod tests {
             ReviewVerdict,
             PrReviewDto,
             PrGateDto,
+            PrGateDiffDto,
             PauseStateDto,
             PairingTicketDto,
             PairedDeviceDto,

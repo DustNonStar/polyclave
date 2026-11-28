@@ -21,6 +21,60 @@ pub(crate) fn upgrade(db: &Connection) -> Result<()> {
              CHECK (remote_intent IN ('enable', 'disable'));",
         )?;
     }
+    // `awaiting_human_approval` was added to the status CHECK. SQLite cannot add a
+    // value to a CHECK, so the table is rebuilt in place when the live schema does
+    // not know it yet. `user_version` still stays 10.
+    let accepts_state: bool = db.query_row(
+        "SELECT instr(COALESCE((SELECT sql FROM sqlite_master WHERE name='pr_gates'),''),
+                          'awaiting_human_approval') > 0",
+        [],
+        |r| r.get(0),
+    )?;
+    if !accepts_state {
+        rebuild_pr_gates(db)?;
+    }
+    Ok(())
+}
+
+/// Rebuilds `pr_gates` with the new status CHECK, keeping every row.
+///
+/// `pr_reviews` references `pr_gates`, and foreign keys are enforced, so its rows
+/// are parked in a temporary table while the parent is replaced and restored
+/// afterwards: the child never points at a missing parent, and nothing is lost.
+fn rebuild_pr_gates(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE pr_gates_rebuilt (
+           id                    TEXT PRIMARY KEY,
+           run_id                TEXT NOT NULL REFERENCES runs(id),
+           ticket_id             TEXT NOT NULL REFERENCES tickets(id),
+           repo_slug             TEXT NOT NULL,
+           branch                TEXT NOT NULL,
+           base_sha              TEXT NOT NULL,
+           head_sha              TEXT NOT NULL,
+           pr_number             INTEGER,
+           pr_url                TEXT,
+           status                TEXT NOT NULL CHECK (status IN ('pending', 'scope_violation', 'reviewing', 'revise_requested',
+                                   'awaiting_human_approval', 'approved', 'auto_merge_armed', 'merged', 'escalated', 'paused', 'failed')),
+           touched_paths_json    TEXT NOT NULL DEFAULT '[]',
+           scope_violations_json TEXT NOT NULL DEFAULT '[]',
+           revise_rounds         INTEGER NOT NULL DEFAULT 0 CHECK (revise_rounds >= 0),
+           auto_merge_armed      INTEGER NOT NULL DEFAULT 0 CHECK (auto_merge_armed IN (0, 1)),
+           remote_intent         TEXT CHECK (remote_intent IN ('enable', 'disable')),
+           created_at            TEXT NOT NULL,
+           updated_at            TEXT NOT NULL);
+         INSERT INTO pr_gates_rebuilt
+           SELECT id,run_id,ticket_id,repo_slug,branch,base_sha,head_sha,pr_number,pr_url,status,
+                  touched_paths_json,scope_violations_json,revise_rounds,auto_merge_armed,remote_intent,
+                  created_at,updated_at
+           FROM pr_gates;
+         CREATE TEMP TABLE pr_reviews_parked AS SELECT * FROM pr_reviews;
+         DELETE FROM pr_reviews;
+         DROP TABLE pr_gates;
+         ALTER TABLE pr_gates_rebuilt RENAME TO pr_gates;
+         INSERT INTO pr_reviews SELECT * FROM pr_reviews_parked;
+         DROP TABLE pr_reviews_parked;
+         CREATE INDEX IF NOT EXISTS pr_gates_armed ON pr_gates(auto_merge_armed) WHERE auto_merge_armed = 1;",
+    )?;
     Ok(())
 }
 use polyclave_proto::{
@@ -78,7 +132,7 @@ CREATE TABLE IF NOT EXISTS pr_gates (
   pr_number             INTEGER,
   pr_url                TEXT,
   status                TEXT NOT NULL CHECK (status IN ('pending', 'scope_violation', 'reviewing', 'revise_requested',
-                          'approved', 'auto_merge_armed', 'merged', 'escalated', 'paused', 'failed')),
+                          'awaiting_human_approval', 'approved', 'auto_merge_armed', 'merged', 'escalated', 'paused', 'failed')),
   touched_paths_json    TEXT NOT NULL DEFAULT '[]',
   scope_violations_json TEXT NOT NULL DEFAULT '[]',
   revise_rounds         INTEGER NOT NULL DEFAULT 0 CHECK (revise_rounds >= 0),
@@ -722,6 +776,49 @@ impl Store {
         })
     }
 
+    /// Reviewers approved this exact SHA; the gate now waits for a person.
+    ///
+    /// Nothing is armed here, so no merge can happen from this state. The head is
+    /// checked inside the write, so a gate whose verified SHA moved is never left
+    /// waiting for an approval that was about a different commit.
+    pub fn await_human_approval(
+        &self,
+        gate_id: &str,
+        expected_head_sha: &str,
+    ) -> Result<PrGateDto> {
+        let (gate_id, expected) = (gate_id.to_owned(), expected_head_sha.to_owned());
+        self.write(move |db| {
+            let (status, armed, head) = gate_state(db, &gate_id)?;
+            if armed || head != expected || status != PrGateStatus::Approved {
+                return Err(Error::ConflictError);
+            }
+            db.execute(
+                "UPDATE pr_gates SET status='awaiting_human_approval' WHERE id=?1",
+                [&gate_id],
+            )?;
+            publish_pr_gate(db, &gate_id)
+        })
+    }
+
+    /// A person approved exactly `expected_head_sha`.
+    ///
+    /// The comparison happens inside this write, so an approval for an older SHA
+    /// is refused rather than applied to the SHA the gate carries now.
+    pub fn approve_pr_gate(&self, gate_id: &str, expected_head_sha: &str) -> Result<PrGateDto> {
+        let (gate_id, expected) = (gate_id.to_owned(), expected_head_sha.to_owned());
+        self.write(move |db| {
+            let (status, armed, head) = gate_state(db, &gate_id)?;
+            if armed || head != expected || status != PrGateStatus::AwaitingHumanApproval {
+                return Err(Error::ConflictError);
+            }
+            db.execute(
+                "UPDATE pr_gates SET status='approved' WHERE id=?1",
+                [&gate_id],
+            )?;
+            publish_pr_gate(db, &gate_id)
+        })
+    }
+
     /// Crash-safe ledger: commits `auto_merge_armed = 1` *before* the caller
     /// asks GitHub to enable auto-merge.
     ///
@@ -820,6 +917,22 @@ impl Store {
                 )
                 .optional()?
                 .flatten())
+        })
+    }
+
+    /// The head SHA the gate for this PR carries: what a GitHub stand-in, or a
+    /// reviewer, should see as the PR's head.
+    pub fn pr_gate_head(&self, repo_slug: &str, pr_number: u32) -> Result<Option<String>> {
+        let (slug, number) = (repo_slug.to_owned(), pr_number as i64);
+        self.read(move |db| {
+            Ok(db
+                .query_row(
+                    "SELECT head_sha FROM pr_gates WHERE repo_slug=?1 AND pr_number=?2
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    params![slug, number],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
         })
     }
 

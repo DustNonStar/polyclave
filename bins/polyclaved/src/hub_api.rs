@@ -1003,6 +1003,65 @@ impl Hub {
             })
             .collect()
     }
+    /// The mirror diff for a gate's exact `base_sha..head_sha`, bounded so a page
+    /// can show it. `truncated` is reported, never hidden.
+    pub fn pr_gate_diff(
+        &self,
+        gate_id: &str,
+        max_bytes: usize,
+    ) -> HubResult<polyclave_proto::PrGateDiffDto> {
+        let gate = self.store.pr_gate(gate_id).map_err(|_| Error::Policy)?;
+        let mirror: String = self
+            .store
+            .read({
+                let run_id = gate.run_id.clone();
+                move |db| {
+                    Ok(db.query_row(
+                        "SELECT mirror_remote FROM runs WHERE id=?1",
+                        [&run_id],
+                        |r| r.get(0),
+                    )?)
+                }
+            })
+            .map_err(|_| Error::Store)?;
+        let (text, bytes, truncated) = polyclave_hub::pr_gate::diff_capped(
+            std::path::Path::new(&mirror),
+            &gate.base_sha,
+            &gate.head_sha,
+            max_bytes,
+        )
+        .map_err(|_| Error::Store)?;
+        Ok(polyclave_proto::PrGateDiffDto {
+            gate_id: gate.id,
+            base_sha: gate.base_sha,
+            head_sha: gate.head_sha,
+            text,
+            bytes,
+            truncated,
+        })
+    }
+
+    /// Records a person's approval of exactly `expected_sha` and only then arms
+    /// auto-merge for that same SHA.
+    pub async fn approve_pr_gate(
+        &self,
+        gate_id: &str,
+        expected_sha: &str,
+        hub_session_id: Option<String>,
+    ) -> HubResult<polyclave_proto::PrGateDto> {
+        let deps = self.pr_gate_deps().map_err(|err| match err {
+            Error::Credential => Error::Credential,
+            _ => Error::Store,
+        })?;
+        polyclave_hub::pr_gate::approve_pr_gate(
+            &deps,
+            gate_id,
+            expected_sha,
+            hub_session_id.as_deref(),
+        )
+        .await
+    }
+
     /// Settles every gate whose remote auto-merge outcome is unconfirmed
     /// against what GitHub really has, and revokes anything still armed while
     /// the host is paused.

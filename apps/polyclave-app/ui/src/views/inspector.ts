@@ -1,6 +1,6 @@
 // Right inspector: Topology DAG, Review decisions, read-only Files and verified Memory.
 import type { Api, Decision, RunDetail } from '../api/client.js';
-import type { CouncilDto, PrGateDto, RunDto } from '../generated/proto.js';
+import type { CouncilDto, PrGateDiffDto, PrGateDto, RunDto } from '../generated/proto.js';
 import {
   S, activeRunDto, attentionPrGates, awaitingCouncils, needsReview, runLabel, runTone,
   selectedSession, totalNeedsCount, vendorLabel, visibleRuns,
@@ -198,6 +198,7 @@ function councilTone(status: CouncilDto['status']): string {
 function prGateTone(status: PrGateDto['status']): string {
   switch (status) {
     case 'reviewing': return 'run';
+    case 'awaiting_human_approval': return 'review';
     case 'scope_violation': case 'revise_requested': case 'escalated': case 'paused': return 'review';
     case 'approved': case 'auto_merge_armed': case 'merged': return 'done';
     case 'failed': return 'fail';
@@ -296,6 +297,32 @@ function councilSection(api: Api, act: Actions): Node[] {
   return nodes;
 }
 
+/** The mirror diff for the gate's exact SHA, loaded once per card. */
+function approvalDiffSlot(api: Api, act: Actions, gate: PrGateDto): HTMLElement {
+  const slot = h('div', { class: 'approval-diff', 'data-diff-sha': gate.head_sha });
+  const load = button('Show the diff for ' + short(gate.head_sha), () => {
+    load.disabled = true;
+    void api.prGateDiff(gate.id).then(diff => {
+      slot.replaceChildren(diffPanel(diff));
+    }).catch((e: unknown) => {
+      load.disabled = false;
+      act.tell(e instanceof Error ? e.message : 'The diff could not be read', 'info');
+    });
+  }, 'btn-ghost', { 'data-focus-key': 'show-diff' });
+  slot.append(load);
+  return slot;
+}
+
+function diffPanel(diff: PrGateDiffDto): HTMLElement {
+  const lines = diff.text.split('\n').slice(0, 400);
+  return h('div', { class: 'diff-panel', 'data-diff': 'text' },
+    h('div', { class: 'diff-title', text: short(diff.base_sha) + ' .. ' + short(diff.head_sha) + ' · ' + diff.bytes + ' bytes' }),
+    diff.truncated
+      ? h('p', { class: 'field-hint', 'data-truncated': 'true', text: 'Showing the first ' + diff.text.length + ' of ' + diff.bytes + ' bytes. The rest is not hidden: open the PR on GitHub to read it.' })
+      : null,
+    h('pre', { class: 'diff-body', text: lines.join('\n') }));
+}
+
 function prGatesSection(api: Api, act: Actions): Node[] {
   const list = S.prGates;
   const head = h('header', { class: 'panel-head' },
@@ -330,7 +357,26 @@ function prGatesSection(api: Api, act: Actions): Node[] {
           h('div', { class: 'diff-title', text: 'Scope violations (' + active.scope_violations.length + ')' }),
           ...active.scope_violations.map(v => h('div', { class: 'diff-row' }, h('span', { class: 'path', text: v }))))
       : null,
+    // Exactly the SHA a person is being asked to approve, and what it contains.
+    active.status === 'awaiting_human_approval'
+      ? h('div', { class: 'diff-well', 'data-approval': 'pending' },
+          h('div', { class: 'diff-title', text: 'Waiting for your approval of ' + short(active.head_sha) }),
+          h('p', { class: 'field-hint', text: 'Reviewers approved this exact commit. Auto-merge is not armed and nothing is sent to GitHub until you approve this same SHA.' }),
+          approvalDiffSlot(api, act, active))
+      : null,
     h('div', { class: 'actions' },
+      active.status === 'awaiting_human_approval'
+        ? button([icon('check', 'ic--sm'), 'Approve ' + short(active.head_sha)], () => {
+            void api.approvePrGate(active.id, active.head_sha).then(async () => {
+              act.tell('Approved ' + short(active.head_sha) + '; auto-merge armed for that commit', 'info');
+              await act.refresh();
+            }).catch((e: unknown) => {
+              // A gate whose head moved refuses the old SHA: say so, do not retry.
+              act.tell(e instanceof Error ? e.message : 'The approval was refused', 'info');
+              void act.refresh();
+            });
+          }, 'btn-primary', { 'data-focus-key': 'approve-pr-gate', disabled: S.pause.paused })
+        : null,
       button([icon('review', 'ic--sm'), 'Run PR Gate'], () => {
         void api.runPrGate(active.id).then(async () => {
           act.tell('PR Gate updated', 'info');

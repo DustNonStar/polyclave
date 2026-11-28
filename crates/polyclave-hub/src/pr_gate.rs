@@ -72,6 +72,49 @@ pub fn review_diff(repo: &Path, base: &str, head: &str) -> Result<ReviewDiff> {
     Ok(ReviewDiff::Complete { text, commits })
 }
 
+/// The same range, read for a page instead of a reviewer.
+///
+/// Unlike [`review_diff`] this does not refuse an oversized change: it returns the
+/// first `max_bytes` and reports `truncated`, so the approval card can never show a
+/// partial diff as if it were the whole one.
+pub fn diff_capped(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    max_bytes: usize,
+) -> Result<(String, u64, bool)> {
+    if !is_full_oid(base) || !is_full_oid(head) {
+        return Err(Error::Policy);
+    }
+    let git = resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?;
+    let out = clean_git(&git, repo)
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--stat",
+            "--patch",
+            base,
+            head,
+            "--",
+        ])
+        .output()
+        .map_err(|_| Error::Transport)?;
+    if !out.status.success() {
+        return Err(Error::Policy);
+    }
+    let full = String::from_utf8_lossy(&out.stdout).into_owned();
+    let bytes = full.len() as u64;
+    if full.len() <= max_bytes {
+        return Ok((full, bytes, false));
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !full.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Ok((full[..cut].to_owned(), bytes, true))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewerSpec {
     pub vendor: Vendor,
@@ -502,6 +545,7 @@ pub struct RunPrGateRequest {
     pub reviewers: Vec<ReviewerSpec>,
 }
 
+#[derive(Clone)]
 pub struct PrGateDeps {
     pub store: Store,
     pub scm: Arc<dyn ScmClient>,
@@ -1176,25 +1220,97 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err)?;
     }
 
+    // Heterogeneous reviewers approved this exact SHA. That is not a human
+    // decision, so the gate stops here: nothing is armed and GitHub is not asked
+    // to merge anything until a person approves this same SHA.
     gate = deps
         .store
         .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
         .map_err(map_store_err)?;
-
     if deps.store.pause_state().map_err(map_store_err)?.paused {
         return deps
             .store
             .set_pr_gate_status(&gate.id, PrGateStatus::Paused)
             .map_err(map_store_err);
     }
+    deps.store
+        .await_human_approval(&gate.id, &current_head)
+        .map_err(map_store_err)
+}
 
-    // Arming is serialized with Pause per gate, and the pause flag is read inside
-    // the same SQLite write transaction that sets the armed bit (`arm_auto_merge`
-    // returns `None` when the host is paused). A Pause committing at any point in
-    // this section therefore either sees this gate in its armed snapshot — and
-    // revokes it — or refuses the arm here; there is no window in between, because
-    // a single serialized writer decides both.
-    let guard = auto_merge_locks().lock(&gate.id).await;
+/// Arms and enables auto-merge for a gate a person approved.
+///
+/// `expected_head_sha` is the SHA the person saw: the approval is recorded only if
+/// the gate still carries it and the remote branch is still there, and the same
+/// SHA is what GitHub is asked to arm. Called by the approval endpoint, never by
+/// `run_pr_gate`.
+pub async fn approve_pr_gate(
+    deps: &PrGateDeps,
+    gate_id: &str,
+    expected_head_sha: &str,
+    hub_session_id: Option<&str>,
+) -> Result<PrGateDto> {
+    if deps.store.pause_state().map_err(map_store_err)?.paused {
+        return Err(Error::Policy);
+    }
+    let guard = auto_merge_locks().lock(gate_id).await;
+    // Atomic against the ledger: the gate must still be waiting for this SHA.
+    let gate = deps
+        .store
+        .approve_pr_gate(gate_id, expected_head_sha)
+        .map_err(map_store_err)?;
+    let Some(pr_number) = gate.pr_number else {
+        drop(guard);
+        return Err(Error::Policy);
+    };
+    let pr_state = match deps
+        .scm
+        .get_pr_state(&gate.repo_slug, pr_number as u64)
+        .await
+    {
+        Ok(state) => state,
+        Err(err) => {
+            drop(guard);
+            return Err(map_scm_err(err));
+        }
+    };
+    // The remote must still serve the approved SHA: anything else means the branch
+    // moved after the person looked at it, and the approval is not for it.
+    if pr_state.head_sha != expected_head_sha {
+        // Back to the human wait: the person must approve whatever is there now.
+        let _ = deps
+            .store
+            .set_pr_gate_status(&gate.id, PrGateStatus::AwaitingHumanApproval);
+        drop(guard);
+        return Err(Error::Policy);
+    }
+    arm_and_enable(
+        deps,
+        guard,
+        gate,
+        expected_head_sha.to_owned(),
+        pr_state.node_id,
+        hub_session_id,
+    )
+    .await
+}
+
+/// Persists the armed bit and the unconfirmed intent, then asks GitHub.
+async fn arm_and_enable(
+    deps: &PrGateDeps,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    gate: PrGateDto,
+    current_head: String,
+    pr_node_id: String,
+    hub_session_id: Option<&str>,
+) -> Result<PrGateDto> {
+    let pr_number = gate.pr_number.unwrap_or(0);
+    let repo_slug = gate.repo_slug.clone();
+    // The pause flag is read inside the same SQLite write transaction that sets
+    // the armed bit (`arm_auto_merge` answers `None` when the host is paused), so
+    // a Pause committing at any point here either sees this gate in its armed
+    // snapshot — and revokes it — or refuses the arm. One serialized writer
+    // decides both, so there is no window in between.
     let current = deps.store.pr_gate(&gate.id).map_err(map_store_err)?;
     // Crash-safe ordering: persist auto_merge_armed = 1 *and* the unconfirmed
     // remote intent in SQLite BEFORE calling GitHub enableAutoMerge.
@@ -1211,7 +1327,7 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .map_err(map_store_err);
     };
 
-    match deps.scm.enable_auto_merge(&pr.node_id, &current_head).await {
+    match deps.scm.enable_auto_merge(&pr_node_id, &current_head).await {
         Ok(()) => {
             let confirmed = deps
                 .store
@@ -1234,11 +1350,10 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             // whatever is really there, and tell a human.
             enqueue_hub_notice(
                 &deps.store,
-                req.hub_session_id.as_deref(),
+                hub_session_id,
                 &format!("pr_gate:{}:auto_merge_unknown", armed.id),
                 &format!(
-                    "auto-merge for PR {} on {} could not be confirmed: the request may have reached GitHub. The gate stays armed in the ledger so Pause revokes it; check the PR before merging.",
-                    pr.number, req.repo_slug
+                    "auto-merge for PR {pr_number} on {repo_slug} could not be confirmed: the request may have reached GitHub. The gate stays armed in the ledger so Pause revokes it; check the PR before merging."
                 ),
             );
             drop(guard);
@@ -1510,19 +1625,34 @@ mod tests {
             )
             .route(
                 "/repos/{owner}/{repo}/pulls/{num}",
-                get(|| async {
-                    Json(json!({
-                        "number": 42,
-                        "node_id": "PR_node_42",
-                        "state": "open",
-                        "merged": false,
-                        "mergeable": true,
-                        "mergeable_state": "clean",
-                        "html_url": "https://github.com/org/repo/pull/42",
-                        "head": { "sha": "head_sha_placeholder" },
-                        "auto_merge": null
-                    }))
-                }),
+                get(
+                    |State(st): State<Arc<AppState>>,
+                     axum::extract::Path((owner, repo, num)): axum::extract::Path<(
+                        String,
+                        String,
+                        u64,
+                    )>| async move {
+                        // A real PR reports the head this gate pushed; the human
+                        // approval compares that SHA, so the stand-in must too.
+                        let head = st
+                            .store
+                            .pr_gate_head(&format!("{owner}/{repo}"), num as u32)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "head_sha_placeholder".to_owned());
+                        Json(json!({
+                            "number": 42,
+                            "node_id": "PR_node_42",
+                            "state": "open",
+                            "merged": false,
+                            "mergeable": true,
+                            "mergeable_state": "clean",
+                            "html_url": "https://github.com/org/repo/pull/42",
+                            "head": { "sha": head },
+                            "auto_merge": null
+                        }))
+                    },
+                ),
             )
             .route(
                 "/repos/{owner}/{repo}/pulls/{num}/reviews",
@@ -1907,6 +2037,7 @@ mod tests {
         .await
         .unwrap();
 
+        let gate = human_approve(&deps, &gate, Some("hub")).await.unwrap();
         assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
         assert!(gate.auto_merge_armed);
         assert_eq!(gate.pr_number, Some(42));
@@ -2067,6 +2198,8 @@ mod tests {
         /// When set, a disarm request gets no answer (the remote may have applied
         /// it, so the ledger must stay armed).
         lose_disable: AtomicBool,
+        /// The head this stand-in reports for the PR.
+        head: Mutex<String>,
     }
 
     impl RacingScm {
@@ -2080,6 +2213,10 @@ mod tests {
         }
         fn ops(&self) -> Vec<&'static str> {
             self.state.ops.lock().unwrap().clone()
+        }
+        /// The SHA this stand-in reports as the PR head.
+        fn set_head(&self, sha: &str) {
+            *self.state.head.lock().unwrap() = sha.to_owned();
         }
     }
 
@@ -2184,6 +2321,7 @@ mod tests {
             pr_number: u64,
         ) -> BoxFuture<'a, std::result::Result<PrState, ScmError>> {
             let enabled = *self.state.enabled.lock().unwrap();
+            let head = self.state.head.lock().unwrap().clone();
             let unreadable = self
                 .state
                 .unreadable
@@ -2206,7 +2344,7 @@ mod tests {
                     merged: false,
                     mergeable: Some(true),
                     mergeable_state: Some("clean".into()),
-                    head_sha: "sha".into(),
+                    head_sha: head,
                     auto_merge_enabled: enabled,
                     html_url: format!("https://github.com/org/repo/pull/{pr_number}"),
                 })
@@ -2261,6 +2399,18 @@ mod tests {
         }
     }
 
+    /// Drives the human approval a gate now waits for and returns the armed gate.
+    /// Reaching `AutoMergeArmed` without this is exactly what Item 3.3 forbids.
+    async fn human_approve(
+        deps: &PrGateDeps,
+        gate: &PrGateDto,
+        hub: Option<&str>,
+    ) -> Result<PrGateDto> {
+        assert_eq!(gate.status, PrGateStatus::AwaitingHumanApproval, "{gate:?}");
+        assert!(!gate.auto_merge_armed);
+        approve_pr_gate(deps, &gate.id, &gate.head_sha, hub).await
+    }
+
     /// A gate whose reviews all approve, so `run_pr_gate` reaches the auto-merge
     /// step, with the given remote stand-in.
     async fn arming_deps(fix: &GitFixture, scm: Arc<RacingScm>) -> PrGateDeps {
@@ -2286,9 +2436,18 @@ mod tests {
         let deps = arming_deps(&fix, scm.clone()).await;
         let mut request = range_request(&fix, &fix.good_head_sha, "feat/race");
         request.hub_session_id = Some("hub".into());
-        let gate_task = tokio::spawn(async move { run_pr_gate(&deps, request).await });
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+        assert_eq!(gate.status, PrGateStatus::AwaitingHumanApproval);
 
-        // Wait until the enable is really talking to GitHub, then Pause.
+        // GitHub is only asked during the human approval, so that is where the
+        // in-flight enable has to be held open while a Pause starts.
+        scm.set_head(&fix.good_head_sha);
+        let approve_deps = deps.clone();
+        let gate_id = gate.id.clone();
+        let head = fix.good_head_sha.clone();
+        let approve_task = tokio::spawn(async move {
+            approve_pr_gate(&approve_deps, &gate_id, &head, Some("hub")).await
+        });
         let _ = scm.started.acquire().await.unwrap();
         let store = fix.store.clone();
         let pause_scm = scm.clone();
@@ -2297,7 +2456,7 @@ mod tests {
         // Let the Pause reach the gate lock (it cannot pass the in-flight enable).
         tokio::task::yield_now().await;
         scm.release.add_permits(1);
-        let gate = gate_task.await.unwrap().unwrap();
+        let _ = approve_task.await.unwrap();
         pause_task.await.unwrap().unwrap();
 
         // Whatever the ordering was, Pause wins: nothing may be armed afterwards.
@@ -2537,8 +2696,10 @@ mod tests {
         let deps = arming_deps(&fix, scm.clone()).await;
         let mut request = range_request(&fix, &fix.good_head_sha, "feat/lost");
         request.hub_session_id = Some("hub".into());
+        scm.set_head(&fix.good_head_sha);
         scm.release.add_permits(1);
-        assert!(run_pr_gate(&deps, request).await.is_err());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+        assert!(human_approve(&deps, &gate, Some("hub")).await.is_err());
 
         // No answer: the ledger must not claim the PR is disarmed.
         let gate_id = fix.store.list_pr_gates().unwrap()[0].id.clone();
@@ -2567,15 +2728,17 @@ mod tests {
         // leave the armed state without help from reconciliation.
         let refused_fix = setup_git_and_store();
         let refused = RacingScm::new(EnableAnswer::Refused);
+        refused.set_head(&refused_fix.good_head_sha);
         let refused_deps = arming_deps(&refused_fix, refused.clone()).await;
         refused.release.add_permits(1);
-        assert!(run_pr_gate(
+        let pending = run_pr_gate(
             &refused_deps,
             range_request(&refused_fix, &refused_fix.good_head_sha, "feat/refused"),
         )
         .await
-        .is_err());
-        let refused_gate = refused_fix.store.list_pr_gates().unwrap()[0].clone();
+        .unwrap();
+        assert!(human_approve(&refused_deps, &pending, None).await.is_err());
+        let refused_gate = refused_fix.store.pr_gate(&pending.id).unwrap();
         assert!(!refused_gate.auto_merge_armed, "{refused_gate:?}");
         assert_eq!(
             refused_fix
@@ -2965,6 +3128,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let gate = human_approve(&deps, &gate, None).await.unwrap();
         assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
         assert_eq!(
             *pusher.pushed.lock().unwrap(),
@@ -3356,6 +3520,7 @@ mod tests {
         let gate = run_pr_gate(&deps, range_request(&fix, &head, "feat/range"))
             .await
             .unwrap();
+        let gate = human_approve(&deps, &gate, None).await.unwrap();
         assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
         let seen = reviewer.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -3754,6 +3919,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let gate = human_approve(&deps, &gate, Some("hub")).await.unwrap();
         assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
         assert_eq!(
             git(
@@ -3922,6 +4088,7 @@ mod tests {
         let mut request = range_request(&fix, &fix.good_head_sha, "feat/token");
         request.hub_session_id = Some("hub".into());
         let gate = run_pr_gate(&deps, request).await.unwrap();
+        let gate = human_approve(&deps, &gate, Some("hub")).await.unwrap();
         assert_eq!(gate.status, PrGateStatus::AutoMergeArmed);
         assert_eq!(
             git(&remote, &["rev-parse", "refs/heads/feat/token"]),
