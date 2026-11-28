@@ -1435,6 +1435,9 @@ async fn merge_immediately(
             Err(map_scm_err(err))
         }
         Err(err) => {
+            let _ = deps
+                .store
+                .set_pr_gate_status(&gate.id, PrGateStatus::AwaitingHumanApproval);
             enqueue_hub_notice(
                 &deps.store,
                 hub_session_id,
@@ -4440,5 +4443,149 @@ mod tests {
         assert!(dump.contains("feat/token") && dump.contains("github.com/org/repo"));
         assert!(!dump.contains(SENTINEL_TOKEN));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn uncertain_clean_merge_failure_returns_gate_to_awaiting_human_approval() {
+        struct FlakyCleanMergeScm {
+            head_sha: String,
+            merge_calls: AtomicUsize,
+        }
+        impl ScmClient for FlakyCleanMergeScm {
+            fn preflight_repo<'a>(
+                &'a self,
+                _repo_slug: &'a str,
+                _base_branch: &'a str,
+            ) -> BoxFuture<'a, std::result::Result<PreflightReport, ScmError>> {
+                Box::pin(async { unreachable!("not called in approve_pr_gate") })
+            }
+            fn open_or_find_pr<'a>(
+                &'a self,
+                _req: OpenPrRequest,
+            ) -> BoxFuture<'a, std::result::Result<PullRequestInfo, ScmError>> {
+                Box::pin(async { unreachable!("not called in approve_pr_gate") })
+            }
+            fn submit_review<'a>(
+                &'a self,
+                _req: SubmitReviewRequest,
+            ) -> BoxFuture<'a, std::result::Result<SubmittedReview, ScmError>> {
+                Box::pin(async { unreachable!("not called in approve_pr_gate") })
+            }
+            fn enable_auto_merge<'a>(
+                &'a self,
+                _pr_node_id: &'a str,
+                _expected_head_oid: &'a str,
+            ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+                Box::pin(async { panic!("enable_auto_merge should not run for CLEAN PR") })
+            }
+            fn disable_auto_merge<'a>(
+                &'a self,
+                _pr_node_id: &'a str,
+            ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+                Box::pin(async { Ok(()) })
+            }
+            fn merge_pull_request<'a>(
+                &'a self,
+                _pr_node_id: &'a str,
+                expected_head_oid: &'a str,
+            ) -> BoxFuture<'a, std::result::Result<(), ScmError>> {
+                let attempt = self.merge_calls.fetch_add(1, Ordering::SeqCst);
+                let expected = self.head_sha.clone();
+                let got = expected_head_oid.to_owned();
+                Box::pin(async move {
+                    assert_eq!(got, expected);
+                    if attempt == 0 {
+                        Err(ScmError::Http {
+                            op: "merge_pull_request",
+                            status: 503,
+                            message: "upstream timeout".into(),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                })
+            }
+            fn get_pr_state<'a>(
+                &'a self,
+                _repo_slug: &'a str,
+                pr_number: u64,
+            ) -> BoxFuture<'a, std::result::Result<PrState, ScmError>> {
+                let head = self.head_sha.clone();
+                Box::pin(async move {
+                    Ok(PrState {
+                        number: pr_number,
+                        node_id: format!("PR_node_{pr_number}"),
+                        state: "open".into(),
+                        merged: false,
+                        mergeable: Some(true),
+                        mergeable_state: Some("clean".into()),
+                        merge_state_status: Some("CLEAN".into()),
+                        head_sha: head,
+                        auto_merge_enabled: false,
+                        html_url: format!("https://github.com/org/repo/pull/{pr_number}"),
+                    })
+                })
+            }
+            fn list_pr_checks_and_comments<'a>(
+                &'a self,
+                _repo_slug: &'a str,
+                _pr_number: u64,
+                _head_sha: &'a str,
+            ) -> BoxFuture<'a, std::result::Result<PrChecksAndComments, ScmError>> {
+                Box::pin(async { unreachable!("not called in approve_pr_gate") })
+            }
+        }
+
+        let fix = setup_git_and_store();
+        let gate = fix
+            .store
+            .create_pr_gate(NewPrGate {
+                run_id: "run1".into(),
+                repo_slug: "org/repo".into(),
+                branch: "feat/clean-retry".into(),
+                base_sha: fix.base_sha.clone(),
+                head_sha: fix.good_head_sha.clone(),
+                touched_paths: Vec::new(),
+            })
+            .unwrap();
+        fix.store
+            .record_pr_opened(&gate.id, 42, "https://github.com/org/repo/pull/42")
+            .unwrap();
+        fix.store
+            .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+            .unwrap();
+        fix.store
+            .await_human_approval(&gate.id, &fix.good_head_sha)
+            .unwrap();
+
+        let scm = Arc::new(FlakyCleanMergeScm {
+            head_sha: fix.good_head_sha.clone(),
+            merge_calls: AtomicUsize::new(0),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm: scm.clone(),
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(Vec::new()),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: Arc::new(MockPusher {
+                pushed: Mutex::new(Vec::new()),
+            }),
+        };
+
+        let err = approve_pr_gate(&deps, &gate.id, &fix.good_head_sha, Some("hub"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Http { status: 503, .. }), "{err:?}");
+        let after_first = fix.store.pr_gate(&gate.id).unwrap();
+        assert_eq!(after_first.status, PrGateStatus::AwaitingHumanApproval);
+
+        let merged = approve_pr_gate(&deps, &gate.id, &fix.good_head_sha, Some("hub"))
+            .await
+            .unwrap();
+        assert_eq!(merged.status, PrGateStatus::Merged);
+        assert_eq!(scm.merge_calls.load(Ordering::SeqCst), 2);
     }
 }
