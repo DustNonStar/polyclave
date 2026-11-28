@@ -104,14 +104,17 @@
 
 ## 2026-11-28 · `main@0b593c7` 真机验收前四模型独立盲审复盘
 
-### 14. 单一模型自检存在结构性盲区，四模型异构独立盲审实现“零误报 + 高互补”真机排雷
-- **发生了什么：** 在 `main@0b593c7` 本地 209+ 项测试、浏览器测试与 macOS/Windows 双平台 CI 全绿、准备进入单故事真机验收前，我们按统一范围提示词（聚焦真机 5 条接缝 + 暂停模块高危安全阀）对 4 个不同模型（Claude Opus 5.5、DeepSeek Harness、Gemini 4、GPT-6）发起相互隔离的只读盲审，再由主控 Agent 逐条回到源码按图索骥复核。结果：**4 份报告中的所有 P0 阻断项（去重合并后 10 项）与 2 项安全阀漏洞 100% 命中真实源码，零误报**，并同时呈现出“多模型交叉印证”与“各模型独特闪光点”双重价值：
+### 14. 任何单次审查都是抽样而非全覆盖：可判定不变量 + 异构独立盲审 + 源码裁决 + 真机兜底
+- **发生了什么：** 在 `main@0b593c7` 本地 209+ 项测试、浏览器测试与 macOS/Windows 双平台 CI 全绿、准备进入单故事真机验收前，我们按统一范围提示词（聚焦真机 5 条接缝 + 暂停模块高危安全阀）对 4 个不同模型（Claude Opus 5.5、DeepSeek Harness、Gemini 4、GPT-6）开启全新独立会话发起只读盲审，再由主控 Agent 逐条回到同一 commit 源码按图索骥复核。结果显示：**4 份报告中的所有正向 P0（去重后 10 项）与 2 项安全阀漏洞经源码核实均真实存在**（个别条目存在定级分歧，例如 `tauri.conf.json` 当前 `bundle.active=false` 下 Finder `PATH` 属打包前必修而非本次终端验收硬阻断；Codex 同 UID 可读 `state_dir` 属已知沙箱边界），同时呈现出极强的交集印证与差集互补（10 项 P0 中整整一半仅由单一模型独有发现）：
   - **多模型交叉印证的共性阻断：** GitHub `CLEAN` 状态 PR 调 `enablePullRequestAutoMerge` 失败后 Gate 永久卡死在 `approved`（Claude / Gemini / GPT-6）；武装状态下重跑 Gate 建兄弟行可向同一 PR 推入未批准 SHA（Claude / GPT-6）；返工 Attempt B 的 `commit_and_stage` 无视 `attempts.from_sha` 回退到 `base_sha`，局部 `paths` 提交会静默抹除 Attempt A 改动（Gemini / GPT-6）；Claude Seatbelt 沙箱认证死路与凭据读/外传边界（Claude / Gemini / GPT-6）；前端无首次建 PR Gate 入口与默认 Reviewer 死路（DeepSeek / Gemini / Claude / GPT-6）。
   - **各模型独有的关键发现（其余 3 个模型均未捕获）：**
-    - **Claude Opus 5.5：** 用本机 `/usr/bin/sandbox-exec` 探针实证缺少 `/private/var/run/mDNSResponder` 导致沙箱内 DNS 解析必挂；发现 `Ctrl-C`/`SIGTERM` 优雅关停释放锁与端口但进程不退出、Worker 对已关 MCP 继续纠错踩库；发现 `run_pr_gate` 同步阻塞在 MCP `tools/call` 必然被超时掐断。
+    - **Claude Opus 5.5：** 用本机 `/usr/bin/sandbox-exec` 探针实证缺少 `/private/var/run/mDNSResponder` 导致沙箱内 DNS 解析必挂；发现 `Ctrl-C`/`SIGTERM` 优雅关停后 Worker 活过已关闭的 MCP 并与新 daemon 交叉踩库；发现 `run_pr_gate` 同步阻塞在 MCP `tools/call` 必然被超时掐断。
     - **DeepSeek Harness：** 发现从 Finder/Spotlight 启动 Tauri 桌面壳时伴生 `polyclaved` 继承最小 `PATH` 导致找不到 Homebrew/nvm 下的 `codex`/`claude`；发现启动期失败被静默写进前端未读的 `Inbox` warning 并误报为 `retryable`。
     - **Gemini 4：** 发现 Codex CLI Hub 漏配 `default_tools_approval_mode="approve"` 且 Claude CLI Hub `CENTRAL_TOOLS` 漏配 `run_pr_gate`；发现手机端审批卡缺少同 SHA 测试与未决项，且 `awaiting_human_approval` 在 `Needs you` 与唤醒通知中隐身；触发安全阀查出技能同步沿 symlink 写穿用户全局目录与社区草稿脱敏分词绕过。
     - **GPT-6 (Codex)：** 发现桌面端撤销已配对手机后，存量 SSE 长连接仍可持续收到新增 Hub 消息与实时输出；发现 `diffPanel` 静默截断 400 行以外尾部；发现同 SHA 重跑 check-runs 产生新 ID 时旧失败行残留 SQLite 导致 UI 永远标红。
-- **根因：** 一方面，单一模型在完成编码后自检，受限于自身在同一上下文和同一批测试夹具下形成的隐含假设，无法发现结构性盲区；另一方面，不同模型在代码审查时的关注维度天然互补——有的擅长 OS 进程生命周期与实机探针，有的擅长桌面端入口与零配置路径，有的擅长跨模块契约与安全红线，有的擅长长连接状态机与并发边界。
-- **流程改进：** 在重大里程碑（真机验收、发版、核心安全边界变更）前，固化“**统一范围 + 信息隔离 + 安全阀兜底 → 多模型并行盲审 → 主控逐条回源码核验去重**”门禁，不再把单一模型自检或离线 CI 全绿作为真机放行的充分条件。
-- **反哺 Polyclave 设计（对外推广核心案例）：** 这次实战直接印证了 Polyclave 的核心产品理念——**异构多模型协作 + 隔离盲审 + 宿主客观核证**不是“堆模型噱头”，而是有硬工程证据支撑的质量防线：单模型自检与双平台 CI 全绿之后，4 模型异构盲审仍零误报挖出 10 项真机必撞 P0 与 2 项安全红线，且每个模型都贡献了不可替代的视角。对外介绍与推广 Polyclave 时，可直接以本次 `main@0b593c7` 验收前四模型盲审作为真实案例。
+  - **对“覆盖率假阴性”的反向教训：** 4 个模型复盘时坦承，即便逐行读过同一段代码（如 `stage.rs`、`evolution.rs`、`claude.rs`），仍会因切入问题不同而漏掉其他模型的 P0；并且报告中未深查区域写“无”属于高风险覆盖率主张（例如安全阀项被写成“无”但实际存在漏洞）。
+- **根因：** 一方面，单模型自写代码、自写 mock 测试与自检会形成假设同源的局部自洽闭环；另一方面，**注意力的分配由带入代码的问题决定，与是不是作者无关**——任何单次审查（人或模型）都只是一次抽样而非全覆盖，且静态审查天然存在“外部真实环境黑盒”的天花板。
+- **流程改进：**
+  1. 在重大里程碑（真机验收、发版、核心安全边界变更）前，固化四步门禁：**先写清可判定的不变量 → 独立新会话 + 强证据约束并行盲审（按高风险接缝/异构模型组合，禁止对未查区域写“无”）→ 回到同一 commit 源码逐条裁决并校准定级 → 真机验收兜底环境黑盒**；日常小改动保持“1 Worker + 1 异构 Reviewer”控制成本。
+  2. 遇到多条同类缺陷时先立架构不变量再写补丁（本次沉淀 4 条核心不变量：**I1** 同 Run 至多一个活 Gate 且武装后 SHA 不可变；**I2** 返工提交必从持久化 `from_sha` 建索引；**I3** PR Gate 长流程必为宿主后台作业；**I4** 撤销设备必立即切断全部存量 SSE 连接）。
+- **反哺 Polyclave 设计（对外推广核心案例）：** 这次实战直接印证了 Polyclave 的核心方法论——不是“简单堆多模型”，而是**“可判定不变量 + 异构独立盲审（扩 recall）+ 宿主客观核证与源码裁决（守 precision）+ 真机/人类最终把关”**。对外推广时可直接用 `main@0b593c7` 的三个真实标本讲清价值：①“测试全绿但真机必挂”（Seatbelt DNS / 返工 `from_sha`）；②“同一行代码、不同模型问出不同 P0”（`allow file-read*` 能否运行 vs 能否外传凭据）；③“已有测试只保新请求，盲审抓出存量连接”（撤销设备后 SSE 仍推消息）。
