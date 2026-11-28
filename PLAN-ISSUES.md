@@ -322,3 +322,14 @@ Options for the owner:
 Nothing is implemented. This does not affect R1, and no test asserts the current role mapping for host messages.
 
 **Resolved (project owner, 2026-11-27; option A, implemented on `fix/per-sha-tests-and-prompt-isolation` as `7d12fba`).** `Store::hub_enqueue_external` now writes `metadata_json = {"kind": "scm_observation"}` (the constant is `polyclave_store::HOST_OBSERVATION_KIND`). `polyclave_hub::provider::prompt_text` prefixes such a message with `[host observation, not from the user] ` and is used in all four places that turn a ledger message into a prompt: `restore_api_history`, the API turn's current input (`bins/polyclaved/src/hub_api.rs`), the CLI provider's history and its current input. The person's own messages are untouched, and the two existing internal host notices (the interrupted-conversation line and the lifecycle notices) carry a different `kind`, so they keep their plain wording. The ledger text is never rewritten: the prefix exists only in the prompt.
+
+## [detail] Batch 2 Item 2.1 needed provenance rows in an existing fixture
+
+Item 2.1 makes the PR gate's SHA source read the ledger: `RunManager::r1_verified_sha` (`crates/polyclave-core/src/runs.rs`) requires `result_source='agent'`, a `done` Run, an `accepted_attempt_id`, and an accepted `results` row whose `payload_json.sha` equals `result_sha`. `bins/polyclaved/src/hub_api/tests.rs`'s `setup_git_run_fixture` builds the authenticated Run with SQL only — a `runs` row carrying `result_sha` and `status='done'`, but no Attempt, no turn and no accepted receipt. That is the same shape as the case the item forbids, so the fixture cannot demonstrate a verified Run any more.
+
+Required edits, all fixture-level; **no assertion changes**:
+
+1. `setup_git_run_fixture` now also inserts the accepted Attempt (`attempts` id 71), the turn that reported it, and the accepted `results` row for the same SHA, and sets `accepted_attempt_id=71` and `result_source='agent'` on the `runs` row. This is the ledger R1 writes when it settles a Run; before, the fixture asserted a state the production path never produces (see `docs/LESSONS.md` §5).
+2. `pr_gate_refuses_a_run_with_only_an_observed_sha` calls the provenance-aware helper with the ledger: `verified_result_sha(&hub.runs, &unverified)` and `verified_result_sha(&hub.runs, &hub.runs.get(&run_id).unwrap())`. Both assertions (`is_err()` for the observed-only Run, `== head_sha` for the verified Run) are unchanged.
+
+The new negative test `pr_gate_refuses_a_hand_accepted_tip_that_r1_never_receipted` uses the production accept path (`RunManager::resolve_seen(.., Resolution::Accept, ..)`), then asserts the gate refuses: no push, no review, no auto-merge, no gate row.

@@ -418,11 +418,12 @@ impl ReviewerExecutor for HostReviewerExecutor {
 }
 
 /// Returns the Run's R1-verified `result_sha`. An `observed_sha` alone is a
-/// branch tip nobody verified, so it never reaches review, push or auto-merge.
-fn verified_result_sha(run: &polyclave_proto::RunDto) -> HubResult<String> {
-    run.result_sha
-        .clone()
-        .filter(|sha| !sha.trim().is_empty())
+/// branch tip nobody verified, and a hand accept (`result_source='user'`) is a
+/// person's decision without a host receipt: neither reaches review, push or
+/// auto-merge.
+fn verified_result_sha(runs: &RunManager, run: &polyclave_proto::RunDto) -> HubResult<String> {
+    runs.r1_verified_sha(run)
+        .map_err(|_| Error::Policy)?
         .ok_or(Error::Policy)
 }
 
@@ -451,7 +452,7 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::Policy)?;
-            verified_result_sha(&run)
+            verified_result_sha(&self.runner.runs, &run)
         })
     }
 
@@ -474,7 +475,7 @@ impl WorkerReviseExecutor for HostWorkerReviseExecutor {
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::NotStarted)?
                 .map_err(|_| Error::Policy)?;
-            verified_result_sha(&run)
+            verified_result_sha(&self.runner.runs, &run)
         })
     }
 }
@@ -1042,8 +1043,11 @@ impl Hub {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| run.base_sha.clone());
         // Only the Run's R1-verified result is reviewed, pushed and armed.
-        let head_sha = verified_result_sha(&run).map_err(|_| {
-            PrGatePrepError::Invalid("run has no R1-verified result_sha to publish")
+        let head_sha = verified_result_sha(&self.runs, &run).map_err(|_| {
+            PrGatePrepError::Invalid(
+                "run has no R1-verified result_sha to publish: R1 must have accepted a receipt \
+                 for this exact SHA (a hand accept is not a receipt)",
+            )
         })?;
         if inputs
             .head_sha

@@ -6,8 +6,8 @@ use crate::{
 use polyclave_adapters::mcp::{AttemptScope, HostTools};
 use polyclave_os::canonical_real_path;
 use polyclave_proto::{
-    AttemptDto, ChangeTopic, RunDto, RunEvidenceDto, RunStatus, TestStatus, TurnMode, Vendor,
-    WriterCheck,
+    AttemptDto, ChangeTopic, ResultSource, RunDto, RunEvidenceDto, RunStatus, TestStatus, TurnMode,
+    Vendor, WriterCheck,
 };
 use polyclave_store::{
     decode_enum, enum_value, insert_run_origin_snapshot, new_id, now, parse_json, reserve_ticket,
@@ -422,6 +422,41 @@ impl RunManager {
             .commit_summary(&self.attempt_git(run, run.current_attempt)?, sha)
             .map(Some)
             .map_err(|_| Error::Invalid("mirror is unavailable for the selected commit"))
+    }
+
+    /// The Run's `result_sha` only when the host itself verified it.
+    ///
+    /// Provenance is read from the ledger, not from the message: R1 must have
+    /// classified the Run (`result_source='agent'`, a completed Run, no open
+    /// reason in `detail`) and the accepted Attempt must still hold an
+    /// accepted `submit_result` receipt for exactly that SHA. A human accept
+    /// keeps `result_source='user'` and stores no receipt, so it can close the
+    /// Run for a person but never feeds auto-publish, review or merge.
+    pub fn r1_verified_sha(&self, run: &RunDto) -> Result<Option<String>> {
+        let Some(sha) = run.result_sha.clone().filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
+        if run.result_source != Some(ResultSource::Agent)
+            || run.status != RunStatus::Done
+            || run.detail.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(attempt) = run.accepted_attempt_id else {
+            return Ok(None);
+        };
+        let receipt: Option<String> = self.store.read(move |db| {
+            Ok(db
+                .query_row(
+                    "SELECT json_extract(payload_json,'$.sha') FROM results
+                     WHERE attempt_id=?1 AND accepted=1",
+                    [attempt],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
+        })?;
+        Ok((receipt.as_deref() == Some(sha.as_str())).then_some(sha))
     }
 
     /// Approval evidence for the Run's current Attempt only: the accepted

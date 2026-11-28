@@ -26,12 +26,15 @@ const recorded = 'd'.repeat(40);
 const conflicted = 'e'.repeat(40);
 const claimOnly = 'f'.repeat(40);
 const olderSha = 'a'.repeat(40);
+const handAccepted = '9'.repeat(40);
 const runs = [
   run('r2', { status: 'done', result_sha: verified, observed_sha: verified, result_source: 'agent', accepted_attempt_id: 7 }),
   run('r1', { status: 'needs_review', observed_sha: tip, detail: 'mirror tip differs from the receipt' }),
   run('r3', { status: 'done', result_sha: recorded, observed_sha: recorded, result_source: 'agent', accepted_attempt_id: 8 }),
   run('r4', { status: 'done', result_sha: conflicted, observed_sha: conflicted, result_source: 'agent', accepted_attempt_id: 9 }),
   run('r5', { status: 'needs_review', observed_sha: claimOnly, detail: 'mirror tip differs from the receipt' }),
+  // Accepted by a person by hand: `result_sha` is set but R1 never receipted it.
+  run('r6', { status: 'done', result_sha: handAccepted, observed_sha: handAccepted, result_source: 'user', resolution: 'accept' }),
 ];
 const commit = sha => ({ commits: sha.slice(0, 12) + ' fix(config): normalise Windows path separators', files: '14\t3\tcrates/config/src/load.rs\n22\t0\tcrates/config/tests/windows_paths.rs' });
 const result = (sha, source, status, name, summary) => ({ sha, source, status, name, summary, recorded_at: '2026-11-27T00:06:00Z' });
@@ -75,6 +78,17 @@ const details = {
       test_sha: claimOnly,
       receipt_tests: 'my tests pass', receipt_tests_status: 'passed', receipt_not_done: null,
       test_results: [result(claimOnly, 'worker_claim', 'passed', '', 'my tests pass')],
+    },
+  },
+  // CI passed for this SHA, but a hand accept is not an R1 receipt: the row may
+  // not turn green on the strength of `result_sha` alone.
+  r6: {
+    run: runs[5], commit: commit(handAccepted),
+    evidence: {
+      attempt_no: 2, receipt_sha: null, worker_claim: null,
+      test_sha: handAccepted,
+      receipt_tests: null, receipt_tests_status: null, receipt_not_done: null,
+      test_results: [result(handAccepted, 'ci', 'passed', 'ci/rust-test', 'ci/rust-test: success')],
     },
   },
 };
@@ -254,6 +268,22 @@ try {
       assert.deepEqual(o5.wide, []); assert.equal(o5.body, width);
       measurements.push({ run: 'r5', width, theme, summary: r5.summary, tests: { state: r5.rows[1].state }, ...o5 });
       if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r5-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
+
+      // r6: a hand-accepted commit. Its CI passed, yet without an R1 receipt the
+      // tests row stays a reference and never turns green.
+      await page.locator('select.run-picker').selectOption('r6');
+      await page.waitForFunction(() => document.querySelector('[data-evidence-summary]')?.textContent.includes('tests recorded, not verified'));
+      const r6 = await card(page);
+      assert.equal(r6.summary, 'Commit not verified · tests recorded, not verified, for 9999999 · you accepted 9999999');
+      assert.doesNotMatch(r6.summary, /\b(passed|green)\b/i);
+      assert.deepEqual(r6.rows.map(r => r.state), ['Not verified', 'Reference only', 'Your decision']);
+      assert.equal(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'review');
+      assert.ok(r6.rows[0].text.includes('you accepted 9999999 by hand'));
+      assert.ok(r6.rows[1].text.includes('You accepted 9999999 by hand; R1 did not verify it, so its checks can never turn this row green.'));
+      const o6 = await overflow(page);
+      assert.deepEqual(o6.wide, []); assert.equal(o6.body, width);
+      measurements.push({ run: 'r6', width, theme, summary: r6.summary, tests: { state: r6.rows[1].state }, ...o6 });
+      if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r6-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
 
       assert.deepEqual(errors, []); assert.deepEqual(outside, []);
       console.log('approval card ' + width + 'x' + height + ' ' + theme + ' ok');

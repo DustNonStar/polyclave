@@ -659,9 +659,26 @@ fn setup_git_run_fixture(dir: &FsPath, hub: &Hub) -> (String, String, String) {
                 [&repo_str],
             )?;
             db.execute(
-                "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,result_sha,status,created_at,updated_at)
-                 VALUES(?1,'t-gate','hub','w-gate','req-gate',?2,'codex','gpt-5','do it',?3,'main',?4,?5,'done','now','now')",
+                "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,observed_sha,result_sha,status,accepted_attempt_id,result_source,created_at,updated_at)
+                 VALUES(?1,'t-gate','hub','w-gate','req-gate',?2,'codex','gpt-5','do it',?3,'main',?4,?5,?5,'done',71,'agent','now','now')",
                 params![run_clone, repo_str, mirror_str, base_clone, head_clone],
+            )?;
+            // The provenance the gate requires: the accepted Attempt, the turn
+            // that reported it, and R1's accepted receipt for exactly this SHA.
+            db.execute(
+                "INSERT INTO attempts(id,run_id,attempt_no,branch,worktree_path,status,created_at,ended_at)
+                 VALUES(71,?1,1,?2,?3,'completed','now','now')",
+                params![run_clone, format!("agent/{run_clone}/a1"), repo_str],
+            )?;
+            db.execute(
+                "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at,ended_at)
+                 VALUES(71,'w-gate',?1,71,'start','completed','authorized','host','boot','tok-71','now','now')",
+                [&run_clone],
+            )?;
+            db.execute(
+                "INSERT INTO results(run_id,attempt_id,turn_id,accepted,payload_json,created_at)
+                 VALUES(?1,71,71,1,?2,'now')",
+                params![run_clone, format!("{{\"sha\":\"{head_clone}\",\"tests\":null}}")],
             )?;
             polyclave_store::insert_run_origin_snapshot(
                 db,
@@ -717,9 +734,9 @@ async fn pr_gate_refuses_a_run_with_only_an_observed_sha() {
     // The revise executor's SHA source refuses an observed-only Run.
     let unverified = hub.runs.get("ra0000ad2").unwrap();
     assert_eq!(unverified.observed_sha.as_deref(), Some(head_sha.as_str()));
-    assert!(verified_result_sha(&unverified).is_err());
+    assert!(verified_result_sha(&hub.runs, &unverified).is_err());
     assert_eq!(
-        verified_result_sha(&hub.runs.get(&run_id).unwrap()).unwrap(),
+        verified_result_sha(&hub.runs, &hub.runs.get(&run_id).unwrap()).unwrap(),
         head_sha
     );
 
@@ -758,6 +775,160 @@ async fn pr_gate_refuses_a_run_with_only_an_observed_sha() {
         .unwrap();
     assert!(res.status().is_client_error(), "{}", res.status());
     assert!(pusher.pushed.lock().unwrap().is_empty());
+    hub.close().await;
+}
+
+/// A Run whose Worker pushed an attempt branch R1 never accepted: the commit
+/// carries no `Run-Id` trailer, there is no `submit_result` receipt, and the
+/// Run sits in `needs_review`.
+fn setup_unreceipted_run(dir: &FsPath, hub: &Hub, run_id: &str, attempt_id: i64) -> String {
+    let repo = polyclave_os::canonical_real_path(&dir.join("repo")).unwrap();
+    let mirrors = MirrorManager::new(dir).unwrap();
+    let run_git = mirrors.admit(&repo, run_id, "main").unwrap();
+    let attempt = polyclave_core::mirror::AttemptGit {
+        run: run_git.clone(),
+        number: 1,
+    };
+    let work = dir.join(format!("work-{run_id}"));
+    git_cmd(
+        dir,
+        &["clone", repo.to_str().unwrap(), work.to_str().unwrap()],
+    );
+    git_cmd(&work, &["config", "user.name", "Worker"]);
+    git_cmd(&work, &["config", "user.email", "worker@example.invalid"]);
+    std::fs::write(work.join("src/lib.rs"), "pub fn v() -> i32 { 3 }\n").unwrap();
+    git_cmd(&work, &["add", "."]);
+    git_cmd(&work, &["commit", "-m", "untrailed change"]);
+    let tip = git_cmd(&work, &["rev-parse", "HEAD"]);
+    git_cmd(
+        &work,
+        &[
+            "push",
+            run_git.mirror.to_str().unwrap(),
+            &format!("HEAD:{}", attempt.full_ref()),
+        ],
+    );
+    // R1 refuses this tip; nothing accepted it.
+    match mirrors.reconcile(&attempt) {
+        polyclave_core::classify::BranchCheck::Present {
+            problem: Some(_), ..
+        } => (),
+        other => panic!("expected an unexplained tip, got {other:?}"),
+    }
+
+    let repo_str = repo.to_str().unwrap().to_owned();
+    let mirror_str = run_git.mirror.to_str().unwrap().to_owned();
+    let base = run_git.base.clone();
+    let tip_row = tip.clone();
+    let id = run_id.to_owned();
+    hub.store
+        .write(move |db| {
+            db.execute(
+                "INSERT INTO sessions(id,name,role,vendor,repo_cwd,profile_id,provider_model,created_at)
+                 VALUES(?1,?1,'worker','codex',?2,'api','gpt-5','now')",
+                params![format!("w-{id}"), repo_str],
+            )?;
+            db.execute(
+                "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,observed_sha,status,current_attempt,created_at,updated_at)
+                 VALUES(?1,'t-gate','hub',?2,?3,?4,'codex','gpt-5','do it',?5,'main',?6,?7,'needs_review',1,'now','now')",
+                params![
+                    id.clone(),
+                    format!("w-{id}"),
+                    format!("req-{id}"),
+                    repo_str,
+                    mirror_str,
+                    base,
+                    tip_row
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO attempts(id,run_id,attempt_no,branch,worktree_path,status,created_at,ended_at)
+                 VALUES(?1,?2,1,?3,?4,'interrupted','now','now')",
+                params![
+                    attempt_id,
+                    id,
+                    format!("agent/{id}/a1"),
+                    format!("work-{id}")
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    tip
+}
+
+/// Item 2.1: a person may still accept a tip by hand, but that accept stores no
+/// receipt, so it can never authorize review, push or auto-merge.
+#[tokio::test]
+async fn pr_gate_refuses_a_hand_accepted_tip_that_r1_never_receipted() {
+    let (dir, hub, _rx) = test_hub().await;
+    let (_verified_run, _base, _head) = setup_git_run_fixture(dir.path(), &hub);
+    let run_id = "ra0000ad3";
+    let tip = setup_unreceipted_run(dir.path(), &hub, run_id, 72);
+
+    // The production path for a human decision: accept the mirror tip by hand.
+    let accepted = hub
+        .runs
+        .resolve_seen(
+            run_id,
+            polyclave_core::runs::Resolution::Accept,
+            "I read the diff and accept this by hand",
+            Some(&tip),
+        )
+        .unwrap();
+    assert_eq!(accepted.status, polyclave_proto::RunStatus::Done);
+    assert_eq!(
+        accepted.result_source,
+        Some(polyclave_proto::ResultSource::User)
+    );
+    assert_eq!(accepted.result_sha.as_deref(), Some(tip.as_str()));
+    let receipts: i64 = hub
+        .store
+        .read({
+            let run_id = run_id.to_owned();
+            move |db| {
+                Ok(db.query_row(
+                    "SELECT COUNT(*) FROM results WHERE run_id=?1 AND accepted=1",
+                    [&run_id],
+                    |r| r.get(0),
+                )?)
+            }
+        })
+        .unwrap();
+    assert_eq!(receipts, 0, "a hand accept stores no receipt");
+
+    // The gate's SHA source refuses it even though `result_sha` is set.
+    assert!(verified_result_sha(&hub.runs, &accepted).is_err());
+
+    let pusher = Arc::new(MockPusher::new());
+    let scm_state = Arc::new(MockScmState::default());
+    hub.set_scm(Arc::new(MockScmClient {
+        state: scm_state.clone(),
+        polled: None,
+    }));
+    hub.set_reviewer(Arc::new(MockReviewer));
+    hub.set_pusher(pusher.clone());
+    hub.set_default_reviewers(vec![ReviewerSpec {
+        vendor: Vendor::Claude,
+        model: "claude-sonnet-4-6".into(),
+    }]);
+    let app = daemon_router(&hub);
+    let res = app
+        .clone()
+        .oneshot(authed_post(
+            &format!("/api/pr-gates/{run_id}/run"),
+            json!({"repo_slug": "org/repo", "branch": "feat/hand-accepted", "head_sha": tip}),
+        ))
+        .await
+        .unwrap();
+    assert!(res.status().is_client_error(), "{}", res.status());
+    assert!(
+        pusher.pushed.lock().unwrap().is_empty(),
+        "nothing was pushed"
+    );
+    assert!(scm_state.submitted_reviews.lock().unwrap().is_empty());
+    assert!(scm_state.enabled_nodes.lock().unwrap().is_empty());
+    assert!(hub.store.list_pr_gates().unwrap().is_empty());
     hub.close().await;
 }
 

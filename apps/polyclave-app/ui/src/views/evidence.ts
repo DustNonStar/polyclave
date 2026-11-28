@@ -95,14 +95,20 @@ function tests(r: RunDto, ev: RunEvidenceDto | null, sha: string | null): [Evide
 
   const failed = checks.filter(t => t.status === 'failed');
   const pending = checks.filter(t => t.status === 'pending');
-  const verified = target !== null && r.result_sha === target;
+  // Green needs the host's own verification of exactly this SHA, not just a
+  // matching `result_sha`: a hand accept (`result_source='user'`) sets that
+  // field without an R1 receipt, so it can never turn this row green.
+  const r1Verified = r.result_source === 'agent';
+  const verified = r1Verified && target !== null && r.result_sha === target;
   const state = failed.length ? 'Failed' : pending.length ? 'Running' : verified ? 'Passed' : 'Reference only';
   const tone: EvidenceTone = failed.length ? 'fail' : pending.length ? 'review' : verified ? 'done' : 'review';
   const facts = checks.map(t =>
     sourceName(t) + ': ' + (t.name || 'check') + ' — ' + (STATUS_WORD[t.status] ?? t.status) + ' at ' + short(t.sha) + '.');
   if (!verified && !failed.length) {
-    facts.push('This is a reference, not a pass: the host has not verified ' + short(target ?? '') +
-      (r.result_sha ? ', it verified ' + short(r.result_sha) : ', nothing is verified yet') + '.');
+    facts.push(target !== null && r.result_sha === target && !r1Verified
+      ? 'You accepted ' + short(target) + ' by hand; R1 did not verify it, so its checks can never turn this row green.'
+      : 'This is a reference, not a pass: the host has not verified ' + short(target ?? '') +
+        (r.result_sha ? ', it verified ' + short(r.result_sha) : ', nothing is verified yet') + '.');
   }
   const claim0 = claims[0];
   if (claim0) {
