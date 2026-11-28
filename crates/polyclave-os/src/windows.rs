@@ -1,13 +1,14 @@
 use super::{wrapper_arguments, Pipes, ProcessIdentity, SpawnSpec};
+use std::collections::BTreeMap;
 use std::ffi::{c_void, OsStr};
 use std::fs::File;
 use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::os::windows::process::CommandExt;
+use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Command, ExitStatus};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Security::Authorization::{
@@ -48,50 +49,200 @@ fn ok(rc: i32) -> io::Result<()> {
 }
 
 pub(crate) struct CommandTree {
-    child: Child,
+    child: Option<OwnedHandle>,
     job: Option<OwnedHandle>,
 }
 
 impl CommandTree {
-    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &mut Command, stdout: File, stderr: File) -> io::Result<Self> {
+        let stdin = File::open("NUL")?;
+        let stdio = [stdin, stdout, stderr]
+            .iter()
+            .map(inheritable_handle)
+            .collect::<io::Result<Vec<_>>>()?;
+        let handles = [raw(&stdio[0]), raw(&stdio[1]), raw(&stdio[2])];
         let job = kill_on_close_job()?;
-        let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
-        let handle = child.as_raw_handle();
-        let launch = ok(unsafe { AssignProcessToJobObject(raw(&job), handle) }).and_then(|()| {
-            // std::process exposes the process handle, but closes the initial thread handle.
-            let status = unsafe { NtResumeProcess(handle) };
-            if status < 0 {
-                Err(io::Error::from_raw_os_error(
-                    unsafe { RtlNtStatusToDosError(status) } as i32,
-                ))
-            } else {
-                Ok(())
-            }
-        });
-        if let Err(error) = launch {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+        let jobs = [raw(&job)];
+        let mut attrs = Attributes::with_jobs(&handles, &jobs)?;
+        let mut si: STARTUPINFOEXW = unsafe { zeroed() };
+        si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        [
+            si.StartupInfo.hStdInput,
+            si.StartupInfo.hStdOutput,
+            si.StartupInfo.hStdError,
+        ] = handles;
+        si.lpAttributeList = attrs.ptr();
+
+        let mut line = Vec::new();
+        quote(command.get_program(), &mut line)?;
+        for arg in command.get_args() {
+            line.push(b' ' as u16);
+            quote(arg, &mut line)?;
         }
+        line.push(0);
+        // The broker starts with the host environment and selectively removes
+        // Git overrides. Preserve those removals in the explicit Unicode block.
+        let mut pairs: BTreeMap<_, _> = std::env::vars_os()
+            .map(|(key, value)| (key.to_string_lossy().to_uppercase(), (key, value)))
+            .collect();
+        for (key, value) in command.get_envs() {
+            let folded = key.to_string_lossy().to_uppercase();
+            if let Some(value) = value {
+                pairs.insert(folded, (key.to_owned(), value.to_owned()));
+            } else {
+                pairs.remove(&folded);
+            }
+        }
+        let env = environment_block(pairs.values().map(|(k, v)| (k.as_os_str(), v.as_os_str())))?;
+        let cwd = command.get_current_dir().map(|dir| w(dir.as_os_str()));
+        let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
+        ok(unsafe {
+            CreateProcessW(
+                w(command.get_program()).as_ptr(),
+                line.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                env.as_ptr().cast(),
+                cwd.as_ref().map_or(null(), |dir| dir.as_ptr()),
+                &si.StartupInfo,
+                &mut pi,
+            )
+        })?;
+        let child = owned(pi.hProcess)?;
+        drop(owned(pi.hThread)?);
         Ok(Self {
-            child,
+            child: Some(child),
             job: Some(job),
         })
     }
 
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let status = self.child.try_wait()?;
-        if status.is_some() {
-            self.job.take();
+        let child = self.child.as_ref().expect("running command");
+        match unsafe { WaitForSingleObject(raw(child), 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_SIGNALED => {
+                let mut code = 0;
+                ok(unsafe { GetExitCodeProcess(raw(child), &mut code) })?;
+                self.drain_job()?;
+                Ok(Some(ExitStatus::from_raw(code)))
+            }
+            _ => Err(io::Error::last_os_error()),
         }
-        Ok(status)
+    }
+
+    fn drain_job(&mut self) -> io::Result<()> {
+        let Some(job) = self.job.as_ref() else {
+            return Ok(());
+        };
+        let mut descendants = job_members(job)?;
+        ok(unsafe { TerminateJobObject(raw(job), 125) })?;
+        descendants.extend(job_members(job)?);
+        for process in self.child.take().into_iter().chain(descendants) {
+            if unsafe { WaitForSingleObject(raw(&process), FOREVER) } != WAIT_SIGNALED {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        // Include descendants created between the handle snapshot and termination.
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            ok(unsafe {
+                QueryInformationJobObject(
+                    raw(job),
+                    JobObjectBasicAccountingInformation,
+                    (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    null_mut(),
+                )
+            })?;
+            if accounting.ActiveProcesses == 0 {
+                break;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        }
+        self.job.take();
+        Ok(())
     }
 }
 
 impl Drop for CommandTree {
     fn drop(&mut self) {
-        self.job.take();
-        let _ = self.child.wait();
+        if self.drain_job().is_err() {
+            // The mirror cannot be reconciled safely if writer exclusion is unknown.
+            // Closing the Job also requests termination during fail-closed shutdown.
+            self.job.take();
+            std::process::abort();
+        }
+    }
+}
+
+fn inheritable_handle(file: &File) -> io::Result<OwnedHandle> {
+    let process = unsafe { GetCurrentProcess() };
+    let mut handle = null_mut();
+    ok(unsafe {
+        DuplicateHandle(
+            process,
+            file.as_raw_handle(),
+            process,
+            &mut handle,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    })?;
+    owned(handle)
+}
+
+fn job_members(job: &OwnedHandle) -> io::Result<Vec<OwnedHandle>> {
+    const HEADER: usize = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+    let mut buffer = vec![0usize; 16];
+    loop {
+        let queried = ok(unsafe {
+            QueryInformationJobObject(
+                raw(job),
+                JobObjectBasicProcessIdList,
+                buffer.as_mut_ptr().cast(),
+                std::mem::size_of_val(buffer.as_slice()) as u32,
+                null_mut(),
+            )
+        });
+        match queried {
+            Err(error) if error.raw_os_error() == Some(ERROR_MORE_DATA as i32) => {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            result => result?,
+        }
+        let list = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+        if list.NumberOfAssignedProcesses > list.NumberOfProcessIdsInList {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        let start = HEADER / size_of::<usize>();
+        let mut handles = Vec::new();
+        for &pid in &buffer[start..start + list.NumberOfProcessIdsInList as usize] {
+            let handle = owned(unsafe {
+                OpenProcess(
+                    PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                    0,
+                    pid as u32,
+                )
+            });
+            match handle {
+                Ok(handle) => {
+                    let mut member = 0;
+                    ok(unsafe { IsProcessInJob(raw(&handle), raw(job), &mut member) })?;
+                    if member != 0 {
+                        handles.push(handle);
+                    }
+                }
+                Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => (),
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(handles);
     }
 }
 
@@ -188,28 +339,41 @@ struct Attributes {
 }
 impl Attributes {
     fn new(handles: &[HANDLE]) -> io::Result<Self> {
+        Self::with_jobs(handles, &[])
+    }
+
+    fn with_jobs(handles: &[HANDLE], jobs: &[HANDLE]) -> io::Result<Self> {
+        let count = if jobs.is_empty() { 1 } else { 2 };
         let mut bytes = 0;
-        unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut bytes) };
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut bytes) };
         if bytes == 0 {
             return Err(io::Error::last_os_error());
         }
         let mut mem = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let list = mem.as_mut_ptr().cast();
-        ok(unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut bytes) })?;
-        let result = Self { mem };
+        ok(unsafe { InitializeProcThreadAttributeList(list, count, 0, &mut bytes) })?;
+        let mut result = Self { mem };
+        result.set_handles(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles)?;
+        if !jobs.is_empty() {
+            result.set_handles(PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs)?;
+        }
+        Ok(result)
+    }
+
+    fn set_handles(&mut self, attribute: u32, handles: &[HANDLE]) -> io::Result<()> {
         ok(unsafe {
             UpdateProcThreadAttribute(
-                list,
+                self.ptr(),
                 0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                attribute as usize,
                 handles.as_ptr().cast(),
                 std::mem::size_of_val(handles),
                 null_mut(),
                 null(),
             )
-        })?;
-        Ok(result)
+        })
     }
+
     fn ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
         self.mem.as_mut_ptr().cast()
     }
@@ -246,26 +410,7 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
     line.push(0);
     let mut pairs = spec.env.clone();
     pairs.sort_by_key(|(key, _)| key.to_string_lossy().to_uppercase());
-    let mut env = Vec::<u16>::new();
-    for (key, value) in &pairs {
-        if key.is_empty()
-            || key.encode_wide().any(|c| c == 0 || c == b'=' as u16)
-            || value.encode_wide().any(|c| c == 0)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid environment entry",
-            ));
-        }
-        env.extend(key.encode_wide());
-        env.push(b'=' as u16);
-        env.extend(value.encode_wide());
-        env.push(0);
-    }
-    if env.is_empty() {
-        env.push(0);
-    }
-    env.push(0);
+    let env = environment_block(pairs.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())))?;
 
     let job = kill_on_close_job()?;
     let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
@@ -308,6 +453,33 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> io::Result<Pipes> {
         stdout: Box::new(File::from(output_host)),
         stderr: Box::new(File::from(error_host)),
     })
+}
+
+fn environment_block<'a>(
+    pairs: impl IntoIterator<Item = (&'a OsStr, &'a OsStr)>,
+) -> io::Result<Vec<u16>> {
+    let mut env = Vec::<u16>::new();
+    for (key, value) in pairs {
+        if key.is_empty()
+            || key.encode_wide().any(|c| c == 0 || c == b'=' as u16)
+            || value.encode_wide().any(|c| c == 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid environment entry",
+            ));
+        }
+        env.extend(key.encode_wide());
+        env.push(b'=' as u16);
+        env.extend(value.encode_wide());
+        env.push(0);
+    }
+    if env.is_empty() {
+        env.push(0);
+    }
+    env.push(0);
+
+    Ok(env)
 }
 
 fn kill_on_close_job() -> io::Result<OwnedHandle> {
@@ -388,8 +560,6 @@ pub(crate) fn kill_process_tree(id: &ProcessIdentity) -> io::Result<()> {
 #[link(name = "ntdll")]
 extern "system" {
     fn NtQuerySystemInformation(class: u32, data: *mut c_void, len: u32, used: *mut u32) -> i32;
-    fn NtResumeProcess(process: HANDLE) -> i32;
-    fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
 #[repr(C)]

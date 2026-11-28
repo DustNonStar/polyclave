@@ -221,8 +221,12 @@ async fn chat(State(app): State<App>, Path(id): Path<String>, Json(c): Json<Chat
     Ok(Json(json!({"accepted":true})))
 }
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Reply {
-    blocking(move || app.runner.cancel(&id)).await?;
-    Ok(Json(json!({"accepted":true})))
+    blocking(move || {
+        app.runner.cancel(&id)?;
+        app.runner.wait_for_cancelled_staging(&id)
+    })
+    .await?;
+    Ok(Json(json!({"accepted":true,"broker_stopped":true})))
 }
 async fn retry(State(app): State<App>, Path(id): Path<String>) -> Reply {
     if blocking({

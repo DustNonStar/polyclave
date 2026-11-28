@@ -9,8 +9,11 @@ use std::process::{Child, Command, Stdio};
 pub(crate) struct CommandTree(Option<Child>);
 
 impl CommandTree {
-    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &mut Command, stdout: File, stderr: File) -> io::Result<Self> {
         command
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
             .process_group(0)
             .spawn()
             .map(|child| Self(Some(child)))

@@ -105,9 +105,30 @@ impl TurnRunner {
 
     pub fn cancel(&self, id: &str) -> Result<()> {
         let jobs = self.active.lock().map_err(|_| Error::Closed)?;
-        jobs.get(id)
-            .ok_or(Error::ConflictError)?
-            .store(true, Ordering::Release);
+        let cancel = jobs.get(id).ok_or(Error::ConflictError)?;
+        cancel.store(true, Ordering::Release);
+        let id = id.to_owned();
+        self.runs.store.write(move |db| {
+            db.execute(
+                "UPDATE turns SET mcp_revoked=1
+                 WHERE run_id=?1 AND status='running' AND mode!='consult'",
+                [id],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Wait for a revoked broker call to finish its Git cleanup. The runner
+    /// settles the Worker independently of this publication barrier.
+    pub fn wait_for_cancelled_staging(&self, id: &str) -> Result<()> {
+        let run = self.runs.get(id)?;
+        if matches!(run.vendor, Vendor::Codex | Vendor::Claude) {
+            self.runs
+                .git
+                .with_repo(Path::new(&run.repo_cwd), |_| Ok(()))
+                .map_err(|_| Error::Invalid("Cannot confirm host staging has stopped"))?;
+        }
         Ok(())
     }
 

@@ -29,10 +29,8 @@ pub fn cancellable_output(
     check()?;
     let stdout = scratch.join("command.stdout");
     let stderr = scratch.join("command.stderr");
-    command
-        .stdout(File::create(&stdout)?)
-        .stderr(File::create(&stderr)?);
-    let mut child = platform::CommandTree::spawn(&mut command)?;
+    let mut child =
+        platform::CommandTree::spawn(&mut command, File::create(&stdout)?, File::create(&stderr)?)?;
     let status = loop {
         check()?;
         if let Some(status) = child.try_wait()? {
