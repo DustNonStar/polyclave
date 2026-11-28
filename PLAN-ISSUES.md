@@ -423,3 +423,21 @@ There was no configured Tailscale origin anywhere in the workspace, so a pairing
 - `views/flows.ts` token dialog is role-aware: on an `https` page it asks for the device token the link issued (the loopback capability token is printed on the host and is useless there), and the copy explains how to get a fresh link.
 
 New tests: `pairing_qr_points_at_the_configured_tailscale_origin` (origin validation, null link without an origin, link with one, and the exchange accepted from that very origin) and `tests/pairing-flow.mjs` (1440×900 and 375×812: scan → in-page exchange → secret stripped → device token authorizes API and SSE → a replayed link is refused by the host and keeps the existing token → revocation → re-pair). A hash-only navigation is a same-document change, so the test gives each visit its own query string; without that the page never reloads and the flow is not really exercised.
+
+## [detail] Batch 3 stopped after Item 3.2; Item 3.3 is partial on `wip/human-approval`
+
+**What happened.** Items 3.1 and 3.2 are committed on `fix/hardening-batch3-phone-approval` (`cad76dc`, `3393d2e`) and are green. Item 3.3 was started and runs out of quota mid-way, so it was moved to the local branch `wip/human-approval` (`e744792`, never pushed) per `AGENTS.md` rule 8, and this branch was returned to the exact 3.2 head. Item 3.4 was not started.
+
+**Why.** The audit's Item 3.3 needs a new `pr_gates.status` value, and the status column carries a `CHECK` that SQLite cannot extend in place. The backend was built that far: `PrGateStatus::AwaitingHumanApproval`, an in-place `pr_gates` rebuild that parks `pr_reviews` rows while the parent is replaced (foreign keys are enforced), `Store::await_human_approval` / `Store::approve_pr_gate` (both compare the SHA inside the write), `run_pr_gate` stopping at the wait instead of arming, and `pr_gate::approve_pr_gate` + `arm_and_enable` as the only path to `enableAutoMerge`. Five gate tests were updated to drive the approval before asserting the armed state. Six of them still fail, and the cause is a genuine design question this item has to answer, not a typo:
+
+`approve_pr_gate` re-reads the PR from GitHub and refuses to arm when GitHub's reported head is not the approved SHA. The gate fixtures' stand-in GitHub returns a fixed placeholder head (`"head_sha_placeholder"`), so every approval is refused with `Policy`. Either the fixture must report the head the gate pushed (honest: a real PR's head is the pushed SHA), or the remote round-trip must be dropped and the binding left to the atomic ledger check plus `enableAutoMerge(expectedHeadOid)`. That decision changes what the approval guarantees, so it belongs to the reviewer rather than to a quota-driven guess.
+
+**What is left for 3.3.** Decide the above; the `PrGateDiffDto` + `GET /api/pr-gates/{id}/diff` (bounded, truncation shown) endpoint; `POST /api/pr-gates/{id}/approve`; the approval card (diff, per-SHA tests, not-done items, `Approve <sha>` bound to that SHA); `proto.ts` regeneration; the 375 px browser test (approve B, refuse stale A, zero merge side-effects before approval); `DESIGN.md`; screenshots.
+
+**What is left for 3.4.** Not started: 401 recovery after a daemon restart (re-bootstrap in the Tauri shell, a clear reconnect prompt in the browser) and clearing `S.live` on `resync_required`.
+
+**Options for the reviewer** (the failing six tests are all `pr_gate::tests`, none of them weakens an assertion: each now drives `human_approve(..)` and asserts `AwaitingHumanApproval` before it):
+
+- **A (recommended):** teach the fake GitHub to report the gate's real `head_sha`, keep the remote check, and finish 3.3 as planned. Pros: the approval is bound to what GitHub really serves, which is the audit's intent ("explicit human POST approving that exact SHA may trigger merge"). Cons: the fixture grows a mutable head field; one more round of work.
+- **B:** drop the remote round-trip, rely on the atomic ledger comparison plus `enableAutoMerge(expectedHeadOid)`. Pros: smallest change, no fixture work. Cons: a branch that moved after the person looked at it is only caught by GitHub's own lease, not by the host.
+- **C:** leave the state and the approval endpoint but keep `run_pr_gate` arming as it does today behind a flag until 3.3 is finished. Contradicts the audit; not recommended.
