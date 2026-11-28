@@ -27,6 +27,7 @@ const conflicted = 'e'.repeat(40);
 const claimOnly = 'f'.repeat(40);
 const olderSha = 'a'.repeat(40);
 const handAccepted = '9'.repeat(40);
+const partial = '7'.repeat(40);
 const runs = [
   run('r2', { status: 'done', result_sha: verified, observed_sha: verified, result_source: 'agent', accepted_attempt_id: 7 }),
   run('r1', { status: 'needs_review', observed_sha: tip, detail: 'mirror tip differs from the receipt' }),
@@ -35,6 +36,8 @@ const runs = [
   run('r5', { status: 'needs_review', observed_sha: claimOnly, detail: 'mirror tip differs from the receipt' }),
   // Accepted by a person by hand: `result_sha` is set but R1 never receipted it.
   run('r6', { status: 'done', result_sha: handAccepted, observed_sha: handAccepted, result_source: 'user', resolution: 'accept' }),
+  // A partial check-run list: the host's marker keeps the row non-green.
+  run('r7', { status: 'done', result_sha: partial, observed_sha: partial, result_source: 'agent', accepted_attempt_id: 10 }),
 ];
 const commit = sha => ({ commits: sha.slice(0, 12) + ' fix(config): normalise Windows path separators', files: '14\t3\tcrates/config/src/load.rs\n22\t0\tcrates/config/tests/windows_paths.rs' });
 const result = (sha, source, status, name, summary) => ({ sha, source, status, name, summary, recorded_at: '2026-11-27T00:06:00Z' });
@@ -78,6 +81,20 @@ const details = {
       test_sha: claimOnly,
       receipt_tests: 'my tests pass', receipt_tests_status: 'passed', receipt_not_done: null,
       test_results: [result(claimOnly, 'worker_claim', 'passed', '', 'my tests pass')],
+    },
+  },
+  // The host could only read part of the check-run list, so it recorded its
+  // pending marker; nothing may turn green on an incomplete list.
+  r7: {
+    run: runs[6], commit: commit(partial),
+    evidence: {
+      attempt_no: 2, receipt_sha: partial, worker_claim: null,
+      test_sha: partial,
+      receipt_tests: null, receipt_tests_status: null, receipt_not_done: null,
+      test_results: [
+        result(partial, 'ci', 'passed', 'ci/unit', 'ci/unit: success'),
+        result(partial, 'ci', 'pending', 'polyclave/check-runs', 'polyclave/check-runs: in_progress'),
+      ],
     },
   },
   // CI passed for this SHA, but a hand accept is not an R1 receipt: the row may
@@ -284,6 +301,19 @@ try {
       assert.deepEqual(o6.wide, []); assert.equal(o6.body, width);
       measurements.push({ run: 'r6', width, theme, summary: r6.summary, tests: { state: r6.rows[1].state }, ...o6 });
       if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r6-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
+
+      // r7: a partial check-run list never turns the tests row green.
+      await page.locator('select.run-picker').selectOption('r7');
+      await page.waitForFunction(() => document.querySelector('[data-evidence-summary]')?.textContent.includes('tests still running'));
+      const r7 = await card(page);
+      assert.equal(r7.summary, 'Commit verified · tests still running for 7777777 · not judged by you');
+      assert.equal(r7.rows[1].state, 'Running');
+      assert.equal(await page.locator('[data-evidence="tests"] .pill-tag').getAttribute('data-tone'), 'review');
+      assert.ok(r7.rows[1].text.includes('could not read every check run for this commit'));
+      assert.ok(r7.rows[1].text.includes('CI: ci/unit — passed at 7777777.'));
+      const o7 = await overflow(page);
+      assert.deepEqual(o7.wide, []); assert.equal(o7.body, width);
+      measurements.push({ run: 'r7', width, theme, summary: r7.summary, tests: { state: r7.rows[1].state }, ...o7 });
 
       assert.deepEqual(errors, []); assert.deepEqual(outside, []);
       console.log('approval card ' + width + 'x' + height + ' ' + theme + ' ok');

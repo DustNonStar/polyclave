@@ -2,11 +2,13 @@
 //! (`[agent-reviewer · …]`), updating `scm_observer_cursors`, and forwarding
 //! external events into the Hub inbox (`change_log` + triage).
 use crate::{
-    scm::{is_agent_reviewer_marker, CheckRunInfo, ScmClient, ScmError},
+    scm::{
+        is_agent_reviewer_marker, CheckRunInfo, PrChecksAndComments, PrState, ScmClient, ScmError,
+    },
     Error, Result,
 };
-use polyclave_proto::{ChangeTopic, PrGateStatus, TestResultSource, TestStatus};
-use polyclave_store::{NewTestResult, ScmCursor, Store};
+use polyclave_proto::{ChangeTopic, PrGateDto, PrGateStatus, TestResultSource, TestStatus};
+use polyclave_store::{NewTestResult, ScmCursor, Store, TestResultChange};
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
@@ -43,6 +45,12 @@ fn check_status(check: &CheckRunInfo) -> TestStatus {
         _ => TestStatus::Pending,
     }
 }
+
+/// The check-run name and id of the marker written when a partial check-run
+/// list is all the host could read for a SHA. It is a `pending` CI row, so the
+/// approval card can never turn green on an incomplete list.
+pub const INCOMPLETE_CHECKS_NAME: &str = "polyclave/check-runs";
+pub const INCOMPLETE_CHECKS_ID: &str = "incomplete";
 
 #[derive(Clone)]
 pub struct ScmObserver {
@@ -134,6 +142,76 @@ impl ScmObserver {
         true
     }
 
+    /// Records the check runs for exactly the SHA this Run's evidence is about
+    /// and returns the rows whose status really moved.
+    ///
+    /// Nothing is recorded while the Run has no SHA, and nothing is recorded for
+    /// a partial check-run list: a missing page could hide the failing check, so
+    /// an incomplete list replaces the SHA's evidence with a single pending
+    /// marker instead of pretending the set is complete.
+    fn record_check_runs(
+        &self,
+        gate: &PrGateDto,
+        pr_state: &PrState,
+        details: &PrChecksAndComments,
+    ) -> Result<(Vec<TestResultChange>, bool)> {
+        let test_sha = self
+            .store
+            .run_test_sha(&gate.run_id)
+            .map_err(map_store_err)?;
+        if test_sha.as_deref() != Some(pr_state.head_sha.as_str()) {
+            return Ok((Vec::new(), false));
+        }
+        if !details.checks_complete {
+            let marker = NewTestResult {
+                run_id: gate.run_id.clone(),
+                sha: pr_state.head_sha.clone(),
+                source: TestResultSource::Ci,
+                name: INCOMPLETE_CHECKS_NAME.into(),
+                check_id: INCOMPLETE_CHECKS_ID.into(),
+                status: TestStatus::Pending,
+                summary: "the host could not read every check run for this commit".into(),
+            };
+            let changes = self
+                .store
+                .record_test_results(vec![marker])
+                .map_err(map_store_err)?;
+            return Ok((changes, true));
+        }
+        let rows: Vec<NewTestResult> = details
+            .check_runs
+            .iter()
+            .map(|check| NewTestResult {
+                run_id: gate.run_id.clone(),
+                sha: pr_state.head_sha.clone(),
+                source: TestResultSource::Ci,
+                name: check.name.clone(),
+                check_id: check.id.to_string(),
+                status: check_status(check),
+                summary: format!(
+                    "{}: {}",
+                    check.name,
+                    check.conclusion.as_deref().unwrap_or(&check.status)
+                ),
+            })
+            .collect();
+        let changes = self
+            .store
+            .record_test_results(rows)
+            .map_err(map_store_err)?;
+        // A complete list supersedes an earlier "incomplete" marker.
+        self.store
+            .clear_test_result(
+                &gate.run_id,
+                &pr_state.head_sha,
+                TestResultSource::Ci,
+                INCOMPLETE_CHECKS_NAME,
+                INCOMPLETE_CHECKS_ID,
+            )
+            .map_err(map_store_err)?;
+        Ok((changes, true))
+    }
+
     /// Polls all active `pr_gates` once and returns newly observed events.
     pub async fn poll_once(&self) -> Result<Vec<ObservedEvent>> {
         let gates = self.store.list_pr_gates().map_err(map_store_err)?;
@@ -163,6 +241,28 @@ impl ScmObserver {
                 .get_pr_state(&gate.repo_slug, pr_number as u64)
                 .await
                 .map_err(map_scm_err)?;
+
+            // Check runs are read even when the PR is already merged: a PR that
+            // was merged before the first poll still has evidence for its final
+            // SHA, and without it the card would show "no result recorded".
+            let details = self
+                .scm
+                .list_pr_checks_and_comments(&gate.repo_slug, pr_number as u64, &pr_state.head_sha)
+                .await
+                .map_err(map_scm_err)?;
+            let (test_changes, recorded_for_sha) =
+                self.record_check_runs(&gate, &pr_state, &details)?;
+            if !test_changes.is_empty() {
+                let payload = serde_json::json!({
+                    "kind": "test_results",
+                    "sha": pr_state.head_sha,
+                    "changes": test_changes,
+                });
+                let gate_id = gate.id.clone();
+                let _ = self.store.write(move |db| {
+                    Store::append_change(db, ChangeTopic::PrGate, &gate_id, &payload)
+                });
+            }
 
             if pr_state.merged {
                 let _ = self
@@ -204,12 +304,6 @@ impl ScmObserver {
                 }
             }
 
-            let details = self
-                .scm
-                .list_pr_checks_and_comments(&gate.repo_slug, pr_number as u64, &pr_state.head_sha)
-                .await
-                .map_err(map_scm_err)?;
-
             // Reviews and comments are numbered in separate GitHub sequences, so
             // each has its own cursor; sharing one would hide the smaller ids.
             let last_review_id = self
@@ -246,35 +340,6 @@ impl ScmObserver {
                         events.push(ev);
                     }
                 }
-            }
-
-            // Record every check run for exactly the SHA this Run's evidence is
-            // about. A later push carries a different SHA, so it can add rows but
-            // never rewrite these. Nothing is recorded while the Run has no SHA.
-            let test_sha = self
-                .store
-                .run_test_sha(&gate.run_id)
-                .map_err(map_store_err)?;
-            if test_sha.as_deref() == Some(pr_state.head_sha.as_str()) {
-                let rows: Vec<NewTestResult> = details
-                    .check_runs
-                    .iter()
-                    .map(|check| NewTestResult {
-                        run_id: gate.run_id.clone(),
-                        sha: pr_state.head_sha.clone(),
-                        source: TestResultSource::Ci,
-                        name: check.name.clone(),
-                        status: check_status(check),
-                        summary: format!(
-                            "{}: {}",
-                            check.name,
-                            check.conclusion.as_deref().unwrap_or(&check.status)
-                        ),
-                    })
-                    .collect();
-                self.store
-                    .record_test_results(rows)
-                    .map_err(map_store_err)?;
             }
 
             let mut max_seen_id = cursor.last_comment_id.unwrap_or(0);
@@ -319,32 +384,73 @@ impl ScmObserver {
                 cursor.last_comment_id = Some(max_seen_id);
             }
 
-            if cursor.last_check_sha.as_deref() != Some(&pr_state.head_sha) {
-                for check in details.check_runs {
-                    if matches!(
+            // A failing check is reported once per (check, transition). A check
+            // that was queued for this SHA and only now failed is a new
+            // transition, so the same SHA can still produce a later notification.
+            for change in &test_changes {
+                if change.to != TestStatus::Failed {
+                    continue;
+                }
+                let transition = format!(
+                    "{}->{}",
+                    change.from.map(TestStatus::as_str).unwrap_or("new"),
+                    change.to.as_str()
+                );
+                let ev = ObservedEvent {
+                    gate_id: gate.id.clone(),
+                    repo_slug: gate.repo_slug.clone(),
+                    pr_number,
+                    kind: ObservedEventKind::CiFailure,
+                    summary: format!(
+                        "PR #{pr_number} ({}) check '{}' ({}) failed at {}",
+                        gate.repo_slug, change.name, transition, pr_state.head_sha
+                    ),
+                };
+                if self.emit_event(
+                    policy.as_ref(),
+                    &ev,
+                    &format!(
+                        "ci:{}:{}:{}",
+                        change.check_id, pr_state.head_sha, transition
+                    ),
+                    None,
+                ) {
+                    events.push(ev);
+                }
+            }
+            // A Run with no evidence SHA of its own has no rows to diff, so the
+            // first sighting of a failing check is still reported once per SHA.
+            // Once rows exist, the transition path above is the only notifier,
+            // and it can fire again when a queued check fails later.
+            if !recorded_for_sha && cursor.last_check_sha.as_deref() != Some(&pr_state.head_sha) {
+                for check in &details.check_runs {
+                    if !matches!(
                         check.conclusion.as_deref(),
                         Some("failure" | "timed_out" | "action_required")
                     ) {
-                        let ev = ObservedEvent {
-                            gate_id: gate.id.clone(),
-                            repo_slug: gate.repo_slug.clone(),
-                            pr_number,
-                            kind: ObservedEventKind::CiFailure,
-                            summary: format!(
-                                "PR #{pr_number} ({}) check '{}' failed ({:?}) at {}",
-                                gate.repo_slug, check.name, check.conclusion, pr_state.head_sha
-                            ),
-                        };
-                        if self.emit_event(
-                            policy.as_ref(),
-                            &ev,
-                            &format!("ci:{}:{}", check.id, pr_state.head_sha),
-                            None,
-                        ) {
-                            events.push(ev);
-                        }
+                        continue;
+                    }
+                    let ev = ObservedEvent {
+                        gate_id: gate.id.clone(),
+                        repo_slug: gate.repo_slug.clone(),
+                        pr_number,
+                        kind: ObservedEventKind::CiFailure,
+                        summary: format!(
+                            "PR #{pr_number} ({}) check '{}' failed ({:?}) at {}",
+                            gate.repo_slug, check.name, check.conclusion, pr_state.head_sha
+                        ),
+                    };
+                    if self.emit_event(
+                        policy.as_ref(),
+                        &ev,
+                        &format!("ci:{}:{}", check.id, pr_state.head_sha),
+                        None,
+                    ) {
+                        events.push(ev);
                     }
                 }
+            }
+            if cursor.last_check_sha.as_deref() != Some(&pr_state.head_sha) {
                 cursor.last_check_sha = Some(pr_state.head_sha);
             }
 
@@ -511,6 +617,185 @@ mod tests {
             .unwrap(),
         );
         ScmObserver::new(store.clone(), scm, Some("hub".into()))
+    }
+
+    /// GitHub stand-in for the check-run tests: two pages of check runs, a
+    /// merge flag and a switch that moves one check from queued to failed.
+    struct PagedGhState {
+        merged: AtomicBool,
+        second_page_failure: AtomicBool,
+        /// `(name, id, status, conclusion)` for page 1 and page 2.
+        pages: std::sync::Mutex<Vec<Vec<serde_json::Value>>>,
+    }
+
+    async fn spawn_paged_gh() -> (String, Arc<PagedGhState>, tokio::task::JoinHandle<()>) {
+        let state = Arc::new(PagedGhState {
+            merged: AtomicBool::new(false),
+            second_page_failure: AtomicBool::new(false),
+            pages: std::sync::Mutex::new(vec![
+                vec![json!({
+                    "id": 1001, "name": "ci/queued", "status": "in_progress",
+                    "conclusion": null, "html_url": null
+                })],
+                Vec::new(),
+            ]),
+        });
+        let pages = state.clone();
+        let router = Router::new()
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}",
+                get(|State(st): State<Arc<PagedGhState>>| async move {
+                    let merged = st.merged.load(Ordering::SeqCst);
+                    Json(json!({
+                        "number": 42, "node_id": "PR_node_42",
+                        "state": if merged { "closed" } else { "open" },
+                        "merged": merged, "mergeable": true, "mergeable_state": "clean",
+                        "html_url": "https://github.com/org/repo/pull/42",
+                        "head": { "sha": PAGED_SHA }, "auto_merge": null
+                    }))
+                }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                get(
+                    |State(st): State<Arc<PagedGhState>>,
+                     axum::extract::Query(q): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
+                        let page: usize = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+                        let pages = st.pages.lock().unwrap();
+                        let runs = pages.get(page - 1).cloned().unwrap_or_default();
+                        // Page 1 always claims more pages follow, so the client
+                        // must ask again instead of stopping at the first answer.
+                        let total: usize = pages.iter().map(|p| p.len()).sum();
+                        let mut runs = runs;
+                        if st.second_page_failure.load(Ordering::SeqCst) {
+                            for run in runs.iter_mut() {
+                                if run["id"] == 2002 {
+                                    run["status"] = json!("completed");
+                                    run["conclusion"] = json!("failure");
+                                }
+                            }
+                        }
+                        Json(json!({ "total_count": total, "check_runs": runs }))
+                    },
+                ),
+            )
+            .route(
+                "/repos/{owner}/{repo}/issues/{num}/comments",
+                get(|| async { Json(json!([])) }),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{num}/reviews",
+                get(|| async { Json(json!([])) }),
+            )
+            .with_state(pages);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    /// The PR head used by the paged GitHub stand-in: a full commit id, which is
+    /// what a recorded check-run row is keyed by.
+    const PAGED_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A ledger where the Run's evidence SHA is the PR's head, so check runs are
+    /// recorded.
+    fn store_with_sha() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("ledger")).unwrap();
+        create_gate(&store);
+        store
+            .write(|db| {
+                db.execute(
+                    "UPDATE runs SET observed_sha=?1 WHERE id='run1'",
+                    [PAGED_SHA],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn every_check_run_page_is_read_so_a_page_two_failure_is_evidence() {
+        let (_dir, store) = store_with_sha();
+        let (base_url, state, server) = spawn_paged_gh().await;
+        state.pages.lock().unwrap()[1] = vec![json!({
+            "id": 2002, "name": "ci/slow", "status": "in_progress",
+            "conclusion": null, "html_url": null
+        })];
+        let observer = observer_for(&store, &base_url);
+
+        // First poll records both pages; nothing has failed yet.
+        let events = observer.poll_once().await.expect("first poll");
+        assert!(events.is_empty(), "{events:?}");
+        let rows = store.test_results_for_sha("run1", PAGED_SHA).unwrap();
+        assert_eq!(rows.len(), 2, "both pages were recorded: {rows:?}");
+        assert!(rows.iter().all(|r| r.status == TestStatus::Pending));
+
+        // The page-2 check failing later is seen for the same SHA.
+        state.second_page_failure.store(true, Ordering::SeqCst);
+        let events = observer.poll_once().await.unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].summary.contains("ci/slow"), "{:?}", events[0]);
+        assert!(
+            events[0].summary.contains("pending->failed"),
+            "{:?}",
+            events[0]
+        );
+        let rows = store.test_results_for_sha("run1", PAGED_SHA).unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.name == "ci/slow" && r.status == TestStatus::Failed));
+
+        // The change is published for the card to pick up.
+        let payloads: Vec<String> = match store.changes(None).unwrap() {
+            polyclave_store::Changes::Events(events) => events
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap_or_default())
+                .collect(),
+            polyclave_store::Changes::ResyncRequired => panic!("truncated change log"),
+        };
+        assert!(
+            payloads
+                .iter()
+                .any(|p| p.contains("pr_gate") && p.contains("test_results")),
+            "{payloads:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_pr_merged_before_the_first_poll_still_records_its_checks() {
+        let (_dir, store) = store_with_sha();
+        let (base_url, state, server) = spawn_paged_gh().await;
+        state.merged.store(true, Ordering::SeqCst);
+        {
+            let mut pages = state.pages.lock().unwrap();
+            pages[0] = vec![json!({
+                "id": 1001, "name": "ci/queued", "status": "completed",
+                "conclusion": "success", "html_url": null
+            })];
+            pages[1] = vec![json!({
+                "id": 2002, "name": "ci/slow", "status": "completed",
+                "conclusion": "success", "html_url": null
+            })];
+        }
+        let observer = observer_for(&store, &base_url);
+        let events = observer.poll_once().await.unwrap();
+        assert!(events.iter().any(|e| e.kind == ObservedEventKind::Merged));
+        let rows = store.test_results_for_sha("run1", PAGED_SHA).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r.status == TestStatus::Passed));
+        assert_eq!(
+            store.list_pr_gates().unwrap()[0].status,
+            PrGateStatus::Merged
+        );
+        server.abort();
     }
 
     #[tokio::test]

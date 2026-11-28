@@ -263,6 +263,7 @@ impl Mcp {
                         polyclave_store::record_test_result(
                             db,
                             &polyclave_store::NewTestResult {
+                                check_id: String::new(),
                                 run_id: run,
                                 sha,
                                 source: polyclave_proto::TestResultSource::WorkerClaim,

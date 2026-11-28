@@ -498,6 +498,7 @@ fn approval_evidence_shows_the_workers_notes_and_only_the_exact_shas_results() {
     rm.store
         .record_test_results(vec![
             NewTestResult {
+                check_id: String::new(),
                 run_id: id.clone(),
                 sha: observed.clone(),
                 source: TestResultSource::Ci,
@@ -506,6 +507,7 @@ fn approval_evidence_shows_the_workers_notes_and_only_the_exact_shas_results() {
                 summary: "ci/rust-test: success".into(),
             },
             NewTestResult {
+                check_id: String::new(),
                 run_id: id.clone(),
                 sha: older,
                 source: TestResultSource::Ci,

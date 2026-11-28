@@ -981,6 +981,7 @@ fn test_results_are_keyed_by_sha_and_never_borrow_another_commit() {
         sha: current.clone(),
         source: TestResultSource::WorkerClaim,
         name: String::new(),
+        check_id: String::new(),
         status: TestStatus::Passed,
         summary: "cargo test: 12 passed".into(),
     };
@@ -989,6 +990,7 @@ fn test_results_are_keyed_by_sha_and_never_borrow_another_commit() {
         sha: current.clone(),
         source: TestResultSource::Ci,
         name: "ci/rust-test".into(),
+        check_id: "101".into(),
         status: TestStatus::Pending,
         summary: "ci/rust-test: queued".into(),
     };
@@ -1001,6 +1003,7 @@ fn test_results_are_keyed_by_sha_and_never_borrow_another_commit() {
             sha: older.clone(),
             source: TestResultSource::Ci,
             name: "ci/rust-test".into(),
+            check_id: "101".into(),
             status: TestStatus::Failed,
             summary: "ci/rust-test: failure".into(),
         })
@@ -1051,6 +1054,7 @@ fn test_results_reject_a_bad_sha_empty_summary_or_unknown_run() {
         sha: "d".repeat(40),
         source: TestResultSource::Ci,
         name: "ci/test".into(),
+        check_id: "101".into(),
         status: TestStatus::Failed,
         summary: "ci/test: failure".into(),
     };
@@ -1137,7 +1141,9 @@ fn test_results_table_upgrades_without_moving_the_schema_version() {
             )?)
         })
         .unwrap();
-    assert_eq!(columns, 7);
+    // `check_id` is the fifth key column: the stable check identifier that keeps
+    // two same-named checks from different sources apart.
+    assert_eq!(columns, 8);
 }
 
 #[test]
@@ -1246,4 +1252,51 @@ fn remote_intent_column_upgrades_an_existing_ledger_without_moving_the_schema_ve
     drop(store);
     let store = Store::open(&path).unwrap();
     assert!(!store.pause_state().unwrap().paused);
+}
+
+#[test]
+fn same_named_checks_from_different_sources_keep_their_own_rows() {
+    use polyclave_proto::{TestResultSource, TestStatus};
+    use polyclave_store::NewTestResult;
+
+    let (_dir, store) = fixture();
+    let sha = "e".repeat(40);
+    let check = |id: &str, status: TestStatus| NewTestResult {
+        run_id: "run".into(),
+        sha: sha.clone(),
+        source: TestResultSource::Ci,
+        name: "build".into(),
+        check_id: id.into(),
+        status,
+        summary: format!("build: {id}"),
+    };
+    // Two different apps both report a check called "build".
+    let changes = store
+        .record_test_results(vec![
+            check("11", TestStatus::Passed),
+            check("22", TestStatus::Failed),
+        ])
+        .unwrap();
+    assert_eq!(changes.len(), 2, "both are first sightings: {changes:?}");
+    let rows = store.test_results_for_sha("run", &sha).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().any(|r| r.status == TestStatus::Passed));
+    assert!(rows.iter().any(|r| r.status == TestStatus::Failed));
+
+    // Updating one leaves the other exactly as it was.
+    let changes = store
+        .record_test_results(vec![check("11", TestStatus::Failed)])
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].check_id, "11");
+    assert_eq!(changes[0].from, Some(TestStatus::Passed));
+    assert_eq!(changes[0].to, TestStatus::Failed);
+    let rows = store.test_results_for_sha("run", &sha).unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // Re-recording an unchanged row reports no change at all.
+    assert!(store
+        .record_test_results(vec![check("22", TestStatus::Failed)])
+        .unwrap()
+        .is_empty());
 }

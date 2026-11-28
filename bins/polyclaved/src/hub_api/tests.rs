@@ -466,6 +466,7 @@ impl ScmClient for MockScmClient {
         Box::pin(async move {
             Ok(PrChecksAndComments {
                 check_runs: Vec::new(),
+                checks_complete: true,
                 comments: vec![polyclave_hub::scm::PrCommentInfo {
                     id: 501,
                     author_login: "alice".into(),

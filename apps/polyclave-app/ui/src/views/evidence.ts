@@ -20,6 +20,9 @@ export interface EvidenceRow {
 }
 export interface ApprovalEvidence { sha: string | null; summary: string; rows: EvidenceRow[] }
 
+/** The marker row `scm_observer` writes for a partial check-run list. */
+const INCOMPLETE_CHECKS_NAME = 'polyclave/check-runs';
+
 /** `classify.rs` sets this detail when a writer may still reach the old Attempt. */
 const WRITER_DETAIL = 'a writer may still have access to the old Attempt';
 
@@ -109,6 +112,11 @@ function tests(r: RunDto, ev: RunEvidenceDto | null, sha: string | null): [Evide
       ? 'You accepted ' + short(target) + ' by hand; R1 did not verify it, so its checks can never turn this row green.'
       : 'This is a reference, not a pass: the host has not verified ' + short(target ?? '') +
         (r.result_sha ? ', it verified ' + short(r.result_sha) : ', nothing is verified yet') + '.');
+  }
+  // The host writes this marker when it could not read every check run for the
+  // commit. It is a pending CI row, so the set can never look complete.
+  if (checks.some(t => t.source === 'ci' && t.name === INCOMPLETE_CHECKS_NAME)) {
+    facts.push('The host could not read every check run for this commit, so this row stays not-green until it can.');
   }
   const claim0 = claims[0];
   if (claim0) {

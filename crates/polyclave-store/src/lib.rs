@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 pub use stage2::{CouncilCheckpoint, NewCouncil, NewPrGate, NewPrReview, NewProposal, ScmCursor};
 pub use stage4::local_embedding;
-pub use test_results::{record_test_result, test_results_for_sha, NewTestResult};
+pub use test_results::{record_test_result, test_results_for_sha, NewTestResult, TestResultChange};
 pub use writer::{Changes, Store};
 
 #[derive(Debug, thiserror::Error)]

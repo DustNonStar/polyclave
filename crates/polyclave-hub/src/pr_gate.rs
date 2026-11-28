@@ -2147,6 +2147,7 @@ mod tests {
             Box::pin(async {
                 Ok(PrChecksAndComments {
                     check_runs: Vec::new(),
+                    checks_complete: true,
                     comments: Vec::new(),
                     reviews: Vec::new(),
                 })

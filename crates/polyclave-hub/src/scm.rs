@@ -199,6 +199,10 @@ pub struct PrReviewInfo {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PrChecksAndComments {
     pub check_runs: Vec<CheckRunInfo>,
+    /// `true` only when every page of the check-run list was read. A partial
+    /// list may be missing the one failing check, so it is never treated as a
+    /// complete set of evidence for a SHA.
+    pub checks_complete: bool,
     pub comments: Vec<PrCommentInfo>,
     pub reviews: Vec<PrReviewInfo>,
 }
@@ -707,15 +711,48 @@ impl ScmClient for GitHubScmClient {
             let comments_path = format!("/repos/{owner}/{repo}/issues/{pr_number}/comments");
             let reviews_path = format!("/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
 
-            let checks_resp: GitHubCheckRunsResponse = self
-                .rest_json(
-                    Method::GET,
-                    &checks_path,
-                    &self.config.bot_token,
-                    Option::<&()>::None,
-                    "list_check_runs",
-                )
-                .await?;
+            // GitHub caps a page at 100 check runs. A failing check may sit on a
+            // later page, so every page is read before anything is recorded, and
+            // `checks_complete` records whether the list really was complete.
+            let mut check_runs = Vec::new();
+            let mut checks_complete = false;
+            let mut page = 1u32;
+            while page <= MAX_CHECK_RUN_PAGES {
+                let path = format!("{checks_path}?per_page=100&page={page}");
+                let checks_resp: GitHubCheckRunsResponse = match self
+                    .rest_json(
+                        Method::GET,
+                        &path,
+                        &self.config.bot_token,
+                        Option::<&()>::None,
+                        "list_check_runs",
+                    )
+                    .await
+                {
+                    Ok(resp) => resp,
+                    // A later page that cannot be read leaves the list partial.
+                    Err(_) if page > 1 => break,
+                    Err(err) => return Err(err),
+                };
+                let total = checks_resp.total_count;
+                let received = checks_resp.check_runs.len();
+                check_runs.extend(checks_resp.check_runs);
+                // `total_count` is authoritative when GitHub sends it; a short
+                // page only means "done" when it did not. An empty page before
+                // the total is reached leaves the list partial.
+                let complete = match total {
+                    Some(total) => check_runs.len() as u64 >= total,
+                    None => received < 100,
+                };
+                if complete {
+                    checks_complete = true;
+                    break;
+                }
+                if received == 0 {
+                    break;
+                }
+                page += 1;
+            }
             let comments_resp: Vec<GitHubIssueComment> = self
                 .rest_json(
                     Method::GET,
@@ -736,8 +773,8 @@ impl ScmClient for GitHubScmClient {
                 .await?;
 
             Ok(PrChecksAndComments {
-                check_runs: checks_resp
-                    .check_runs
+                checks_complete,
+                check_runs: check_runs
                     .into_iter()
                     .map(|c| CheckRunInfo {
                         id: c.id,
@@ -876,8 +913,14 @@ struct GitHubReviewResponse {
     user: Option<GitHubUser>,
 }
 
+/// GitHub serves at most 100 checks per page; 50 pages (5,000 checks) is far
+/// beyond any real pull request, and reaching it means the list is partial.
+const MAX_CHECK_RUN_PAGES: u32 = 50;
+
 #[derive(Deserialize)]
 struct GitHubCheckRunsResponse {
+    #[serde(default)]
+    total_count: Option<u64>,
     check_runs: Vec<GitHubCheckRun>,
 }
 
