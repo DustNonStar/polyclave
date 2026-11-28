@@ -664,6 +664,14 @@ impl Hub {
     pub(crate) fn set_default_reviewers(&self, reviewers: Vec<ReviewerSpec>) {
         *self.stage2.default_reviewers.lock().unwrap() = Some(reviewers);
     }
+    /// The observer the daemon runs: it resolves each event's owning Hub per
+    /// gate and wakes that Hub after the event is queued. Exposed so a test can
+    /// drive the production wiring instead of a hand-built copy.
+    pub fn scm_observer(&self, scm: Arc<dyn ScmClient>) -> ScmObserver {
+        let hub = self.clone();
+        ScmObserver::new(self.store.clone(), scm)
+            .with_wake(Arc::new(move |session: &str| hub.kick(session.to_owned())))
+    }
     /// Starts the SCM observer. Each event goes to the Hub that owns the Run it
     /// is about — resolved per gate, so a project registered after startup is
     /// routed correctly — and waking that Hub after the event is queued.
@@ -678,10 +686,7 @@ impl Hub {
             return;
         }
         let (tx, rx) = watch::channel(false);
-        let hub = self.clone();
-        let observer = ScmObserver::new(self.store.clone(), scm)
-            .with_wake(Arc::new(move |session: &str| hub.kick(session.to_owned())));
-        let handle = observer.spawn(interval, rx);
+        let handle = self.scm_observer(scm).spawn(interval, rx);
         *slot = Some((tx, handle));
     }
     pub async fn try_start_scm_observer_from_keychain(&self) {

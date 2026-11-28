@@ -180,13 +180,13 @@ impl ScmObserver {
         gate: &PrGateDto,
         pr_state: &PrState,
         details: &PrChecksAndComments,
-    ) -> Result<(Vec<TestResultChange>, bool)> {
+    ) -> Result<(Vec<TestResultChange>, bool, bool)> {
         let test_sha = self
             .store
             .run_test_sha(&gate.run_id)
             .map_err(map_store_err)?;
         if test_sha.as_deref() != Some(pr_state.head_sha.as_str()) {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), false, false));
         }
         if !details.checks_complete {
             let marker = NewTestResult {
@@ -202,7 +202,7 @@ impl ScmObserver {
                 .store
                 .record_test_results(vec![marker])
                 .map_err(map_store_err)?;
-            return Ok((changes, true));
+            return Ok((changes, true, false));
         }
         let rows: Vec<NewTestResult> = details
             .check_runs
@@ -225,8 +225,11 @@ impl ScmObserver {
             .store
             .record_test_results(rows)
             .map_err(map_store_err)?;
-        // A complete list supersedes an earlier "incomplete" marker.
-        self.store
+        // A complete list supersedes an earlier "incomplete" marker, and that
+        // removal is itself a change: the card must stop showing the marker even
+        // when every remaining row kept its status.
+        let removed = self
+            .store
             .clear_test_result(
                 &gate.run_id,
                 &pr_state.head_sha,
@@ -235,7 +238,7 @@ impl ScmObserver {
                 INCOMPLETE_CHECKS_ID,
             )
             .map_err(map_store_err)?;
-        Ok((changes, true))
+        Ok((changes, true, removed > 0))
     }
 
     /// Polls all active `pr_gates` once and returns newly observed events.
@@ -276,9 +279,11 @@ impl ScmObserver {
                 .list_pr_checks_and_comments(&gate.repo_slug, pr_number as u64, &pr_state.head_sha)
                 .await
                 .map_err(map_scm_err)?;
-            let (test_changes, recorded_for_sha) =
+            let (test_changes, recorded_for_sha, marker_cleared) =
                 self.record_check_runs(&gate, &pr_state, &details)?;
-            if !test_changes.is_empty() {
+            // A cleared marker carries no transition (the row is gone), so the
+            // event is what tells the card to fetch again.
+            if !test_changes.is_empty() || marker_cleared {
                 let payload = serde_json::json!({
                     "kind": "test_results",
                     "sha": pr_state.head_sha,
@@ -520,7 +525,7 @@ mod tests {
     use axum::{extract::State, routing::get, Json, Router};
     use polyclave_store::NewPrGate;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 
     struct ObserverGhState {
@@ -656,6 +661,8 @@ mod tests {
     struct PagedGhState {
         merged: AtomicBool,
         second_page_failure: AtomicBool,
+        /// Checks GitHub claims but does not serve: a partial list.
+        unreachable_checks: AtomicUsize,
         /// `(name, id, status, conclusion)` for page 1 and page 2.
         pages: std::sync::Mutex<Vec<Vec<serde_json::Value>>>,
     }
@@ -664,6 +671,7 @@ mod tests {
         let state = Arc::new(PagedGhState {
             merged: AtomicBool::new(false),
             second_page_failure: AtomicBool::new(false),
+            unreachable_checks: AtomicUsize::new(0),
             pages: std::sync::Mutex::new(vec![
                 vec![json!({
                     "id": 1001, "name": "ci/queued", "status": "in_progress",
@@ -699,7 +707,8 @@ mod tests {
                         let runs = pages.get(page - 1).cloned().unwrap_or_default();
                         // Page 1 always claims more pages follow, so the client
                         // must ask again instead of stopping at the first answer.
-                        let total: usize = pages.iter().map(|p| p.len()).sum();
+                        let total: usize = pages.iter().map(|p| p.len()).sum::<usize>()
+                            + st.unreachable_checks.load(Ordering::SeqCst);
                         let mut runs = runs;
                         if st.second_page_failure.load(Ordering::SeqCst) {
                             for run in runs.iter_mut() {
@@ -797,6 +806,52 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("pr_gate") && p.contains("test_results")),
             "{payloads:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_partial_list_marks_the_sha_and_the_cleared_marker_is_published() {
+        let (_dir, store) = store_with_sha();
+        let (base_url, state, server) = spawn_paged_gh().await;
+        // GitHub claims one more check than it serves, so the list is partial.
+        state.unreachable_checks.store(1, Ordering::SeqCst);
+        let observer = observer_for(&store, &base_url);
+
+        let events = observer.poll_once().await.unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        let rows = store.test_results_for_sha("run1", PAGED_SHA).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, INCOMPLETE_CHECKS_NAME);
+        assert_eq!(rows[0].status, TestStatus::Pending, "never green");
+        let change_count = |store: &Store| match store.changes(None).unwrap() {
+            polyclave_store::Changes::Events(events) => events
+                .iter()
+                .filter(|e| {
+                    serde_json::to_string(e)
+                        .unwrap_or_default()
+                        .contains("test_results")
+                })
+                .count(),
+            polyclave_store::Changes::ResyncRequired => panic!("truncated change log"),
+        };
+        assert_eq!(change_count(&store), 1, "the marker itself is a change");
+
+        // The next poll is complete and reports the same status for its real
+        // check: nothing moved, but the marker is gone, so it is still news.
+        state.unreachable_checks.store(0, Ordering::SeqCst);
+        let events = observer.poll_once().await.unwrap();
+        assert!(
+            events.is_empty(),
+            "a pending check is not a failure: {events:?}"
+        );
+        let rows = store.test_results_for_sha("run1", PAGED_SHA).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, "ci/queued");
+        assert_eq!(
+            change_count(&store),
+            2,
+            "clearing the marker is published too"
         );
         server.abort();
     }

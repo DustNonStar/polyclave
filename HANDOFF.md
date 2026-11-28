@@ -1407,3 +1407,19 @@ Privacy scan: `privacy-scan: clean (origin/main..HEAD)`.
 ### Not done
 
 Batch 3 (phone pairing, exact-SHA human approval, restart reconnect) is not started: `NEXT.md` scopes this branch to Batch 2. Native Windows CI and real-environment acceptance remain pending for the same reason as Batch 1. Nothing was merged or pushed; the branch waits for the merge reviewer.
+
+## Audit Hardening — Batch 2 self-review (2026-11-27)
+
+Three defects were found by re-reading the batch diff, not by the green suite, and are fixed on the branch. Two coverage gaps were closed at the same time.
+
+- **Gate notices were written nowhere.** `enqueue_hub_notice` only writes when it is given a Hub session, and the new "auto-merge could not be confirmed" (2.4) and "could not be reconciled" (2.4) notices passed `None`. They now resolve the Run's owning Hub; the reconciliation test asserts the notice arrives.
+- **One unreadable gate aborted reconciliation for all the others.** A definite GitHub answer (for example a 404) returned `Err` from `reconcile_auto_merge`, leaving every later gate unsettled. That gate is now skipped — still armed, which is the safe state — with a notice, and the rest are settled. New test: `one_gate_github_cannot_answer_for_does_not_stop_the_others_reconciling`.
+- **Clearing the "check-runs incomplete" marker published no change.** A deleted row is not a row change, so the card could keep showing "the host could not read every check run" after a complete fetch. `Store::clear_test_result` returns the number of removed rows and the observer publishes a `pr_gate`/`test_results` change event when it removed one. New test: `a_partial_list_marks_the_sha_and_the_cleared_marker_is_published`.
+- **Coverage gap closed (2.5):** `a_ledger_with_rows_upgrades_to_the_check_id_key_without_losing_them` rebuilds a pre-`check_id` `test_results` table **with rows in it**, which the earlier column-count test did not exercise.
+- **Coverage gap closed (2.6):** the daemon test now drives the production `Hub::scm_observer` wiring and waits for the owning Hub to claim the queued message, instead of a hand-built observer with a counter. Removing `.with_wake(Hub::kick)` fails it with "hub-a was not woken".
+
+Negative controls run for every item that claims a refusal, so each new test is proven load-bearing rather than merely green: 2.1 provenance (fails on `verified_result_sha(..).is_err()`), 2.2 empty range and moved base branch and the scope-widening refusal (all fail without the guards), 2.3 revision transition (fails with `Policy` on the old `WorkerChat` path), 2.4 per-gate serialization (the recorded remote order flips to `["disable", "enable"]` without the lock), 2.5 pagination (page 2 is never read), 2.6 routing (`["hub-a", "hub-a"]`) and waking.
+
+Tests: `cargo fmt --all -- --check` clean, `cargo clippy --locked --workspace --all-targets -- -D warnings` 0 warnings, `cargo test --locked --workspace` **203 passed, 0 failed, 0 ignored**. `proto.ts` unchanged; the UI files were not touched again, so the earlier `tsc --noEmit`, `npm run build` and browser run still stand.
+
+One design note is recorded in `PLAN-ISSUES.md` rather than changed here: PR-gate notices still reach the Hub as `source='user'` (the pre-existing channel used by every gate escalation), so the model cannot yet tell a host warning from the person's words. That switch needs its own work list.

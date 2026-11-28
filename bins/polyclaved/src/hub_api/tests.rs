@@ -1222,26 +1222,29 @@ async fn scm_events_route_to_the_owning_hub_and_wake_it() {
         state: Arc::new(MockScmState::default()),
         polled: None,
     });
-    let wakes = Arc::new(Mutex::new(Vec::new()));
-    let woke = wakes.clone();
-    let kicked = hub.clone();
-    let observer = polyclave_hub::scm_observer::ScmObserver::new(hub.store.clone(), scm).with_wake(
-        Arc::new(move |session: &str| {
-            woke.lock().unwrap().push(session.to_owned());
-            // The same wake the daemon wires: an idle Hub reads its inbox now.
-            kicked.kick(session.to_owned());
-        }),
-    );
-    let events = observer.poll_once().await.unwrap();
+    // The production observer: it wakes the owning Hub through `Hub::kick`.
+    let events = hub.scm_observer(scm).poll_once().await.unwrap();
     assert_eq!(events.len(), 2, "{events:?}");
-
-    // Exactly the owning Hub was woken for each event.
-    let mut woken = wakes.lock().unwrap().clone();
-    woken.sort();
-    assert_eq!(woken, vec!["hub-a".to_owned(), "hub-b".to_owned()]);
 
     for (owner, slug) in &owners {
         let other = if owner == "hub-a" { "hub-b" } else { "hub-a" };
+        // Being woken means the Hub driver claimed the queued message.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let claimed = hub
+                    .store
+                    .hub_messages(owner)
+                    .unwrap()
+                    .iter()
+                    .all(|m| m.turn_id.is_some());
+                if claimed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{owner} was not woken"));
         let messages = hub.store.hub_messages(owner).unwrap();
         assert_eq!(messages.len(), 1, "{owner}: {messages:?}");
         assert_eq!(messages[0].source, "host");
@@ -1250,13 +1253,18 @@ async fn scm_events_route_to_the_owning_hub_and_wake_it() {
             Some(json!({"kind": polyclave_store::HOST_OBSERVATION_KIND}))
         );
         assert!(messages[0].text.contains(slug), "{messages:?}");
-        // The other project's Hub never sees this event.
+        // The other project's Hub never sees this event, and is never woken by it.
         assert!(hub
             .store
             .hub_messages(other)
             .unwrap()
             .iter()
             .all(|m| !m.text.contains(slug)));
+        assert_eq!(
+            hub.store.hub_messages(other).unwrap().len(),
+            1,
+            "{other} has only its own event"
+        );
     }
     hub.close().await;
 }

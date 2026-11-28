@@ -599,6 +599,12 @@ fn is_heterogeneous(
     }
 }
 
+/// The Hub session that owns a Run, so a gate notice reaches a real inbox
+/// instead of being written nowhere.
+fn gate_owner(store: &Store, run_id: &str) -> Option<String> {
+    store.run_hub_session(run_id).ok().flatten()
+}
+
 fn enqueue_hub_notice(store: &Store, hub_session_id: Option<&str>, intent: &str, text: &str) {
     if let Some(hub_id) = hub_session_id {
         let _ = store.hub_enqueue(hub_id, intent, text);
@@ -1291,9 +1297,13 @@ pub async fn pause_all(
         }
     }
     for (gate_id, detail) in &unconfirmed {
+        let owner = store
+            .pr_gate(gate_id)
+            .ok()
+            .and_then(|gate| gate_owner(store, &gate.run_id));
         enqueue_hub_notice(
             store,
-            None,
+            owner.as_deref(),
             &format!("pr_gate:{gate_id}:pause_unknown"),
             &format!(
                 "Pause could not confirm that auto-merge is off for gate {gate_id} ({detail}); the gate stays armed so reconciliation revokes it"
@@ -1326,11 +1336,24 @@ pub async fn reconcile_auto_merge(store: &Store, scm: &dyn ScmClient) -> Result<
         // A pause, or a disable that never got an answer, means the remote must
         // end up disarmed; otherwise GitHub decides and the ledger follows.
         let must_disable = paused || intent.as_deref() == Some("disable");
-        let pr_state = scm.get_pr_state(&current.repo_slug, pr_number as u64).await;
-        let pr_state = match pr_state {
+        let pr_state = match scm.get_pr_state(&current.repo_slug, pr_number as u64).await {
             Ok(state) => state,
-            Err(err) if !remote_answer_is_definite(&err) => continue,
-            Err(err) => return Err(map_scm_err(err)),
+            // One gate GitHub cannot answer for must not stop the others from
+            // being settled; it stays armed, which is the safe state, and a
+            // human is told which gate it was.
+            Err(err) => {
+                let owner = gate_owner(store, &current.run_id);
+                enqueue_hub_notice(
+                    store,
+                    owner.as_deref(),
+                    &format!("pr_gate:{}:reconcile_unknown", current.id),
+                    &format!(
+                        "auto-merge for gate {} could not be reconciled ({err}); it stays armed and is retried on the next pause or restart",
+                        current.id
+                    ),
+                );
+                continue;
+            }
         };
         if must_disable {
             if pr_state.auto_merge_enabled {
@@ -2016,6 +2039,8 @@ mod tests {
         ops: Mutex<Vec<&'static str>>,
         /// What GitHub would report as the PR's auto-merge flag.
         enabled: Mutex<bool>,
+        /// Repository slugs whose PR state GitHub refuses to answer for.
+        unreadable: Mutex<Vec<String>>,
     }
 
     impl RacingScm {
@@ -2120,11 +2145,25 @@ mod tests {
         }
         fn get_pr_state<'a>(
             &'a self,
-            _repo_slug: &'a str,
+            repo_slug: &'a str,
             pr_number: u64,
         ) -> BoxFuture<'a, std::result::Result<PrState, ScmError>> {
             let enabled = *self.state.enabled.lock().unwrap();
+            let unreadable = self
+                .state
+                .unreadable
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|slug| slug == repo_slug);
             Box::pin(async move {
+                if unreadable {
+                    return Err(ScmError::Http {
+                        op: "get_pr_state",
+                        status: 404,
+                        message: "Not Found".into(),
+                    });
+                }
                 Ok(PrState {
                     number: pr_number,
                     node_id: format!("PR_node_{pr_number}"),
@@ -2239,6 +2278,66 @@ mod tests {
         // an enable completing after the disarm would arm a paused PR.
         assert_eq!(scm.ops(), vec!["enable", "disable"], "{:?}", scm.ops());
         assert!(!*scm.state.enabled.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn one_gate_github_cannot_answer_for_does_not_stop_the_others_reconciling() {
+        let fix = setup_git_and_store();
+        // Two armed gates in different repositories; GitHub 404s the first.
+        let mut gates = Vec::new();
+        for slug in ["org/repo", "org/other"] {
+            let gate = fix
+                .store
+                .create_pr_gate(NewPrGate {
+                    run_id: "run1".into(),
+                    repo_slug: slug.into(),
+                    branch: format!("feat/{}", slug.replace('/', "-")),
+                    base_sha: fix.base_sha.clone(),
+                    head_sha: fix.good_head_sha.clone(),
+                    touched_paths: vec!["src/**".into()],
+                })
+                .unwrap();
+            fix.store
+                .record_pr_opened(&gate.id, 42, "https://example.invalid/42")
+                .unwrap();
+            fix.store
+                .set_pr_gate_status(&gate.id, PrGateStatus::Approved)
+                .unwrap();
+            gates.push(
+                fix.store
+                    .arm_auto_merge(&gate.id, &fix.good_head_sha)
+                    .unwrap(),
+            );
+        }
+        let scm = RacingScm::new(EnableAnswer::Armed);
+        scm.state.unreadable.lock().unwrap().push("org/repo".into());
+        fix.store.set_pause(true, Some("restart".into())).unwrap();
+
+        // The unreadable gate stays armed and does not block the other one.
+        assert_eq!(
+            reconcile_auto_merge(&fix.store, scm.as_ref())
+                .await
+                .unwrap(),
+            1
+        );
+        let unreadable = fix.store.pr_gate(&gates[0].id).unwrap();
+        assert!(unreadable.auto_merge_armed, "{unreadable:?}");
+        let settled = fix.store.pr_gate(&gates[1].id).unwrap();
+        assert!(!settled.auto_merge_armed, "{settled:?}");
+        assert_eq!(settled.status, PrGateStatus::Paused);
+        let notices: Vec<String> = fix
+            .store
+            .hub_messages("hub")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("could not be reconciled")),
+            "{notices:?}"
+        );
     }
 
     #[tokio::test]

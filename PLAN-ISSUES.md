@@ -382,3 +382,19 @@ Routing SCM events needs the Run that each gate belongs to, and waking the ownin
 2. `ScmObserver::with_wake(callback)` makes the observer call back after a successful `hub_enqueue_external`; the daemon wires it to `Hub::kick`. Waking is a `Fn(&str)`, so the hub crate stays free of daemon types.
 
 New test: `scm_events_route_to_the_owning_hub_and_wake_it` (daemon: empty database, two projects registered afterwards, one event each; exactly the owning Hub is woken; the queued message keeps `source='host'` and `{"kind":"scm_observation"}` metadata; the other project's Hub never sees it). Running it with the owner pinned to one session fails with `["hub-a", "hub-a"]`.
+
+## [detail] Batch 2 self-review found three defects; all three are fixed on the branch
+
+The batch was re-read against the diff rather than the test output. Three real problems surfaced, none of which a green suite had caught.
+
+1. **Gate notices were written nowhere.** `pause_all`'s "auto-merge could not be confirmed" notice and `reconcile_auto_merge`'s "could not be reconciled" notice passed `None` as the Hub session, and `enqueue_hub_notice` only writes when a session is given. Both now resolve the Run's owning Hub (`gate_owner` → `Store::run_hub_session`), and the reconciliation test asserts the notice really lands in the inbox.
+2. **One unreadable gate aborted reconciliation for every other gate.** `reconcile_auto_merge` returned `Err` on a definite GitHub answer (for example a 404). It now skips that gate — leaving it armed, the safe state — notifies its Hub and carries on; a test with two armed gates in different repositories proves the second one is still settled.
+3. **Clearing the "check-runs incomplete" marker published nothing.** The marker row is deleted when a complete list arrives, but a deletion is not a row change, so the approval card would keep showing "the host could not read every check run" until something unrelated moved. `Store::clear_test_result` now returns how many rows it removed, and the observer publishes a `pr_gate`/`test_results` change event when it removed one (the event carries no invented transition: the row is gone, not "passed").
+
+Two coverage gaps were also closed: `a_ledger_with_rows_upgrades_to_the_check_id_key_without_losing_them` exercises the `test_results` rebuild **with rows in it** (the earlier test only counted columns on an empty table), and the 2.6 daemon test now drives the production `Hub::scm_observer` wiring instead of a hand-built observer, waiting for the owning Hub to claim the queued message. Removing `.with_wake(Hub::kick)` makes it fail with "hub-a was not woken".
+
+## [detail] Host gate notices still reach the Hub as `source='user'`
+
+Every PR-gate notice in `crates/polyclave-hub/src/pr_gate.rs` (`escalate`, the auto-merge warnings from this batch, the pause reconciliation) is written with `Store::hub_enqueue`, which stores `source='user'`. `docs/LESSONS.md` §10 records that only the person's own input may be `source='user'`, and this batch added the host-observation channel for SCM data (`hub_enqueue_external` + `{"kind":"scm_observation"}` + the prompt prefix).
+
+This batch kept the existing channel, because the same call is used by every gate escalation that predates it, and the provider prompt path that renders host observations is shared. Switching gate notices to the observation channel is a small but cross-cutting change (it alters what the Hub model sees and several tests assert notice text through `hub_messages`), so it needs its own work list rather than a silent change inside Batch 2. Nothing here weakens an invariant: a gate notice cannot authorise a Ticket (that requires `source='user'` **and** an explicit basis message chosen by the person), but the model currently cannot tell a host warning from the user's words.

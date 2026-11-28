@@ -224,8 +224,10 @@ impl Store {
         self.record_test_results(vec![row])
     }
 
-    /// Removes exactly one recorded row. Used when a partial check-run list is
-    /// replaced by a complete one, so the "incomplete" marker disappears.
+    /// Removes exactly one recorded row and reports how many were removed. Used
+    /// when a partial check-run list is replaced by a complete one, so the
+    /// "incomplete" marker disappears — and its removal is itself a change the
+    /// approval card has to hear about.
     pub fn clear_test_result(
         &self,
         run: &str,
@@ -233,7 +235,7 @@ impl Store {
         source: TestResultSource,
         name: &str,
         check_id: &str,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let (run, sha, name, check_id) = (
             run.to_owned(),
             sha.to_owned(),
@@ -241,12 +243,11 @@ impl Store {
             check_id.to_owned(),
         );
         self.write(move |db| {
-            db.execute(
+            Ok(db.execute(
                 "DELETE FROM test_results
                  WHERE run_id=?1 AND sha=?2 AND source=?3 AND name=?4 AND check_id=?5",
                 params![run, sha, source.as_str(), name, check_id],
-            )?;
-            Ok(())
+            )?)
         })
     }
 

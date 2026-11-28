@@ -1300,3 +1300,99 @@ fn same_named_checks_from_different_sources_keep_their_own_rows() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn a_ledger_with_rows_upgrades_to_the_check_id_key_without_losing_them() {
+    use polyclave_proto::{TestResultSource, TestStatus};
+    use polyclave_store::NewTestResult;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.sqlite");
+    let sha = "f".repeat(40);
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .write(|db| {
+                db.execute_batch(
+                    "INSERT INTO provider_profiles(id,display_name,kind,models_json,created_at)
+                     VALUES('p','test','codex_cli','[]','now');
+                     INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES('hub','Hub','hub','repo','p','test','now');
+                     INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES('worker','Worker','worker','repo','p','test','now');
+                     INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,status,created_at,updated_at)
+                     VALUES('ticket','hub','repo','Test','{}','explicit_user',1,'active','now','now');
+                     INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,instructions,
+                        mirror_remote,base_branch,base_sha,status,current_attempt,created_at,updated_at)
+                     VALUES('run','ticket','hub','worker','request','repo','codex','test','mirror','main','base','running',1,'now','now');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .record_test_results(vec![
+                NewTestResult {
+                    run_id: "run".into(),
+                    sha: sha.clone(),
+                    source: TestResultSource::Ci,
+                    name: "build".into(),
+                    check_id: "11".into(),
+                    status: TestStatus::Failed,
+                    summary: "build: failure".into(),
+                },
+                NewTestResult {
+                    run_id: "run".into(),
+                    sha: sha.clone(),
+                    source: TestResultSource::WorkerClaim,
+                    name: String::new(),
+                    check_id: String::new(),
+                    status: TestStatus::Passed,
+                    summary: "cargo test: ok".into(),
+                },
+            ])
+            .unwrap();
+    }
+    // Rebuild the table as a pre-`check_id` ledger would have it, keeping rows.
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "ALTER TABLE test_results RENAME TO test_results_now;
+             CREATE TABLE test_results(
+               run_id      TEXT NOT NULL REFERENCES runs(id),
+               sha         TEXT NOT NULL,
+               source      TEXT NOT NULL CHECK (source IN ('worker_claim','host_run','ci')),
+               name        TEXT NOT NULL DEFAULT '',
+               status      TEXT NOT NULL CHECK (status IN ('passed','failed','pending')),
+               summary     TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               PRIMARY KEY(run_id, sha, source, name));
+             INSERT INTO test_results SELECT run_id,sha,source,name,status,summary,recorded_at
+               FROM test_results_now;
+             DROP TABLE test_results_now;",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let rows = store.test_results_for_sha("run", &sha).unwrap();
+    assert_eq!(rows.len(), 2, "no row was lost in the rebuild: {rows:?}");
+    assert!(rows
+        .iter()
+        .any(|r| r.name == "build" && r.status == TestStatus::Failed));
+    assert!(rows
+        .iter()
+        .any(|r| r.source == TestResultSource::WorkerClaim && r.status == TestStatus::Passed));
+    // The rebuilt rows carry no check id, so a later CI row with an id is a new
+    // row rather than an overwrite.
+    store
+        .record_test_result(NewTestResult {
+            run_id: "run".into(),
+            sha: sha.clone(),
+            source: TestResultSource::Ci,
+            name: "build".into(),
+            check_id: "22".into(),
+            status: TestStatus::Passed,
+            summary: "build: success".into(),
+        })
+        .unwrap();
+    assert_eq!(store.test_results_for_sha("run", &sha).unwrap().len(), 3);
+}
