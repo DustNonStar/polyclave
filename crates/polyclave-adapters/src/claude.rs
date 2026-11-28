@@ -15,6 +15,7 @@ pub struct MacosSeatbeltIsolation {
     sandbox_exec: PathBuf,
     state_dir: PathBuf,
     isolated_claude_home: PathBuf,
+    home_dir: Option<PathBuf>,
 }
 
 #[cfg(target_os = "macos")]
@@ -25,11 +26,19 @@ impl MacosSeatbeltIsolation {
             return None;
         }
         let state_dir = polyclave_os::canonical_real_path(state_dir).ok()?;
+        let home_dir =
+            crate::user_home_dir().and_then(|home| polyclave_os::canonical_real_path(&home).ok());
         Some(Self {
             sandbox_exec,
             isolated_claude_home: state_dir.join("isolated-homes").join("claude"),
             state_dir,
+            home_dir,
         })
+    }
+
+    pub fn with_home_dir(mut self, home_dir: PathBuf) -> Self {
+        self.home_dir = Some(polyclave_os::canonical_real_path(&home_dir).unwrap_or(home_dir));
+        self
     }
 
     fn escape_sbpl_path(path: &Path) -> Result<String, Error> {
@@ -65,13 +74,26 @@ impl MacosSeatbeltIsolation {
             let config = Self::escape_sbpl_path(config)?;
             state_read_exceptions.push_str(&format!(" (literal \"{config}\")"));
         }
-        let mut keychains = String::from(
+        let mut sensitive_reads = String::from(
             "(subpath \"/Library/Keychains\") (subpath \"/System/Library/Keychains\")",
         );
-        if let Some(home) = crate::user_home_dir() {
-            let home = polyclave_os::canonical_real_path(&home)?;
-            let path = Self::escape_sbpl_path(&home.join("Library/Keychains"))?;
-            keychains.push_str(&format!(" (subpath \"{path}\")"));
+        if let Some(home) = &self.home_dir {
+            for rel in [
+                "Library/Keychains",
+                ".ssh",
+                ".codex",
+                ".config/gh",
+                ".aws",
+                ".gnupg",
+                ".kube",
+            ] {
+                let path = Self::escape_sbpl_path(&home.join(rel))?;
+                sensitive_reads.push_str(&format!(" (subpath \"{path}\")"));
+            }
+            for rel in [".netrc", ".git-credentials"] {
+                let path = Self::escape_sbpl_path(&home.join(rel))?;
+                sensitive_reads.push_str(&format!(" (literal \"{path}\")"));
+            }
         }
         let mcp = mcp_port.map_or_else(String::new, |port| {
             format!(" (remote tcp \"localhost:{port}\")")
@@ -87,9 +109,10 @@ impl MacosSeatbeltIsolation {
              (allow file-read*)\n\
              (deny file-read* (require-all (subpath \"{state}\")\n\
                   (require-not (require-any {state_read_exceptions}))))\n\
-             (deny file-read* {keychains})\n\
+             (deny file-read* {sensitive_reads})\n\
              (allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") {write_roots})\n\
              (allow network-outbound{mcp}\n\
+                  (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))\n\
                   (require-all (remote tcp \"*:443\") (require-not (remote ip \"localhost:*\")))\n\
                   (require-all (remote udp \"*:53\") (require-not (remote ip \"localhost:*\"))))"
         ))
@@ -223,6 +246,7 @@ pub fn claude_worker(
         "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
         claude_secure_storage_dir(),
     ));
+    env.extend(crate::claude_auth_environment());
     let payload = json!({"mcpServers":{"host":{"type":"http","url":ctx.mcp_url,
         "headers":{"Authorization":format!("Bearer {}",ctx.token)}}}});
     write_private_file(

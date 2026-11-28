@@ -147,7 +147,11 @@ impl TurnRunner {
         let cancel = Arc::new(AtomicBool::new(false));
         let work = self.runs.begin(id, mode)?;
         jobs.insert(id.into(), cancel.clone());
-        self.spawn_turn(&mut jobs, work, mode, text, cancel)
+        let allow_correction = matches!(
+            mode,
+            TurnMode::Start | TurnMode::Retry | TurnMode::Correction
+        );
+        self.spawn_turn(&mut jobs, work, mode, text, cancel, allow_correction)
     }
 
     /// A PR-gate revision: the new Attempt is created from the previous
@@ -164,7 +168,7 @@ impl TurnRunner {
         let cancel = Arc::new(AtomicBool::new(false));
         let work = self.runs.begin_revision(id)?;
         jobs.insert(id.into(), cancel.clone());
-        self.spawn_turn(&mut jobs, work, TurnMode::WorkerChat, text, cancel)
+        self.spawn_turn(&mut jobs, work, TurnMode::WorkerChat, text, cancel, true)
     }
 
     fn spawn_turn(
@@ -174,6 +178,7 @@ impl TurnRunner {
         mode: TurnMode,
         text: String,
         cancel: Arc<AtomicBool>,
+        allow_correction: bool,
     ) -> Result<std::thread::JoinHandle<Result<RunDto>>> {
         let runner = self.clone();
         let run_id = work.run.id.clone();
@@ -185,7 +190,7 @@ impl TurnRunner {
                     active: runner.active.clone(),
                     id: owned.clone(),
                 };
-                runner.execute(work, mode, text, &cancel)
+                runner.execute(work, mode, text, &cancel, allow_correction)
             }) {
             Ok(thread) => Ok(thread),
             Err(_) => {
@@ -218,6 +223,7 @@ impl TurnRunner {
         mut mode: TurnMode,
         mut prompt: String,
         cancel: &AtomicBool,
+        allow_correction: bool,
     ) -> Result<RunDto> {
         loop {
             let token = Uuid::new_v4().simple().to_string();
@@ -237,14 +243,15 @@ impl TurnRunner {
             let turn = self.prepare(&work, mode, &token)?;
             let step = (|| -> Result<Option<RunDto>> {
                 let outcome = self.run_process(&work, turn, &token, input, cancel);
-                if let Some(detail) = outcome.detail {
+                if let Some(detail) = &outcome.detail {
                     let rid = work.run.id.clone();
+                    let detail = detail.clone();
                     self.runs.store.write(move |db| {
                         change(
                             db,
                             ChangeTopic::Inbox,
                             &rid,
-                            &serde_json::json!({"warning":detail}),
+                            &serde_json::json!({"warning": detail}),
                         )
                     })?;
                 }
@@ -264,12 +271,7 @@ impl TurnRunner {
                 } else {
                     WriterCheck::Excluded
                 };
-                if end == EndReason::Exit
-                    && matches!(
-                        mode,
-                        TurnMode::Start | TurnMode::Retry | TurnMode::Correction
-                    )
-                {
+                if end == EndReason::Exit && allow_correction {
                     self.revoke(turn)?;
                     let verdict = self.runs.verdict(&work, writer)?;
                     let retryable =
@@ -290,8 +292,15 @@ impl TurnRunner {
                         return Ok(None);
                     }
                 }
-                self.finish(turn, Some(&work), end, writer, outcome.code)
-                    .map(Some)
+                self.finish(
+                    turn,
+                    Some(&work),
+                    end,
+                    writer,
+                    outcome.code,
+                    outcome.detail.as_deref(),
+                )
+                .map(Some)
             })();
             match step {
                 Ok(Some(run)) => return Ok(run),
@@ -414,7 +423,15 @@ impl TurnRunner {
         let stderr = wrapper.take_stderr();
         let (events, receiver) = std::sync::mpsc::sync_channel(256);
         let vendor = work.run.vendor;
-        let secret = token.to_owned();
+        let mut secrets = vec![token.to_owned()];
+        for key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    secrets.push(value);
+                }
+            }
+        }
+        let stdout_secrets = secrets.clone();
         let reader_thread = if let Some(mut stdout) = stdout {
             Some(std::thread::spawn(move || {
                 let mut text = String::new();
@@ -430,7 +447,7 @@ impl TurnRunner {
                         }
                         Ok(_) => {}
                     }
-                    if text.contains(&secret) {
+                    if stdout_secrets.iter().any(|s| text.contains(s)) {
                         continue;
                     }
                     let ev = match vendor {
@@ -450,12 +467,23 @@ impl TurnRunner {
             drop(events);
             None
         };
-        if let Some(mut stderr) = stderr {
-            // CLI diagnostics can contain credentials; do not log or persist them.
+        let stderr_thread = stderr.map(|mut stderr| {
             std::thread::spawn(move || {
-                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-            });
-        }
+                let mut buf = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                while let Ok(n) = stderr.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > 64 * 1024 {
+                        let excess = buf.len() - 16 * 1024;
+                        buf.drain(..excess);
+                    }
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        });
         loop {
             if cancel.load(Ordering::Acquire) {
                 let _ = wrapper.cancel();
@@ -487,10 +515,18 @@ impl TurnRunner {
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                         }
                     }
+                    let detail = if code != 0 {
+                        stderr_thread
+                            .and_then(|handle| handle.join().ok())
+                            .and_then(|raw| redact_stderr_tail(&raw, &secrets))
+                            .map(|tail| format!("worker exited with status {code}: {tail}"))
+                    } else {
+                        None
+                    };
                     return Exit {
                         code: Some(code),
                         cancelled: false,
-                        detail: None,
+                        detail,
                     };
                 }
                 Ok(None) => (),
@@ -573,8 +609,9 @@ impl TurnRunner {
         end: EndReason,
         writer: WriterCheck,
         exit: Option<i32>,
+        error_detail: Option<&str>,
     ) -> Result<RunDto> {
-        let run = self.settle(turn, work, end, writer, exit)?;
+        let run = self.settle(turn, work, end, writer, exit, error_detail)?;
         self.remove_turn_files(turn)?;
         if let (Some(work), Some(run)) = (work, &run) {
             if let Some(sha) = run.result_sha.as_deref() {
@@ -591,6 +628,7 @@ impl TurnRunner {
         end: EndReason,
         writer: WriterCheck,
         exit: Option<i32>,
+        error_detail: Option<&str>,
     ) -> Result<Option<RunDto>> {
         // Revoke the token before importing Git state, so an in-flight MCP
         // verification cannot create a late receipt after this snapshot.
@@ -606,7 +644,14 @@ impl TurnRunner {
                     .read(|db| Ok(load_turn(db, turn)?.mode == TurnMode::Correction))?
             {
                 v.status = RunStatus::Failed;
-                v.detail = Some("no accepted result after 2 corrections".into());
+                v.detail = Some(match error_detail {
+                    Some(detail) => format!("no accepted result after 2 corrections ({detail})"),
+                    None => "no accepted result after 2 corrections".into(),
+                });
+            } else if v.detail.as_deref() == Some(crate::classify::RETRYABLE_DETAIL) {
+                if let Some(detail) = error_detail {
+                    v.detail = Some(detail.to_owned());
+                }
             }
         }
         let work = work.map(|w| (w.run.id.clone(), w.attempt.id, w.attempt.attempt_no));
@@ -666,7 +711,7 @@ impl Drop for Slot {
 struct Exit {
     code: Option<i32>,
     cancelled: bool,
-    detail: Option<&'static str>,
+    detail: Option<String>,
 }
 impl Exit {
     fn cancelled() -> Self {
@@ -676,12 +721,46 @@ impl Exit {
             detail: None,
         }
     }
-    fn error(detail: &'static str) -> Self {
+    fn error(detail: impl Into<String>) -> Self {
         Self {
             code: None,
             cancelled: false,
-            detail: Some(detail),
+            detail: Some(detail.into()),
         }
+    }
+}
+
+pub(crate) fn redact_stderr_tail(raw: &str, secrets: &[String]) -> Option<String> {
+    let mut sanitized = raw.to_owned();
+    for secret in secrets {
+        if !secret.is_empty() {
+            sanitized = sanitized.replace(secret, "[redacted]");
+        }
+    }
+    // Redact any "Bearer <token>" authorization header fragment.
+    let mut out = String::with_capacity(sanitized.len());
+    let mut rest = sanitized.as_str();
+    while let Some(idx) = rest.to_ascii_lowercase().find("bearer ") {
+        out.push_str(&rest[..idx]);
+        out.push_str("Bearer [redacted]");
+        let after = &rest[idx + "bearer ".len()..];
+        let token_len = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';'))
+            .unwrap_or(after.len());
+        rest = &after[token_len..];
+    }
+    out.push_str(rest);
+
+    let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    const MAX_BYTES: usize = 512;
+    if collapsed.len() <= MAX_BYTES {
+        Some(collapsed)
+    } else {
+        let start = collapsed.ceil_char_boundary(collapsed.len() - (MAX_BYTES - 3));
+        Some(format!("...{}", &collapsed[start..]))
     }
 }
 fn secretless(e: AgentEvent, secret: &str) -> Option<AgentEvent> {
@@ -714,4 +793,28 @@ pub(crate) fn load_turn(db: &Connection, id: i64) -> Result<TurnDto> {
             exit_code:r.get(8)?,end_reason:r.get::<_,Option<String>>(9)?.as_deref().map(decode_enum).transpose()?,
             writer_check:r.get::<_,Option<String>>(10)?.as_deref().map(decode_enum).transpose()?,started_at:r.get(11)?,ended_at:r.get(12)?}))
        .optional()?.ok_or(Error::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_stderr_tail;
+
+    #[test]
+    fn redact_stderr_tail_strips_secrets_bearer_tokens_and_bounds_length() {
+        let secrets = vec!["turn-secret-123".to_owned(), "sk-ant-secret".to_owned()];
+        let raw = "line1 Authorization: Bearer my-jwt-token\nline2 token=turn-secret-123\nkey=sk-ant-secret";
+        let tail = redact_stderr_tail(raw, &secrets).unwrap();
+        assert!(!tail.contains("my-jwt-token"));
+        assert!(!tail.contains("turn-secret-123"));
+        assert!(!tail.contains("sk-ant-secret"));
+        assert!(tail.contains("Bearer [redacted]"));
+        assert!(tail.contains("[redacted]"));
+
+        let long = format!("prefix {} suffix", "x".repeat(700));
+        let bounded = redact_stderr_tail(&long, &[]).unwrap();
+        assert!(bounded.len() <= 512);
+        assert!(bounded.starts_with("..."));
+        assert!(bounded.ends_with("suffix"));
+        assert_eq!(redact_stderr_tail("   \n\t  ", &[]), None);
+    }
 }

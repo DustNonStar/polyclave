@@ -35,6 +35,7 @@ impl MirrorManager {
     pub(crate) fn commit_and_stage(
         &self,
         attempt: &AttemptGit,
+        from_sha: Option<&str>,
         message: &str,
         paths: Option<&[String]>,
         allowed_paths: &[String],
@@ -109,6 +110,36 @@ impl MirrorManager {
                     return Err(GitError::Invalid("Invalid prior staged commit"));
                 }
                 sha
+            } else if let Some(prior) = from_sha {
+                validate_oid(prior)?;
+                if attempt.number < 2 {
+                    return Err(GitError::Invalid("Invalid revision base for first Attempt"));
+                }
+                let previous = AttemptGit {
+                    run: attempt.run.clone(),
+                    number: attempt.number - 1,
+                };
+                let previous_ref = previous.full_ref();
+                broker.fetch(
+                    admin,
+                    &attempt.run.mirror,
+                    &format!("{previous_ref}:refs/polyclave/revision"),
+                )?;
+                if broker.oid(admin, "refs/polyclave/revision")? != prior {
+                    return Err(GitError::Invalid(
+                        "The previous Attempt tip differs from the revision base",
+                    ));
+                }
+                let ancestor = broker.git(
+                    admin,
+                    ["merge-base", "--is-ancestor", &attempt.run.base, prior],
+                )?;
+                if ancestor.status.code() != Some(0) {
+                    return Err(GitError::Invalid(
+                        "The revision base is not descended from the Run baseline",
+                    ));
+                }
+                prior
             } else {
                 &attempt.run.base
             };

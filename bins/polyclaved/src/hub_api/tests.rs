@@ -4200,3 +4200,114 @@ async fn two_hub_sessions_with_the_same_request_id_get_two_remote_runs() {
     p.remote.close().await;
     p.primary.close().await;
 }
+
+#[test]
+fn cli_hub_model_surface_matches_declared_tools_and_noninteractive_permissions() {
+    use polyclave_hub::cli_provider::{cli_hub_args, CENTRAL_TOOLS, HUB_TOOLS};
+    use std::collections::BTreeSet;
+
+    let hub_declared: BTreeSet<String> = super::tools::tool_list(true)
+        .into_iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    let manager_declared: BTreeSet<String> = super::tools::tool_list(false)
+        .into_iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    let cli_hub_surface: BTreeSet<String> = HUB_TOOLS
+        .iter()
+        .chain(CENTRAL_TOOLS.iter())
+        .map(|name| (*name).to_owned())
+        .collect();
+    let cli_manager_surface: BTreeSet<String> =
+        HUB_TOOLS.iter().map(|name| (*name).to_owned()).collect();
+    assert_eq!(cli_hub_surface, hub_declared);
+    assert_eq!(cli_manager_surface, manager_declared);
+
+    let claude_hub = cli_hub_args(
+        Vendor::Claude,
+        "default",
+        None,
+        false,
+        "http://127.0.0.1:4310/mcp",
+        std::path::Path::new("mcp.json"),
+        None,
+    );
+    let allowed_hub = claude_hub
+        .windows(2)
+        .find_map(|pair| {
+            (pair[0] == "--allowedTools").then(|| pair[1].to_string_lossy().into_owned())
+        })
+        .expect("--allowedTools for Claude hub");
+    let allowed_hub_set: BTreeSet<String> = allowed_hub.split(',').map(str::to_owned).collect();
+    for tool in &hub_declared {
+        assert!(
+            allowed_hub_set.contains(&format!("mcp__host__{tool}")),
+            "Claude hub surface missing tool {tool}: {allowed_hub}"
+        );
+    }
+    assert!(claude_hub.iter().any(|a| a == "--strict-mcp-config"));
+    assert!(claude_hub
+        .windows(2)
+        .any(|p| p[0] == "--tools" && p[1].is_empty()));
+    assert!(claude_hub
+        .windows(2)
+        .any(|p| p[0] == "--setting-sources" && p[1].is_empty()));
+
+    let claude_mgr = cli_hub_args(
+        Vendor::Claude,
+        "default",
+        None,
+        true,
+        "http://127.0.0.1:4310/mcp",
+        std::path::Path::new("mcp.json"),
+        None,
+    );
+    let allowed_mgr = claude_mgr
+        .windows(2)
+        .find_map(|pair| {
+            (pair[0] == "--allowedTools").then(|| pair[1].to_string_lossy().into_owned())
+        })
+        .expect("--allowedTools for Claude manager");
+    let allowed_mgr_set: BTreeSet<String> = allowed_mgr.split(',').map(str::to_owned).collect();
+    for tool in &manager_declared {
+        assert!(
+            allowed_mgr_set.contains(&format!("mcp__host__{tool}")),
+            "Claude manager surface missing tool {tool}"
+        );
+    }
+    for central in CENTRAL_TOOLS {
+        assert!(
+            !allowed_mgr_set.contains(&format!("mcp__host__{central}")),
+            "Claude manager must not expose central tool {central}"
+        );
+    }
+
+    let codex_hub = cli_hub_args(
+        Vendor::Codex,
+        "default",
+        None,
+        false,
+        "http://127.0.0.1:4310/mcp",
+        std::path::Path::new("mcp.json"),
+        None,
+    );
+    let codex_strs: Vec<String> = codex_hub
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    for required in [
+        "sandbox_mode=\"read-only\"",
+        "approval_policy=\"never\"",
+        "mcp_servers.host.required=true",
+        "mcp_servers.host.bearer_token_env_var=\"POLYCLAVE_MCP_TOKEN\"",
+        "mcp_servers.host.default_tools_approval_mode=\"approve\"",
+    ] {
+        assert!(
+            codex_strs
+                .windows(2)
+                .any(|w| w[0] == "-c" && w[1] == required),
+            "Codex CLI hub missing -c {required}: {codex_strs:?}"
+        );
+    }
+}

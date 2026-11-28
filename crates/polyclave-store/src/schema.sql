@@ -83,7 +83,7 @@ CREATE TABLE runs (
   base_sha            TEXT NOT NULL,
   status              TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'interrupted', 'failed', 'needs_review')),
   current_attempt     INTEGER NOT NULL DEFAULT 0,
-  max_attempts        INTEGER NOT NULL DEFAULT 3,
+  max_attempts        INTEGER NOT NULL DEFAULT 5,
   accepted_attempt_id INTEGER,
   detail              TEXT,
   result_sha          TEXT,

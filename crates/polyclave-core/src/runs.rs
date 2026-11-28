@@ -787,14 +787,21 @@ impl HostTools for RunManager {
         }
         let (_, mandate) = self.store.hub_ticket_mandate(&work.run.ticket_id)?;
         let allowed = staging_allowed_paths(&mandate)?;
+        let from_sha = self.store.attempt_from_sha(scope.id)?;
         let store = self.store.clone();
         let attempt_id = scope.id;
         self.git
-            .commit_and_stage(&work.id, message, paths, &allowed, move || {
-                store
-                    .read(|db| {
-                        Ok(db.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM turns t JOIN runs r ON r.id=t.run_id
+            .commit_and_stage(
+                &work.id,
+                from_sha.as_deref(),
+                message,
+                paths,
+                &allowed,
+                move || {
+                    store
+                        .read(|db| {
+                            Ok(db.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM turns t JOIN runs r ON r.id=t.run_id
                              JOIN attempts a ON a.id=t.attempt_id AND a.run_id=r.id
                              WHERE t.id=?1 AND t.attempt_id=?2 AND t.status='running'
                                AND t.phase='authorized' AND t.mcp_revoked=0
@@ -802,12 +809,13 @@ impl HostTools for RunManager {
                                AND a.status='running' AND a.attempt_no=r.current_attempt
                                AND r.status='running' AND NOT EXISTS
                                    (SELECT 1 FROM results WHERE attempt_id=a.id AND accepted=1))",
-                            params![turn_id, attempt_id],
-                            |row| row.get(0),
-                        )?)
-                    })
-                    .unwrap_or(false)
-            })
+                                params![turn_id, attempt_id],
+                                |row| row.get(0),
+                            )?)
+                        })
+                        .unwrap_or(false)
+                },
+            )
             .map_err(|error| match error {
                 crate::GitError::Invalid(reason) => Error::Invalid(reason),
                 _ => Error::Invalid("Host could not stage this Attempt"),

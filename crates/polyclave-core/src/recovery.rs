@@ -63,7 +63,7 @@ impl TurnRunner {
                 (Some(run), Some(attempt)) => Some(self.runs.old_work(run, attempt)?),
                 _ => None,
             };
-            let run = self.settle(old.id, work.as_ref(), end, writer, None)?;
+            let run = self.settle(old.id, work.as_ref(), end, writer, None, None)?;
             if let (Some(work), Some(run)) = (&work, &run) {
                 if let Some(sha) = &run.result_sha {
                     self.runs.sync_verified(&work.id, sha)?;

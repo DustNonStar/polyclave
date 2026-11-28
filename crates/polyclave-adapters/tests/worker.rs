@@ -777,3 +777,115 @@ fn claude_worker_seatbelt_isolates_host_state_and_allows_only_its_mcp_port() {
     assert!(Path::new(&tmp.1).starts_with(&staging));
     assert!(write(&Path::new(&tmp.1).join("ok")));
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_allows_mdns_resolution_and_denies_sensitive_home_paths() {
+    use polyclave_adapters::{ClaudeIsolation, MacosSeatbeltIsolation};
+    use std::{ffi::OsStr, process::Command};
+
+    let dir = tempfile::tempdir_in("/private/tmp").unwrap();
+    let root = polyclave_os::canonical_real_path(dir.path()).unwrap();
+    let state = root.join("state");
+    let worktree = state.join("worktrees/current");
+    let staging = state.join("staging/current.git");
+    let fake_home = root.join("fake-home");
+    for path in [&worktree, &staging, &fake_home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let sensitive_files = [
+        fake_home.join(".ssh/id_test"),
+        fake_home.join(".codex/auth.json"),
+        fake_home.join(".config/gh/hosts.yml"),
+        fake_home.join(".aws/credentials"),
+        fake_home.join(".gnupg/secring.gpg"),
+        fake_home.join(".kube/config"),
+        fake_home.join(".netrc"),
+        fake_home.join(".git-credentials"),
+    ];
+    for file in &sensitive_files {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, b"secret-fixture").unwrap();
+    }
+
+    let iso = MacosSeatbeltIsolation::detect(&state)
+        .unwrap()
+        .with_home_dir(fake_home);
+    let (exe, args) = iso
+        .verified_worker_command(
+            Path::new("/usr/bin/dscacheutil"),
+            &[],
+            &[worktree.clone(), staging.clone()],
+            &state.join("tmp/mcp-turn-1.json"),
+            "http://127.0.0.1:4310/mcp",
+        )
+        .unwrap();
+
+    let dns = Command::new(&exe)
+        .args(&args[..2])
+        .args([
+            "/usr/bin/dscacheutil",
+            "-q",
+            "host",
+            "-a",
+            "name",
+            "localhost",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        dns.status.success(),
+        "DNS lookup inside Seatbelt failed: {}",
+        String::from_utf8_lossy(&dns.stderr)
+    );
+    let dns_stdout = String::from_utf8_lossy(&dns.stdout);
+    assert!(
+        dns_stdout.contains("127.0.0.1") || dns_stdout.contains("::1"),
+        "unexpected dscacheutil output: {dns_stdout}"
+    );
+
+    for file in &sensitive_files {
+        let out = Command::new(&exe)
+            .args(&args[..2])
+            .arg("/bin/cat")
+            .arg(file.as_os_str())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "Seatbelt allowed reading sensitive path {}",
+            file.display()
+        );
+    }
+    let _ = OsStr::new("");
+}
+
+#[test]
+fn seatbelt_profile_includes_mdns_and_proxy_and_auth_helpers_compile() {
+    let _ = polyclave_adapters::base_environment();
+    let _ = polyclave_adapters::claude_auth_environment();
+    #[cfg(target_os = "macos")]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let state = polyclave_os::canonical_real_path(dir.path()).unwrap();
+        let fake_home = state.join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let iso = polyclave_adapters::MacosSeatbeltIsolation::detect(&state)
+            .unwrap()
+            .with_home_dir(fake_home);
+        let profile = iso.build_profile(&[state.join("work")]).unwrap();
+        assert!(profile.contains("/private/var/run/mDNSResponder"));
+        for rel in [
+            ".ssh",
+            ".codex",
+            ".config/gh",
+            ".aws",
+            ".gnupg",
+            ".kube",
+            ".netrc",
+            ".git-credentials",
+        ] {
+            assert!(profile.contains(rel), "profile missing {rel}");
+        }
+    }
+}

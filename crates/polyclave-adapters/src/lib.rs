@@ -232,10 +232,31 @@ pub fn base_environment() -> Vec<(OsString, OsString)> {
         "LANG",
         "LC_ALL",
         "TERM",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
     ];
     KEYS.iter()
         .filter_map(|k| std::env::var_os(k).map(|v| (OsString::from(k), v)))
         .chain([(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))])
+        .collect()
+}
+
+/// Returns non-empty Claude API/OAuth credentials from the host environment for
+/// controlled passthrough to Claude Worker and Hub CLI subprocesses.
+pub fn claude_auth_environment() -> Vec<(OsString, OsString)> {
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
+        .into_iter()
+        .filter_map(|k| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(|v| (OsString::from(k), v))
+        })
         .collect()
 }
 

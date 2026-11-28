@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 
-const HUB_TOOLS: &[&str] = &[
+pub const HUB_TOOLS: &[&str] = &[
     "list_repo_files",
     "read_repo_file",
     "search_repo",
@@ -27,13 +27,36 @@ const HUB_TOOLS: &[&str] = &[
     "memory_search",
     "memory_propose",
 ];
-const CENTRAL_TOOLS: &[&str] = &[
+pub const CENTRAL_TOOLS: &[&str] = &[
     "create_or_update_ticket",
     "dispatch_task",
     "memory_commit",
     "memory_supersede",
     "memory_archive",
+    "start_council",
+    "run_pr_gate",
+    "dispatch_remote",
 ];
+
+pub fn cli_hub_args(
+    vendor: Vendor,
+    model: &str,
+    thread: Option<&str>,
+    manager: bool,
+    mcp_url: &str,
+    config: &Path,
+    system_prompt: Option<(&str, bool)>,
+) -> Vec<OsString> {
+    args(
+        vendor,
+        model,
+        thread,
+        manager,
+        mcp_url,
+        config,
+        system_prompt,
+    )
+}
 
 fn args(
     vendor: Vendor,
@@ -60,6 +83,7 @@ fn args(
                 "features.remote_plugin=false",
                 "mcp_servers.host.bearer_token_env_var=\"POLYCLAVE_MCP_TOKEN\"",
                 "mcp_servers.host.required=true",
+                "mcp_servers.host.default_tools_approval_mode=\"approve\"",
             ] {
                 a.extend(["-c".into(), opt.into()]);
             }
@@ -414,6 +438,7 @@ impl CliTransport for SupervisedCli {
             .map_err(|_| Error::NotStarted)?;
         }
         let mut env = polyclave_adapters::base_environment();
+        let mut secrets = vec![claim.turn_credential().to_owned()];
         match self.vendor {
             Vendor::Codex => {
                 env.push(("CODEX_HOME".into(), self.home.clone().into_os_string()));
@@ -428,6 +453,12 @@ impl CliTransport for SupervisedCli {
                     "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
                     polyclave_adapters::claude_secure_storage_dir(),
                 ));
+                for (key, value) in polyclave_adapters::claude_auth_environment() {
+                    if let Some(secret) = value.to_str() {
+                        secrets.push(secret.to_owned());
+                    }
+                    env.push((key, value));
+                }
             }
             Vendor::Agy => {
                 env.push(("GEMINI_HOME".into(), self.home.clone().into_os_string()));
@@ -524,7 +555,7 @@ impl CliTransport for SupervisedCli {
             if size > 4 * 1024 * 1024 {
                 return Err(Error::Limit);
             }
-            if line.contains(claim.turn_credential()) {
+            if secrets.iter().any(|secret| line.contains(secret)) {
                 continue;
             }
             let mut is_assistant_line = false;
@@ -611,7 +642,10 @@ impl CliTransport for SupervisedCli {
                 return Err(Error::MissingThread);
             }
             if !stderr_text.trim().is_empty() {
-                let sanitized = stderr_text.replace(claim.turn_credential(), "[redacted]");
+                let mut sanitized = stderr_text.clone();
+                for secret in &secrets {
+                    sanitized = sanitized.replace(secret, "[redacted]");
+                }
                 let end = sanitized.floor_char_boundary(sanitized.len().min(512));
                 eprintln!(
                     "CLI Hub turn {} failed (status {status}): {}",

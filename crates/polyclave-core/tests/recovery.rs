@@ -294,12 +294,12 @@ fn allow_retry_survives_restart_and_attempt_limit_is_enforced() {
     let (_tmp, rm, runner, req) = fixture();
     let (r, _) = rm.accept(req).unwrap();
     let mut mode = TurnMode::Start;
-    for n in 1..=3 {
+    for n in 1..=r.max_attempts {
         let work = rm.begin(&r.id, mode).unwrap();
         assert_eq!(work.attempt.attempt_no, n);
         crashed(&rm, &work, "previous-boot".into());
         assert_eq!(runner.recover().unwrap(), 1);
-        if n < 3 {
+        if n < r.max_attempts {
             rm.resolve(&r.id, Resolution::AllowRetry, "continue fresh")
                 .unwrap();
             assert_eq!(runner.recover().unwrap(), 0);

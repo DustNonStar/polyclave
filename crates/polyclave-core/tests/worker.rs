@@ -601,3 +601,188 @@ fn staging_rpc(
     assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
     serde_json::from_str(body).unwrap()
 }
+
+#[tokio::test]
+async fn revision_commit_and_stage_preserves_prior_attempt_changes_with_partial_paths() {
+    use serde_json::{json, Value};
+
+    let (_tmp, manager, mut request) = repository();
+    let source = manager
+        .store
+        .hub_enqueue("hub", "rev-stage-test", "Modify a.rs and b.rs")
+        .unwrap();
+    let ticket = manager
+        .store
+        .hub_ticket(
+            "hub",
+            source.id,
+            "Revision stage test",
+            json!({
+                "goal": "Modify a.rs and b.rs",
+                "allowed_paths": ["a.rs", "b.rs"],
+                "forbidden_actions": [],
+                "acceptance_criteria": []
+            }),
+            2,
+        )
+        .unwrap();
+    request.ticket_id = Some(ticket.id);
+    let (run, _) = manager.accept(request).unwrap();
+    let work1 = manager.begin(&run.id, TurnMode::Start).unwrap();
+    let (host, key1, key2) = ("rev-stage-host", "rev-key-1", "rev-key-2");
+    let rid = run.id.clone();
+    let worker = run.worker_session_id.clone();
+    let attempt1 = work1.attempt.id;
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE attempts SET status='running' WHERE id=?1", [attempt1])?;
+            db.execute(
+                "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+                 VALUES(1,?1,?2,?3,'start','running','authorized',?4,'boot',?5,'now')",
+                rusqlite::params![worker, rid, attempt1, host, key1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (addr, server) = Mcp::new(manager.store.clone(), host, Arc::new(manager.clone()))
+        .listen()
+        .await
+        .unwrap();
+    let call = |token: &'static str, name: &'static str, args: Value| {
+        tokio::task::spawn_blocking(move || staging_rpc(addr, token, name, args))
+    };
+
+    std::fs::write(work1.workspace.cwd.join("a.rs"), "v1 a\n").unwrap();
+    std::fs::write(work1.workspace.cwd.join("b.rs"), "v1 b\n").unwrap();
+    let staged1 = call(
+        key1,
+        "commit_and_stage",
+        json!({"message": "attempt 1", "paths": ["a.rs", "b.rs"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged1["result"]["isError"], false, "{staged1}");
+    let sha1 = staged1["result"]["structuredContent"]["sha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let receipt1 = call(
+        key1,
+        "submit_result",
+        json!({"run_id": run.id, "branch": work1.attempt.branch, "sha": sha1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt1["result"]["isError"], false, "{receipt1}");
+
+    let rid = run.id.clone();
+    let sha1_db = sha1.clone();
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE turns SET status='completed', mcp_revoked=1 WHERE id=1", [])?;
+            db.execute("UPDATE attempts SET status='completed' WHERE id=?1", [attempt1])?;
+            db.execute(
+                "UPDATE runs SET status='done', result_sha=?2, result_source='agent', accepted_attempt_id=?3, detail=NULL WHERE id=?1",
+                rusqlite::params![rid, sha1_db, attempt1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let work2 = manager.begin_revision(&run.id).unwrap();
+    assert_eq!(work2.attempt.attempt_no, 2);
+    assert_eq!(
+        manager
+            .store
+            .attempt_from_sha(work2.attempt.id)
+            .unwrap()
+            .as_deref(),
+        Some(sha1.as_str())
+    );
+
+    let rid = run.id.clone();
+    let worker = run.worker_session_id.clone();
+    let attempt2 = work2.attempt.id;
+    manager
+        .store
+        .write(move |db| {
+            db.execute("UPDATE attempts SET status='running' WHERE id=?1", [attempt2])?;
+            db.execute(
+                "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+                 VALUES(2,?1,?2,?3,'worker_chat','running','authorized',?4,'boot',?5,'now')",
+                rusqlite::params![worker, rid, attempt2, host, key2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Modify ONLY a.rs in Attempt 2 and pass only paths: ["a.rs"]
+    std::fs::write(work2.workspace.cwd.join("a.rs"), "v2 a\n").unwrap();
+    let staged2 = call(
+        key2,
+        "commit_and_stage",
+        json!({"message": "attempt 2 partial", "paths": ["a.rs"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged2["result"]["isError"], false, "{staged2}");
+    let sha2 = staged2["result"]["structuredContent"]["sha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        git(
+            &work2.workspace.staging,
+            &["rev-parse", &format!("{sha2}^")]
+        ),
+        sha1
+    );
+    assert_eq!(
+        git(&work2.workspace.staging, &["show", &format!("{sha2}:a.rs")]),
+        "v2 a"
+    );
+    assert_eq!(
+        git(&work2.workspace.staging, &["show", &format!("{sha2}:b.rs")]),
+        "v1 b"
+    );
+
+    let receipt2 = call(
+        key2,
+        "submit_result",
+        json!({"run_id": run.id, "branch": work2.attempt.branch, "sha": sha2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt2["result"]["isError"], false, "{receipt2}");
+    let target2 = work2.id.full_ref();
+    assert_eq!(git(&work2.id.run.mirror, &["rev-parse", &target2]), sha2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn prelaunch_error_persists_into_run_detail_and_default_max_attempts_is_five() {
+    let f = fixture().await;
+    let mut req = f.request.clone();
+    req.vendor = polyclave_proto::Vendor::Claude;
+    let (admitted, _) = f.manager.accept(req).unwrap();
+    assert_eq!(admitted.max_attempts, 5);
+    let job = f
+        .runner
+        .schedule(
+            &admitted.id,
+            TurnMode::Start,
+            "claude without isolation".into(),
+        )
+        .unwrap();
+    let settled = finished(job).await;
+    assert_eq!(settled.status, RunStatus::Interrupted);
+    assert_eq!(
+        settled.detail.as_deref(),
+        Some("Claude worker not started: no verified external filesystem and network sandbox is available")
+    );
+}

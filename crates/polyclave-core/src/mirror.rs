@@ -698,6 +698,7 @@ exec git "$@"
         let job = std::thread::spawn(move || {
             let result = mirror.commit_and_stage(
                 &child_attempt,
+                None,
                 "change",
                 None,
                 &["allowed.txt".into()],
