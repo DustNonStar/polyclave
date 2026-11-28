@@ -1441,3 +1441,47 @@ Branch `fix/hardening-batch2-pr-gate` (Items 2.1–2.6 + self-review `7c1dc1e` +
 - **Approved test/fixture updates:** all fixture and schema-column adjustments documented in `PLAN-ISSUES.md` (Items 2.1–2.6) verified with no weakened assertions.
 - **Visual & automated verification (macOS):** visually inspected `handcheck/hardening-batch2/{r6,r7}-phone-dark-card.jpg`; `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 205 passed, 0 failed (including `TurnDto` compile-fail doctest); `proto.ts` diff clean; UI `tsc --noEmit`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` (1440×900 & 375×812, dark & light) passed; `bash scripts/privacy-scan.sh` clean.
 - **Open note:** PR-gate notices still use `hub_enqueue` (`source='user'`, pre-existing channel, recorded in `PLAN-ISSUES.md` for a dedicated follow-up). Pushing `main` now for native macOS + Windows CI.
+
+## Audit Hardening — Batch 3 (Phone Pairing, Exact-SHA Approval & Restart Reconnect) — partial
+
+- cad76dc fix(auth): require Tailscale identity and persisted binding for remote device auth — workspace tests: 206 passed
+- 3393d2e feat(ui): pair over configured Tailscale HTTPS origin and exchange ticket in page — workspace tests: 206 passed
+- 1da3de1 docs: record the Batch 3 stop point and the open Item 3.3 decision — workspace tests: 207 passed
+
+Code head: `fix/hardening-batch3-phone-approval` at the commit after `1da3de1` (the one that updates the pairing assertion), branched from `main@3c3d4f1`.
+
+**Batch 3 is not finished.** Items 3.1 and 3.2 are done and green; Item 3.3 is partial on the local branch `wip/human-approval` (`e744792`, never pushed) and Item 3.4 is not started. `PLAN-ISSUES.md` records the stop point, what exists, what is missing, and the one design decision the reviewer has to make before 3.3 can be finished.
+
+### Implementation and evidence (offline fakes only)
+
+- **3.1 — device auth.** `Store::verify_device_token` now requires the presented peer identity to equal the persisted one in both directions, so a token paired on the machine itself cannot pass a remote Tailscale check, and a bound device cannot be used without its identity. `X-AgentMesh-Node` is no longer read as an identity in `auth::require` or in `routes::exchange_pairing` (it stays a Mesh routing label; nothing else read it). New test `remote_device_auth_requires_tailscale_identity_and_a_matching_binding` covers the missing-identity, mesh-header-only, unbound-token-remote and mesh-exchange refusals plus both allowed paths; restoring either the lenient peer check or the header fallback makes it fail with `200 != 403`.
+- **3.2 — pairing link and in-page exchange.** The daemon reads `POLYCLAVE_TAILSCALE_ORIGIN` (a bare `https` authority; anything with a path, query, fragment, userinfo or whitespace is refused) and `POST /api/pairing/tickets` answers `https://<host>/#pair=<secret>`, or `null` for both `origin` and `qr_uri` when none is configured — the Settings card then says what to set instead of drawing a QR that cannot work. `sse.ts` gained `trustedOrigin` (loopback `http://127.0.0.1:<port>`, or on an `https` page exactly its own origin) used by `request` and `follow`; `bootstrap` performs the in-page exchange, strips the secret with `history.replaceState`, keeps the device token in `localStorage` and reuses it later, and a refused exchange never replaces a token the device already holds. `flows.ts` token dialog is role-aware for the phone. Tests: `pairing_qr_points_at_the_configured_tailscale_origin` and `tests/pairing-flow.mjs` (1440×900 and 375×812: scan → exchange → secret stripped → device token authorizes API and SSE → replayed link refused and old token kept → revocation → re-pair).
+
+### Tests
+
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` 0 warnings; `cargo test --locked --workspace` **207 passed, 0 failed, 0 ignored** at the branch head.
+- UI: `npx tsc --noEmit`, `npm run build`, `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` — offline browser, QR round trip, approval card (1440/375, dark/light) and the new pairing flow (1440/375) all pass. `proto.ts` unchanged (`git diff --exit-code` clean).
+- Existing-test edits, all in `PLAN-ISSUES.md` with the work-list justification: `stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notifications` asserted the dead `polyclave://pair?ticket=` scheme and now asserts the exact https link (stricter, same intent).
+
+### Hand check (offline browser only)
+
+- `handcheck/hardening-batch3/item2-phone-paired.jpg` — 375×812 after a scanned link: the session is selected, the status bar shows the daemon connected, no overflow.
+- `handcheck/hardening-batch3/item2-phone-revoked.jpg` — 375×812 with the device token revoked: "Reconnect this device" dialog with the device-token field and its explanation; the page does not claim to be connected.
+- `handcheck/hardening-batch3/measurements.md` — both widths, both steps: `scrollWidth == innerWidth`, no overflowing element.
+
+### Issues
+
+`PLAN-ISSUES.md` has two new entries: the 3.1 strictness note, the 3.2 configuration/link change with the assertion update, and the Batch 3 stop point with the open Item 3.3 decision (keep the remote head re-check and teach the fake GitHub the real head, or drop the round-trip and rely on the ledger plus `enableAutoMerge(expectedHeadOid)`) — recommendation A.
+
+### Cleanup
+
+No daemon, browser or fixture process is left running; the browser suites close their servers and browsers in `finally`; the only hand-check state is under `/tmp/polyclave-hc/hardening-batch3/`. No real vendor CLI, no real Tailscale, no real GitHub credential was used.
+
+Privacy scan: **not clean** — `privacy-scan: email address in added lines`, pointing at a fixture literal I introduced in `3393d2e`. A later commit removes it from the files, but the scan reads every commit's added lines in `origin/main..HEAD`, so the branch cannot print `clean` without touching that unpublished commit. Recorded in `PLAN-ISSUES.md` with the options; nothing was pushed.
+
+### Not done, and why
+
+- **Item 3.3** is partial, on `wip/human-approval`: the explicit `PrGateStatus::AwaitingHumanApproval`, the in-place `pr_gates` rebuild that keeps `pr_reviews` rows while the status `CHECK` gains the value, `Store::await_human_approval` / `Store::approve_pr_gate` (SHA compared inside the write), `run_pr_gate` stopping at the wait instead of arming, and `pr_gate::approve_pr_gate` + `arm_and_enable` as the only path to `enableAutoMerge`. Missing: the diff endpoint and its DTO, `POST /api/pr-gates/{id}/approve`, the approval card, `proto.ts`, the 375 px approve/stale-SHA browser test, `DESIGN.md`, screenshots. Six `pr_gate` tests there still need the reviewer's answer to the design question above.
+- **Item 3.4** not started: 401 recovery after a daemon restart and clearing `S.live` on `resync_required`.
+- **Unverified in real environments:** nothing here was run against a real Tailscale tailnet, a real phone, a real daemon restart or real GitHub. Every check above is an offline fake, an in-process router or a Playwright page served by the test itself. Native Windows CI: none on this host.
+- Nothing was merged or pushed; the branch stays local for independent blind review.

@@ -443,3 +443,13 @@ New tests: `pairing_qr_points_at_the_configured_tailscale_origin` (origin valida
 - **C:** leave the state and the approval endpoint but keep `run_pr_gate` arming as it does today behind a flag until 3.3 is finished. Contradicts the audit; not recommended.
 
 **Item 3.2 changed one existing assertion (recorded here):** `stage3_pairing_dual_identity_auth_revocation_mesh_and_private_notifications` asserted the ticket's `qr_uri` started with `polyclave://pair?ticket=`. That scheme is the audit's finding — a phone browser has no handler for it — so the test now configures a pairing origin and asserts the exact link `https://polyclave.tailnet.ts.net/#pair=<secret>`. The intent (a ticket is created with the link the phone opens) is unchanged and the assertion is stricter than before.
+
+## [detail] `privacy-scan.sh` is not clean on this branch, because of an email-shaped fixture literal in an unpublished commit
+
+**What happened.** `bash scripts/privacy-scan.sh` prints `privacy-scan: email address in added lines` and names a URL userinfo example (`https://<userinfo>@<host>`). That string was a rejection case in `pairing_qr_points_at_the_configured_tailscale_origin`, added in `3393d2e`. A later commit replaces it with a value built at run time, so the file on disk no longer contains it (`grep` finds nothing), but the scan walks `git log -p origin/main..HEAD` and therefore still sees the line the commit added.
+
+**Why.** The scan is deliberately history-based: it inspects what a push would publish, not only the final tree. The literal looked like an address because I wrote the userinfo case of a URL as a concrete string instead of constructing it.
+
+**Options.** (1) Rewrite my own unpublished commit `3393d2e` to carry the constructed form — history stays linear and the branch then scans `clean`, but it is a history rewrite, which `AGENTS.md` rule 6 forbids without the reviewer's decision, even on an unpushed local branch. (2) Fold the corrected line in during the merge (the reviewer rebases onto `main` anyway) — no rewrite by me, and the merged commit never adds the literal. (3) Leave it; not acceptable, since a later push would publish the line.
+
+**Recommendation.** Option 2, with option 1 as the fallback if the reviewer prefers a clean branch before merging: the string is not a secret and names no real address (`polyclave.tailnet.ts.net` is a placeholder host), so this is hygiene, not a leak. Nothing was pushed; the branch stays local.
