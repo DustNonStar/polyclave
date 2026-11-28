@@ -373,3 +373,12 @@ One existing assertion had to change with the schema itself: `test_results_table
 No existing assertion was weakened otherwise. Two fixture-level adjustments were required: `NewTestResult` literals in `crates/polyclave-core/tests/recovery.rs`, `crates/polyclave-store/tests/store.rs` and `crates/polyclave-adapters/src/mcp.rs` gained `check_id` (empty), and the observer test fake kept its `sha_abc` head only for the tests that do not record rows — the new paged fixture uses a full commit id, because a recorded check-run row is keyed by an exact 40-hex SHA.
 
 New tests: `every_check_run_page_is_read_so_a_page_two_failure_is_evidence` (page 2 read, same-SHA `pending->failed` reported, change event published), `a_pr_merged_before_the_first_poll_still_records_its_checks`, `same_named_checks_from_different_sources_keep_their_own_rows` (store), and browser case `r7` in `approval-card.mjs` (an incomplete list stays non-green).
+
+## [detail] Batch 2 Item 2.6 changed two internal signatures
+
+Routing SCM events needs the Run that each gate belongs to, and waking the owning Hub needs a callback the daemon provides, so two internal interfaces moved (no wire or ledger change):
+
+1. `ScmObserver::new(store, scm)` no longer takes a pinned `hub_session_id`; the owner is read per gate with the new `Store::run_hub_session`. `ObservedEvent` gained `run_id` so `emit_event` can look the owner up. `Hub::start_scm_observer(scm, interval)` therefore lost its `Option<String>` argument, and `try_start_scm_observer_from_keychain` no longer picks "the first Hub by created_at" — the bug the audit found. Call sites updated: `bins/polyclaved/src/hub_api.rs` and the observer test helper `observer_for`; the daemon test `scm_observer_starts_polls_and_stops_cleanly_on_hub_close` no longer passes the pinned id (its assertions are unchanged).
+2. `ScmObserver::with_wake(callback)` makes the observer call back after a successful `hub_enqueue_external`; the daemon wires it to `Hub::kick`. Waking is a `Fn(&str)`, so the hub crate stays free of daemon types.
+
+New test: `scm_events_route_to_the_owning_hub_and_wake_it` (daemon: empty database, two projects registered afterwards, one event each; exactly the owning Hub is woken; the queued message keeps `source='host'` and `{"kind":"scm_observation"}` metadata; the other project's Hub never sees it). Running it with the owner pinned to one session fails with `["hub-a", "hub-a"]`.

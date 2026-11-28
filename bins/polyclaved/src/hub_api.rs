@@ -664,12 +664,10 @@ impl Hub {
     pub(crate) fn set_default_reviewers(&self, reviewers: Vec<ReviewerSpec>) {
         *self.stage2.default_reviewers.lock().unwrap() = Some(reviewers);
     }
-    pub async fn start_scm_observer(
-        &self,
-        scm: Arc<dyn ScmClient>,
-        hub_session_id: Option<String>,
-        interval: Duration,
-    ) {
+    /// Starts the SCM observer. Each event goes to the Hub that owns the Run it
+    /// is about — resolved per gate, so a project registered after startup is
+    /// routed correctly — and waking that Hub after the event is queued.
+    pub async fn start_scm_observer(&self, scm: Arc<dyn ScmClient>, interval: Duration) {
         self.set_scm(scm.clone());
         let mut slot = self.lifecycle.observer.lock().await;
         if let Some((prev_tx, prev_handle)) = slot.take() {
@@ -680,7 +678,9 @@ impl Hub {
             return;
         }
         let (tx, rx) = watch::channel(false);
-        let observer = ScmObserver::new(self.store.clone(), scm, hub_session_id);
+        let hub = self.clone();
+        let observer = ScmObserver::new(self.store.clone(), scm)
+            .with_wake(Arc::new(move |session: &str| hub.kick(session.to_owned())));
         let handle = observer.spawn(interval, rx);
         *slot = Some((tx, handle));
     }
@@ -705,25 +705,11 @@ impl Hub {
         let Some(client) = creds else {
             return;
         };
-        let hub_session = self
-            .store
-            .read(|db| {
-                db.query_row(
-                    "SELECT id FROM sessions WHERE role='hub' ORDER BY created_at,id LIMIT 1",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(Into::into)
-            })
-            .ok()
-            .flatten();
         let scm: Arc<dyn ScmClient> = Arc::new(client);
         // Startup reconciliation: any auto-merge whose remote outcome was never
         // confirmed is settled against GitHub before the host accepts new work.
         let _ = self.reconcile_auto_merge(scm.clone()).await;
-        self.start_scm_observer(scm, hub_session, Duration::from_secs(30))
-            .await;
+        self.start_scm_observer(scm, Duration::from_secs(30)).await;
     }
     pub async fn start_notification_dispatcher(&self) {
         let mut slot = self.lifecycle.notifier.lock().await;

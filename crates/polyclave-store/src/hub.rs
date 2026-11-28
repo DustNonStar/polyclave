@@ -555,6 +555,21 @@ impl Store {
             Ok(())
         })
     }
+    /// The Hub session that owns a Run. Events about a Run go to its own Hub,
+    /// whichever project registered it and whenever it was registered.
+    pub fn run_hub_session(&self, run_id: &str) -> Result<Option<String>> {
+        let run_id = run_id.to_owned();
+        self.read(move |db| {
+            Ok(db
+                .query_row(
+                    "SELECT hub_session_id FROM runs WHERE id=?1",
+                    [run_id],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+    }
+
     pub fn hub_ticket_mandate(&self, id: &str) -> Result<(TicketIntent, Value)> {
         self.read(|db| {
             let t = load_ticket(db, id)?;

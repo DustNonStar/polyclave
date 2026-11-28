@@ -26,6 +26,9 @@ pub enum ObservedEventKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ObservedEvent {
     pub gate_id: String,
+    /// The Run this gate belongs to: its `hub_session_id` decides which Hub the
+    /// event is delivered to and woken.
+    pub run_id: String,
     pub repo_slug: String,
     pub pr_number: u32,
     pub kind: ObservedEventKind,
@@ -52,11 +55,15 @@ fn check_status(check: &CheckRunInfo) -> TestStatus {
 pub const INCOMPLETE_CHECKS_NAME: &str = "polyclave/check-runs";
 pub const INCOMPLETE_CHECKS_ID: &str = "incomplete";
 
+type HubWake = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ScmObserver {
     store: Store,
     scm: Arc<dyn ScmClient>,
-    hub_session_id: Option<String>,
+    /// Called after an external event is queued for a Hub session, so an idle
+    /// Hub reads it now instead of on its next turn.
+    wake: Option<HubWake>,
 }
 
 fn map_store_err(err: polyclave_store::Error) -> Error {
@@ -83,12 +90,21 @@ fn map_scm_err(err: ScmError) -> Error {
 }
 
 impl ScmObserver {
-    pub fn new(store: Store, scm: Arc<dyn ScmClient>, hub_session_id: Option<String>) -> Self {
+    /// The owning Hub of each event is looked up per gate from the Run's own
+    /// `hub_session_id`; nothing is pinned at startup, so a project registered
+    /// after the daemon started still routes to its own Hub.
+    pub fn new(store: Store, scm: Arc<dyn ScmClient>) -> Self {
         Self {
             store,
             scm,
-            hub_session_id,
+            wake: None,
         }
+    }
+
+    /// Wakes the owning Hub session after a queued external event.
+    pub fn with_wake(mut self, wake: HubWake) -> Self {
+        self.wake = Some(wake);
+        self
     }
 
     /// The admission policy of the Run's own checkout, read once per gate.
@@ -128,11 +144,21 @@ impl ScmObserver {
         if !admitted {
             return false;
         }
-        if let Some(ref hub_id) = self.hub_session_id {
+        // The owning Hub is the Run's own session. An event is never delivered to
+        // another project's Hub, and a queued event wakes that Hub so it is read
+        // without waiting for the person to say something.
+        let owner = self.store.run_hub_session(&event.run_id).ok().flatten();
+        if let Some(ref hub_id) = owner {
             let intent = format!("scm:{}:{}:{}", event.repo_slug, event.pr_number, dedupe_key);
-            let _ = self
+            if self
                 .store
-                .hub_enqueue_external(hub_id, &intent, &event.summary);
+                .hub_enqueue_external(hub_id, &intent, &event.summary)
+                .is_ok()
+            {
+                if let Some(wake) = &self.wake {
+                    wake(hub_id);
+                }
+            }
         }
         let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         let gate_id = event.gate_id.clone();
@@ -270,6 +296,7 @@ impl ScmObserver {
                     .set_pr_gate_status(&gate.id, PrGateStatus::Merged);
                 let ev = ObservedEvent {
                     gate_id: gate.id.clone(),
+                    run_id: gate.run_id.clone(),
                     repo_slug: gate.repo_slug.clone(),
                     pr_number,
                     kind: ObservedEventKind::Merged,
@@ -289,6 +316,7 @@ impl ScmObserver {
                 cursor.last_event_etag = Some("conflict".to_owned());
                 let ev = ObservedEvent {
                     gate_id: gate.id.clone(),
+                    run_id: gate.run_id.clone(),
                     repo_slug: gate.repo_slug.clone(),
                     pr_number,
                     kind: ObservedEventKind::MergeConflict,
@@ -323,6 +351,7 @@ impl ScmObserver {
                     seen_review_id = rid;
                     let ev = ObservedEvent {
                         gate_id: gate.id.clone(),
+                        run_id: gate.run_id.clone(),
                         repo_slug: gate.repo_slug.clone(),
                         pr_number,
                         kind: ObservedEventKind::HumanReview,
@@ -355,6 +384,7 @@ impl ScmObserver {
                     }
                     let ev = ObservedEvent {
                         gate_id: gate.id.clone(),
+                        run_id: gate.run_id.clone(),
                         repo_slug: gate.repo_slug.clone(),
                         pr_number,
                         kind: ObservedEventKind::Comment,
@@ -398,6 +428,7 @@ impl ScmObserver {
                 );
                 let ev = ObservedEvent {
                     gate_id: gate.id.clone(),
+                    run_id: gate.run_id.clone(),
                     repo_slug: gate.repo_slug.clone(),
                     pr_number,
                     kind: ObservedEventKind::CiFailure,
@@ -432,6 +463,7 @@ impl ScmObserver {
                     }
                     let ev = ObservedEvent {
                         gate_id: gate.id.clone(),
+                        run_id: gate.run_id.clone(),
                         repo_slug: gate.repo_slug.clone(),
                         pr_number,
                         kind: ObservedEventKind::CiFailure,
@@ -616,7 +648,7 @@ mod tests {
             )
             .unwrap(),
         );
-        ScmObserver::new(store.clone(), scm, Some("hub".into()))
+        ScmObserver::new(store.clone(), scm)
     }
 
     /// GitHub stand-in for the check-run tests: two pages of check runs, a
@@ -1001,7 +1033,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let observer = ScmObserver::new(store.clone(), scm, Some("hub".into()));
+        let observer = ScmObserver::new(store.clone(), scm);
 
         // First poll: sees 1 human review, 1 human comment, 1 CI failure; ignores agent self-review
         let events = observer.poll_once().await.unwrap();

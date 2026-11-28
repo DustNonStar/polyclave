@@ -1159,6 +1159,108 @@ async fn pr_gate_revision_turns_a_verified_run_into_a_new_attempt_with_its_own_r
     drop(dir);
 }
 
+/// Item 2.6: the daemon starts with an empty database; two projects are
+/// registered afterwards. Each SCM event goes to the Hub that owns the Run, wakes
+/// that Hub, and is stored with the host-observation identity.
+#[tokio::test]
+async fn scm_events_route_to_the_owning_hub_and_wake_it() {
+    let (dir, hub, _rx) = test_hub().await;
+    let mut owners = Vec::new();
+    for (suffix, slug) in [("a", "org/repo-a"), ("b", "org/repo-b")] {
+        let hub_id = format!("hub-{suffix}");
+        let worker = format!("w-{suffix}");
+        let ticket = format!("t-{suffix}");
+        let run = format!("run-{suffix}");
+        let repo = dir.path().join(format!("repo-{suffix}"));
+        let repo_str = repo.to_str().unwrap().to_owned();
+        let (hub_id_row, worker_row, ticket_row, run_row) =
+            (hub_id.clone(), worker.clone(), ticket.clone(), run.clone());
+        let store = hub.store.clone();
+        let gate_store = store.clone();
+        store
+            .write(move |db| {
+                db.execute(
+                    "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES(?1,?1,'hub',?2,'api','gpt-5','now')",
+                    params![hub_id_row, repo_str],
+                )?;
+                db.execute(
+                    "INSERT INTO sessions(id,name,role,repo_cwd,profile_id,provider_model,created_at)
+                     VALUES(?1,?1,'worker',?2,'api','gpt-5','now')",
+                    params![worker_row, repo_str],
+                )?;
+                db.execute(
+                    "INSERT INTO tickets(id,hub_session_id,repo_cwd,title,mandate_json,source_kind,max_runs,runs_used,status,created_at,updated_at)
+                     VALUES(?1,?2,?3,'Project','{\"goal\":\"g\",\"allowed_paths\":[\"src/**\"]}','explicit_user',4,1,'active','now','now')",
+                    params![ticket_row, hub_id_row, repo_str],
+                )?;
+                db.execute(
+                    "INSERT INTO runs(id,ticket_id,hub_session_id,worker_session_id,request_id,repo_cwd,vendor,model,instructions,mirror_remote,base_branch,base_sha,status,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,'req',?5,'codex','gpt-5','do it','origin','main','base','done','now','now')",
+                    params![run_row, ticket_row, hub_id_row, worker_row, repo_str],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let gate = gate_store
+            .create_pr_gate(polyclave_store::NewPrGate {
+                run_id: run.clone(),
+                repo_slug: slug.to_owned(),
+                branch: "feat/x".into(),
+                base_sha: "base".into(),
+                head_sha: "sha_observed".into(),
+                touched_paths: vec!["src/**".into()],
+            })
+            .unwrap();
+        gate_store
+            .record_pr_opened(&gate.id, 42, "https://github.com/org/repo/pull/42")
+            .unwrap();
+        owners.push((hub_id, slug));
+    }
+
+    let scm = Arc::new(MockScmClient {
+        state: Arc::new(MockScmState::default()),
+        polled: None,
+    });
+    let wakes = Arc::new(Mutex::new(Vec::new()));
+    let woke = wakes.clone();
+    let kicked = hub.clone();
+    let observer = polyclave_hub::scm_observer::ScmObserver::new(hub.store.clone(), scm).with_wake(
+        Arc::new(move |session: &str| {
+            woke.lock().unwrap().push(session.to_owned());
+            // The same wake the daemon wires: an idle Hub reads its inbox now.
+            kicked.kick(session.to_owned());
+        }),
+    );
+    let events = observer.poll_once().await.unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+
+    // Exactly the owning Hub was woken for each event.
+    let mut woken = wakes.lock().unwrap().clone();
+    woken.sort();
+    assert_eq!(woken, vec!["hub-a".to_owned(), "hub-b".to_owned()]);
+
+    for (owner, slug) in &owners {
+        let other = if owner == "hub-a" { "hub-b" } else { "hub-a" };
+        let messages = hub.store.hub_messages(owner).unwrap();
+        assert_eq!(messages.len(), 1, "{owner}: {messages:?}");
+        assert_eq!(messages[0].source, "host");
+        assert_eq!(
+            messages[0].metadata,
+            Some(json!({"kind": polyclave_store::HOST_OBSERVATION_KIND}))
+        );
+        assert!(messages[0].text.contains(slug), "{messages:?}");
+        // The other project's Hub never sees this event.
+        assert!(hub
+            .store
+            .hub_messages(other)
+            .unwrap()
+            .iter()
+            .all(|m| !m.text.contains(slug)));
+    }
+    hub.close().await;
+}
+
 /// Item 2.2: the reviewed base and the authorized path scope come from the
 /// persisted Run and its Ticket mandate. A caller that tries to widen either is
 /// refused before anything is pushed, over HTTP and through the MCP tool.
@@ -1803,8 +1905,7 @@ async fn scm_observer_starts_polls_and_stops_cleanly_on_hub_close() {
         polled: Some(polled.clone()),
     });
 
-    hub.start_scm_observer(scm, Some("hub".into()), Duration::from_secs(60))
-        .await;
+    hub.start_scm_observer(scm, Duration::from_secs(60)).await;
     tokio::time::timeout(Duration::from_secs(2), polled_wait)
         .await
         .expect("SCM Observer should poll immediately on startup");
