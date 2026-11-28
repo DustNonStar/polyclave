@@ -23,6 +23,15 @@ pub fn check_touched_paths(
     head_sha: &str,
     touched_paths: &[String],
 ) -> Result<ScopeCheckResult, GitError> {
+    let changed = read_touched_paths(mirror, base_sha, head_sha)?;
+    Ok(validate_touched_paths(&changed, touched_paths))
+}
+
+pub(crate) fn read_touched_paths(
+    mirror: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<Vec<String>, GitError> {
     ensure_real(mirror)?;
     validate_oid(base_sha)?;
     validate_oid(head_sha)?;
@@ -68,13 +77,11 @@ pub fn check_touched_paths(
 
     let raw = std::str::from_utf8(&output.stdout)
         .map_err(|_| GitError::Invalid("non-Unicode path in diff"))?;
-    let changed_paths: Vec<String> = raw
+    Ok(raw
         .split('\0')
         .filter(|p| !p.is_empty())
         .map(str::to_owned)
-        .collect();
-
-    Ok(validate_touched_paths(&changed_paths, touched_paths))
+        .collect())
 }
 
 /// Validate a list of changed paths against `touched_paths` glob/prefix rules.

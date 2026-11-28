@@ -22,6 +22,8 @@ pub fn codex_args(
         "approval_policy=\"never\"",
         "sandbox_mode=\"workspace-write\"",
         "sandbox_workspace_write.network_access=false",
+        "sandbox_workspace_write.exclude_slash_tmp=true",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
         "mcp_servers.host.bearer_token_env_var=\"POLYCLAVE_MCP_TOKEN\"",
         "mcp_servers.host.default_tools_approval_mode=\"approve\"",
     ] {
@@ -65,7 +67,7 @@ pub fn codex_worker(ctx: &WorkerContext<'_>) -> Result<WorkerCommand, Error> {
     env.push(("POLYCLAVE_MCP_TOKEN".into(), ctx.token.into()));
     Ok(WorkerCommand {
         executable: resolve_cli_binary(ctx.executable)?,
-        args: codex_args(&paths, ctx.mcp_url, ctx.model, ctx.thread)?,
+        args: codex_args(&paths[..1], ctx.mcp_url, ctx.model, ctx.thread)?,
         env,
         cwd: paths[0].clone(),
     })

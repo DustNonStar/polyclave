@@ -367,3 +367,237 @@ async fn burst_at_worker_exit_drains_stdout_and_releases_turn() {
     assert!(revoked);
     assert!(matches!(runner.cancel(&run.id), Err(Error::ConflictError)));
 }
+#[tokio::test]
+async fn commit_and_stage_uses_only_the_authorized_attempt_and_preserves_r1() {
+    use serde_json::{json, Value};
+
+    let (tmp, manager, mut request) = repository();
+    let source = manager
+        .store
+        .hub_enqueue("hub", "stage-test", "Modify allowed.txt")
+        .unwrap();
+    let ticket = manager
+        .store
+        .hub_ticket(
+            "hub",
+            source.id,
+            "Stage test",
+            json!({
+                "goal": "Modify allowed.txt",
+                "allowed_paths": ["allowed.txt"],
+                "forbidden_actions": [],
+                "acceptance_criteria": []
+            }),
+            2,
+        )
+        .unwrap();
+    request.ticket_id = Some(ticket.id);
+    let (run, _) = manager.accept(request).unwrap();
+    let work = manager.begin(&run.id, TurnMode::Start).unwrap();
+    let (host, key) = ("stage-host", "stage-fixture-token");
+    let rid = run.id.clone();
+    let worker = run.worker_session_id.clone();
+    let attempt = work.attempt.id;
+    manager.store.write(move |db| {
+        db.execute("UPDATE attempts SET status='running' WHERE id=?1", [attempt])?;
+        db.execute(
+            "INSERT INTO turns(id,session_id,run_id,attempt_id,mode,status,phase,host_instance_id,boot_epoch,mcp_token,started_at)
+             VALUES(1,?1,?2,?3,'start','running','authorized',?4,'boot',?5,'now')",
+            rusqlite::params![worker, rid, attempt, host, key],
+        )?;
+        Ok(())
+    }).unwrap();
+    let (addr, server) = Mcp::new(manager.store.clone(), host, Arc::new(manager.clone()))
+        .listen()
+        .await
+        .unwrap();
+    let call = |token: &'static str, name: &'static str, args: Value| {
+        tokio::task::spawn_blocking(move || staging_rpc(addr, token, name, args))
+    };
+    std::fs::write(work.workspace.cwd.join("allowed.txt"), "approved").unwrap();
+    std::fs::write(work.workspace.cwd.join("outside.txt"), "outside mandate").unwrap();
+
+    let denied = call(
+        key,
+        "commit_and_stage",
+        json!({"message":"scope test","paths":["outside.txt"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let unfiltered = call(key, "commit_and_stage", json!({"message":"all changes"}))
+        .await
+        .unwrap();
+    assert_eq!(unfiltered["result"]["isError"], true, "{unfiltered}");
+    let wrong_turn = call(
+        "stale-fixture-token",
+        "commit_and_stage",
+        json!({"message":"stale"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wrong_turn["http_status"], 401);
+    let target = work.id.full_ref();
+    assert!(git(
+        &work.workspace.staging,
+        &["for-each-ref", "--format=%(objectname)", &target]
+    )
+    .is_empty());
+
+    let git_binary = polyclave_os::resolve_cli_binary(std::path::Path::new("git")).unwrap();
+    let state = polyclave_os::canonical_real_path(&tmp.path().join("state")).unwrap();
+    std::fs::create_dir_all(state.join("tmp")).unwrap();
+    let url = format!("http://{addr}/mcp");
+    let ctx = polyclave_adapters::WorkerContext {
+        executable: &git_binary,
+        state_dir: &state,
+        worktree: &work.workspace.cwd,
+        staging: &work.workspace.staging,
+        primary_repo: &work.id.run.repo,
+        final_mirror: &work.id.run.mirror,
+        mcp_url: &url,
+        turn_id: 1,
+        token: key,
+        model: None,
+        thread: None,
+    };
+
+    let codex = polyclave_adapters::codex_worker(&ctx).unwrap();
+    let sandbox_roots = codex
+        .args
+        .iter()
+        .find_map(|arg| {
+            arg.to_str()?
+                .strip_prefix("sandbox_workspace_write.writable_roots=")
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(sandbox_roots).unwrap(),
+        json!([work.workspace.cwd])
+    );
+    assert!(codex
+        .args
+        .iter()
+        .any(|arg| arg == "sandbox_workspace_write.exclude_tmpdir_env_var=true"));
+    assert!(codex
+        .args
+        .iter()
+        .any(|arg| arg == "sandbox_workspace_write.exclude_slash_tmp=true"));
+
+    #[cfg(target_os = "macos")]
+    {
+        let isolation = polyclave_adapters::default_claude_isolation(&state).unwrap();
+        let cmd =
+            polyclave_adapters::claude_worker(&ctx, uuid::Uuid::new_v4(), Some(isolation.as_ref()))
+                .unwrap();
+        for path in [
+            work.workspace.cwd.join(".git/fixture"),
+            work.workspace.staging.join("fixture"),
+        ] {
+            let output = std::process::Command::new(&cmd.executable)
+                .args(&cmd.args[..2])
+                .args(["/bin/sh", "-c", "printf denied > \"$1\"", "fixture"])
+                .arg(&path)
+                .env_clear()
+                .envs(cmd.env.iter().cloned())
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "worker could write Git metadata");
+            assert!(!path.exists());
+        }
+    }
+
+    let staged = call(
+        key,
+        "commit_and_stage",
+        json!({"message":"Commit allowed file","paths":["allowed.txt"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged["result"]["isError"], false, "{staged}");
+    let sha = staged["result"]["structuredContent"]["sha"]
+        .as_str()
+        .unwrap();
+    let replay = call(
+        key,
+        "commit_and_stage",
+        json!({"message":"retry","paths":["allowed.txt"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay["result"]["structuredContent"]["sha"], sha);
+    assert_eq!(git(&work.workspace.staging, &["rev-parse", &target]), sha);
+    assert_eq!(
+        git(
+            &work.workspace.staging,
+            &[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Run-Id,valueonly)",
+                sha
+            ]
+        ),
+        run.id
+    );
+    assert_eq!(
+        git(
+            &work.workspace.staging,
+            &["diff", "--name-only", &run.base_sha, sha]
+        ),
+        "allowed.txt"
+    );
+    assert_eq!(
+        git(&work.workspace.cwd, &["rev-parse", "HEAD"]),
+        run.base_sha
+    );
+    assert_eq!(git(&work.id.run.repo, &["rev-parse", "HEAD"]), run.base_sha);
+    assert!(!work.id.run.repo.join("allowed.txt").exists());
+    assert!(git(
+        &work.id.run.mirror,
+        &["for-each-ref", "--format=%(objectname)", &target]
+    )
+    .is_empty());
+    assert!(manager.get(&run.id).unwrap().result_sha.is_none());
+
+    let receipt = call(
+        key,
+        "submit_result",
+        json!({"run_id":run.id,"branch":work.attempt.branch,"sha":sha}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt["result"]["isError"], false, "{receipt}");
+    assert_eq!(git(&work.id.run.mirror, &["rev-parse", &target]), sha);
+    let late = call(
+        key,
+        "commit_and_stage",
+        json!({"message":"after receipt","paths":["allowed.txt"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(late["result"]["isError"], true, "{late}");
+    server.abort();
+}
+
+fn staging_rpc(
+    addr: std::net::SocketAddr,
+    token: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    use std::io::Write;
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}).to_string();
+    write!(stream, "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    if headers.starts_with("HTTP/1.1 401") {
+        return serde_json::json!({"http_status": 401});
+    }
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    serde_json::from_str(body).unwrap()
+}

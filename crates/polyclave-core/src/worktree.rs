@@ -81,6 +81,9 @@ impl MirrorManager {
             self.require(cwd, args, "set the writable staging destination")?;
             ensure_real(cwd)?;
             ensure_real(staging)?;
+            // A reservation made by older code could have a Worker-writable
+            // Git configuration. Only freshly prepared staging is brokered.
+            create_private_dir(&self.commit_stage_dir(a))?;
             Ok(workspace)
         })
     }

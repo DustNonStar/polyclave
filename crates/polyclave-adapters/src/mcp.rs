@@ -30,6 +30,7 @@ pub struct AttemptScope {
 struct ActiveTurn {
     id: i64,
     mode: String,
+    can_stage: bool,
     attempt: Option<AttemptScope>,
 }
 
@@ -37,6 +38,15 @@ struct ActiveTurn {
 pub trait HostTools: Send + Sync + 'static {
     fn verified_tip(&self, attempt: &AttemptScope, sha: &str) -> Result<bool>;
     fn consult_read_only(&self, attempt: &AttemptScope, question: &str) -> Result<String>;
+    fn commit_and_stage(
+        &self,
+        _attempt: &AttemptScope,
+        _turn_id: i64,
+        _message: &str,
+        _paths: Option<&[String]>,
+    ) -> Result<String> {
+        Err(Error::Invalid("Host staging is unavailable"))
+    }
 }
 
 #[derive(Clone)]
@@ -114,10 +124,10 @@ impl Mcp {
                 json!({"protocolVersion":protocol,"capabilities":{"tools":{}},"serverInfo":{"name":"polyclave-host","version":"0.1.0"}})
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools":definitions(turn.mode == "consult")}),
+            "tools/list" => json!({"tools":definitions(turn.mode == "consult", turn.can_stage)}),
             "tools/call" => {
                 let name = request["params"]["name"].as_str().unwrap_or_default();
-                if !definitions(turn.mode == "consult")
+                if !definitions(turn.mode == "consult", turn.can_stage)
                     .iter()
                     .any(|t| t["name"] == name)
                 {
@@ -152,6 +162,35 @@ impl Mcp {
             return Ok(tool_text("Rejected: this session has no active task", true));
         };
         match name {
+            "commit_and_stage" => {
+                let args: StageCommit = decode(args)?;
+                let message = safe_text(args.message, token, 4096)?;
+                if args.paths.as_ref().is_some_and(|paths| {
+                    paths.is_empty()
+                        || paths.len() > 100
+                        || paths.iter().any(|p| p.len() > 1024 || p.contains(token))
+                }) {
+                    return Err(CallError::Invalid);
+                }
+                let staged =
+                    self.tools
+                        .commit_and_stage(attempt, turn.id, &message, args.paths.as_deref());
+                if self.auth(token)? != Some(turn) {
+                    return Err(CallError::Expired);
+                }
+                match staged {
+                    Ok(sha) => {
+                        let mut reply = tool_text(
+                            &format!("Staged {sha}. Use submit_result with this exact SHA."),
+                            false,
+                        );
+                        reply["structuredContent"] = json!({"sha": sha});
+                        Ok(reply)
+                    }
+                    Err(Error::Invalid(detail)) => Ok(tool_text(detail, true)),
+                    Err(error) => Err(error.into()),
+                }
+            }
             "submit_result" => {
                 let Ok(data) = decode::<Submit>(args) else {
                     return Ok(tool_text("Rejected: invalid submission", true));
@@ -392,7 +431,8 @@ pub fn memory_tool_result(
 
 fn active(db: &Connection, token: &str, host: &str) -> Result<Option<ActiveTurn>> {
     Ok(db.query_row(
-        "SELECT t.id,t.mode,a.id,r.id,r.repo_cwd,a.branch,r.mirror_remote,r.base_sha,a.attempt_no
+        "SELECT t.id,t.mode,a.id,r.id,r.repo_cwd,a.branch,r.mirror_remote,r.base_sha,a.attempt_no,
+                COALESCE(r.vendor IN ('codex','claude') AND t.mode IN ('start','retry','correction','worker_chat'),0)
          FROM turns t LEFT JOIN runs r ON r.id=t.run_id LEFT JOIN attempts a ON a.id=t.attempt_id AND a.run_id=r.id
          WHERE t.mcp_token=?1 AND t.host_instance_id=?2 AND t.status='running' AND t.phase='authorized' AND t.mcp_revoked=0
            AND (t.run_id IS NULL OR (a.attempt_no=r.current_attempt AND a.status NOT IN ('superseded','cancelled')
@@ -402,7 +442,7 @@ fn active(db: &Connection, token: &str, host: &str) -> Result<Option<ActiveTurn>
                 Some(id)=>Some(AttemptScope{id,run:r.get(3)?,repo:r.get(4)?,branch:r.get(5)?,mirror:r.get(6)?,base:r.get(7)?,number:r.get(8)?}),
                 None=>None,
             };
-            Ok(ActiveTurn{id:r.get(0)?,mode:r.get(1)?,attempt})
+            Ok(ActiveTurn{id:r.get(0)?,mode:r.get(1)?,attempt,can_stage:r.get(9)?})
         }
     ).optional()?)
 }
@@ -443,6 +483,13 @@ fn safe_text(text: String, token: &str, max: usize) -> std::result::Result<Strin
     } else {
         Ok(text)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageCommit {
+    message: String,
+    paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -526,7 +573,7 @@ struct Proposal {
     tags: Vec<String>,
 }
 
-fn definitions(read_only: bool) -> Vec<Value> {
+fn definitions(read_only: bool, can_stage: bool) -> Vec<Value> {
     let str_type = json!({"type":"string"});
     let mut result = vec![];
     let mut tool = |name, description, p: Value, required: Value| {
@@ -545,6 +592,14 @@ fn definitions(read_only: bool) -> Vec<Value> {
         json!(["query"]),
     );
     if !read_only {
+        if can_stage {
+            tool(
+                "commit_and_stage",
+                "Commit changes within this Attempt's Ticket scope and publish to its staging branch. Returns the SHA for submit_result.",
+                json!({"message":str_type,"paths":{"type":"array","items":str_type}}),
+                json!(["message"]),
+            );
+        }
         tool(
             "submit_result",
             "Submit a pushed commit for host verification",

@@ -5,6 +5,7 @@ pub mod recovery;
 pub mod runner;
 pub mod runs;
 pub mod scope;
+mod stage;
 pub mod worktree;
 
 #[derive(Debug, thiserror::Error)]

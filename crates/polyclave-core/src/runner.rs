@@ -171,10 +171,19 @@ impl TurnRunner {
     ) -> Result<RunDto> {
         loop {
             let token = Uuid::new_v4().simple().to_string();
-            let refspec = work.id.full_ref();
-            let input=format!(
-                "Run: {}\nAttempt branch: {}\nOnly git push polyclave-staging {refspec}:{refspec}. Commit with Run-Id: {} in every commit, then use the host submit_result tool.\n\n{prompt}",
-                work.run.id,work.attempt.branch,work.run.id);
+            let delivery = if matches!(work.run.vendor, Vendor::Codex | Vendor::Claude) {
+                "Use the host commit_and_stage tool with a commit message and optional repository-relative paths within the Ticket scope. Then call submit_result with the SHA it returned. Do not commit or push with shell Git.".to_owned()
+            } else {
+                let refspec = work.id.full_ref();
+                format!(
+                    "Only git push polyclave-staging {refspec}:{refspec}. Commit with Run-Id: {} in every commit, then use the host submit_result tool.",
+                    work.run.id
+                )
+            };
+            let input = format!(
+                "Run: {}\nAttempt branch: {}\n{delivery}\n\n{prompt}",
+                work.run.id, work.attempt.branch
+            );
             let turn = self.prepare(&work, mode, &token)?;
             let step = (|| -> Result<Option<RunDto>> {
                 let outcome = self.run_process(&work, turn, &token, input, cancel);
@@ -239,7 +248,7 @@ impl TurnRunner {
                 Ok(None) => {
                     work = self.runs.old_work(&work.run.id, work.attempt.id)?;
                     mode = TurnMode::Correction;
-                    prompt="The host did not see a result. Finish the requested changes, push to your staging branch, and submit the exact commit.".into();
+                    prompt = "The host did not see a result. Finish the requested changes, follow the delivery steps above, and submit the exact commit.".into();
                     continue;
                 }
                 Err(err) => {

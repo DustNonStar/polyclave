@@ -609,6 +609,57 @@ impl RunManager {
 }
 
 impl HostTools for RunManager {
+    fn commit_and_stage(
+        &self,
+        scope: &AttemptScope,
+        turn_id: i64,
+        message: &str,
+        paths: Option<&[String]>,
+    ) -> Result<String> {
+        let work = self.old_work(&scope.run, scope.id)?;
+        if work.run.current_attempt != scope.number
+            || work.attempt.attempt_no != scope.number
+            || work.attempt.branch != scope.branch
+            || work.run.base_sha != scope.base
+            || work.run.repo_cwd != scope.repo
+            || !matches!(work.run.vendor, Vendor::Codex | Vendor::Claude)
+        {
+            return Err(Error::ConflictError);
+        }
+        let (_, mandate) = self.store.hub_ticket_mandate(&work.run.ticket_id)?;
+        let allowed: Vec<String> = mandate
+            .get("allowed_paths")
+            .cloned()
+            .and_then(|paths| serde_json::from_value(paths).ok())
+            .filter(|paths: &Vec<String>| !paths.is_empty())
+            .ok_or(Error::Invalid(
+                "Host staging requires a Ticket with allowed paths",
+            ))?;
+        self.git
+            .commit_and_stage(&work.id, message, paths, &allowed, || {
+                self.store
+                    .read(|db| {
+                        Ok(db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM turns t JOIN runs r ON r.id=t.run_id
+                             JOIN attempts a ON a.id=t.attempt_id AND a.run_id=r.id
+                             WHERE t.id=?1 AND t.attempt_id=?2 AND t.status='running'
+                               AND t.phase='authorized' AND t.mcp_revoked=0
+                               AND t.mode IN ('start','retry','correction','worker_chat')
+                               AND a.status='running' AND a.attempt_no=r.current_attempt
+                               AND r.status='running' AND NOT EXISTS
+                                   (SELECT 1 FROM results WHERE attempt_id=a.id AND accepted=1))",
+                            params![turn_id, scope.id],
+                            |row| row.get(0),
+                        )?)
+                    })
+                    .unwrap_or(false)
+            })
+            .map_err(|error| match error {
+                crate::GitError::Invalid(reason) => Error::Invalid(reason),
+                _ => Error::Invalid("Host could not stage this Attempt"),
+            })
+    }
+
     fn verified_tip(&self, scope: &AttemptScope, sha: &str) -> Result<bool> {
         let work = self.old_work(&scope.run, scope.id)?;
         if work.attempt.attempt_no != scope.number

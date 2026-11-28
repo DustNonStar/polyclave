@@ -130,7 +130,13 @@ impl ClaudeIsolation for MacosSeatbeltIsolation {
             .and_then(|port| port.parse::<u16>().ok())
             .filter(|port| *port != 0)
             .ok_or(Error::Invalid)?;
-        let profile = self.profile(roots, Some(config), Some(port))?;
+        let [worktree, staging] = roots else {
+            return Err(Error::Invalid);
+        };
+        let write_roots = [worktree.clone(), staging.join("polyclave-tmp")];
+        let mut profile = self.profile(&write_roots, Some(config), Some(port))?;
+        let git = Self::escape_sbpl_path(&worktree.join(".git"))?;
+        profile.push_str(&format!("\n(deny file-write* (subpath \"{git}\"))"));
         Ok(self.wrap(worker, args, profile))
     }
 }

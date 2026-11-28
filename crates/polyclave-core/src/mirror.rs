@@ -52,7 +52,13 @@ impl RunGit {
 impl MirrorManager {
     pub fn new(root: &Path) -> Result<Self> {
         let root = canonical_real_path(root)?;
-        for name in ["mirrors", "worktrees", "staging", "empty-hooks"] {
+        for name in [
+            "mirrors",
+            "worktrees",
+            "staging",
+            "empty-hooks",
+            "commit-stage",
+        ] {
             private_subdir(&root.join(name))?;
         }
         Ok(Self {
@@ -275,7 +281,7 @@ impl MirrorManager {
         Err(GitError::Command("read mirror ref"))
     }
 
-    fn staging_ref(&self, staging: &Path, name: &str) -> Result<Option<String>> {
+    pub(crate) fn staging_ref(&self, staging: &Path, name: &str) -> Result<Option<String>> {
         // ls-remote uses Git's upload-pack boundary; never execute general
         // repository commands against Worker-writable .git configuration.
         let out = self.git(
@@ -360,7 +366,7 @@ impl MirrorManager {
         Ok(BranchCheck::Present { tip, problem })
     }
 
-    fn branch_problem(&self, a: &AttemptGit, tip: &str) -> Result<Option<String>> {
+    pub(crate) fn branch_problem(&self, a: &AttemptGit, tip: &str) -> Result<Option<String>> {
         let mirror = &a.run.mirror;
         let base = &a.run.base;
         if tip == base {
