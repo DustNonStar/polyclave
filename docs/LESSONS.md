@@ -99,3 +99,19 @@
 - **根因：** 自检与盲审承担不同职责——自检清理低级回归、盲审打破单一模型思维盲区；两者既不能互相替代，也不能在设计假设本身有误时无限循环打补丁。
 - **流程改进：** 明确“执行自检（须诚实标注离线假件与真实环境边界）→ 异构盲审（隔离自检背书）”两段交接；并在 `REVIEWER.md` 增加 **2 轮返工熔断规则**——同一问题返工 2 轮仍未过审，立即停工回到设计层重审前提并向用户呈报选项。
 - **反哺 Polyclave 设计：** 在 `pr_gate` 与 `TurnRunner` 中落实返工轮次熔断（达到上限自动停手并升级回 Hub 做设计前提复盘，而不是继续调度 Worker 盲目返工），同时在审批卡上始终严格分离“Worker 自报”与“宿主/CI 客观核证”。
+
+---
+
+## 2026-11-28 · `main@0b593c7` 真机验收前四模型独立盲审复盘
+
+### 14. 单一模型自检存在结构性盲区，四模型异构独立盲审实现“零误报 + 高互补”真机排雷
+- **发生了什么：** 在 `main@0b593c7` 本地 209+ 项测试、浏览器测试与 macOS/Windows 双平台 CI 全绿、准备进入单故事真机验收前，我们按统一范围提示词（聚焦真机 5 条接缝 + 暂停模块高危安全阀）对 4 个不同模型（Claude Opus 5.5、DeepSeek Harness、Gemini 4、GPT-6）发起相互隔离的只读盲审，再由主控 Agent 逐条回到源码按图索骥复核。结果：**4 份报告中的所有 P0 阻断项（去重合并后 10 项）与 2 项安全阀漏洞 100% 命中真实源码，零误报**，并同时呈现出“多模型交叉印证”与“各模型独特闪光点”双重价值：
+  - **多模型交叉印证的共性阻断：** GitHub `CLEAN` 状态 PR 调 `enablePullRequestAutoMerge` 失败后 Gate 永久卡死在 `approved`（Claude / Gemini / GPT-6）；武装状态下重跑 Gate 建兄弟行可向同一 PR 推入未批准 SHA（Claude / GPT-6）；返工 Attempt B 的 `commit_and_stage` 无视 `attempts.from_sha` 回退到 `base_sha`，局部 `paths` 提交会静默抹除 Attempt A 改动（Gemini / GPT-6）；Claude Seatbelt 沙箱认证死路与凭据读/外传边界（Claude / Gemini / GPT-6）；前端无首次建 PR Gate 入口与默认 Reviewer 死路（DeepSeek / Gemini / Claude / GPT-6）。
+  - **各模型独有的关键发现（其余 3 个模型均未捕获）：**
+    - **Claude Opus 5.5：** 用本机 `/usr/bin/sandbox-exec` 探针实证缺少 `/private/var/run/mDNSResponder` 导致沙箱内 DNS 解析必挂；发现 `Ctrl-C`/`SIGTERM` 优雅关停释放锁与端口但进程不退出、Worker 对已关 MCP 继续纠错踩库；发现 `run_pr_gate` 同步阻塞在 MCP `tools/call` 必然被超时掐断。
+    - **DeepSeek Harness：** 发现从 Finder/Spotlight 启动 Tauri 桌面壳时伴生 `polyclaved` 继承最小 `PATH` 导致找不到 Homebrew/nvm 下的 `codex`/`claude`；发现启动期失败被静默写进前端未读的 `Inbox` warning 并误报为 `retryable`。
+    - **Gemini 4：** 发现 Codex CLI Hub 漏配 `default_tools_approval_mode="approve"` 且 Claude CLI Hub `CENTRAL_TOOLS` 漏配 `run_pr_gate`；发现手机端审批卡缺少同 SHA 测试与未决项，且 `awaiting_human_approval` 在 `Needs you` 与唤醒通知中隐身；触发安全阀查出技能同步沿 symlink 写穿用户全局目录与社区草稿脱敏分词绕过。
+    - **GPT-6 (Codex)：** 发现桌面端撤销已配对手机后，存量 SSE 长连接仍可持续收到新增 Hub 消息与实时输出；发现 `diffPanel` 静默截断 400 行以外尾部；发现同 SHA 重跑 check-runs 产生新 ID 时旧失败行残留 SQLite 导致 UI 永远标红。
+- **根因：** 一方面，单一模型在完成编码后自检，受限于自身在同一上下文和同一批测试夹具下形成的隐含假设，无法发现结构性盲区；另一方面，不同模型在代码审查时的关注维度天然互补——有的擅长 OS 进程生命周期与实机探针，有的擅长桌面端入口与零配置路径，有的擅长跨模块契约与安全红线，有的擅长长连接状态机与并发边界。
+- **流程改进：** 在重大里程碑（真机验收、发版、核心安全边界变更）前，固化“**统一范围 + 信息隔离 + 安全阀兜底 → 多模型并行盲审 → 主控逐条回源码核验去重**”门禁，不再把单一模型自检或离线 CI 全绿作为真机放行的充分条件。
+- **反哺 Polyclave 设计（对外推广核心案例）：** 这次实战直接印证了 Polyclave 的核心产品理念——**异构多模型协作 + 隔离盲审 + 宿主客观核证**不是“堆模型噱头”，而是有硬工程证据支撑的质量防线：单模型自检与双平台 CI 全绿之后，4 模型异构盲审仍零误报挖出 10 项真机必撞 P0 与 2 项安全红线，且每个模型都贡献了不可替代的视角。对外介绍与推广 Polyclave 时，可直接以本次 `main@0b593c7` 验收前四模型盲审作为真实案例。
