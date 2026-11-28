@@ -5,7 +5,7 @@
 // the token it already has. Every request is served by the test, so nothing
 // leaves the machine and no certificate is needed.
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
@@ -58,7 +58,7 @@ async function handle(route) {
   }
   const file = path === '/' ? 'index.html' : path.slice(1);
   const exact = resolve(root, file);
-  if (!exact.startsWith(root + '/')) { await route.fulfill({ status: 403, body: '' }); return; }
+  if (!exact.startsWith(root + sep)) { await route.fulfill({ status: 403, body: '' }); return; }
   const type = file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'text/html';
   await route.fulfill({ body: await readFile(exact), contentType: type });
 }

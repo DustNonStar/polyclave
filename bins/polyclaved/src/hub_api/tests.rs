@@ -885,35 +885,43 @@ fn setup_unreceipted_run(dir: &FsPath, hub: &Hub, run_id: &str, attempt_id: i64)
 
 /// The workspace builds `polyclave-fake-agent` for the core suite; in a clean
 /// CI run `polyclaved` tests may run before `polyclave-core`, so build it on
-/// demand once if absent.
+/// demand once and locate the exact executable from Cargo's JSON output.
 fn fake_agent_binary() -> std::path::PathBuf {
     static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
-        let exe = std::env::current_exe().unwrap();
-        let path = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| {
-                p.join(format!(
-                    "polyclave-fake-agent{}",
-                    std::env::consts::EXE_SUFFIX
-                ))
+        let out = std::process::Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--locked",
+                "--message-format=json",
+                "-p",
+                "polyclave-core",
+                "--bin",
+                "polyclave-fake-agent",
+            ])
+            .output()
+            .expect("failed to invoke cargo build for polyclave-fake-agent");
+        assert!(
+            out.status.success(),
+            "cargo build polyclave-fake-agent failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let path = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|msg| {
+                if msg.get("reason")?.as_str()? != "compiler-artifact" {
+                    return None;
+                }
+                if msg.get("target")?.get("name")?.as_str()? != "polyclave-fake-agent" {
+                    return None;
+                }
+                msg.get("executable")?
+                    .as_str()
+                    .map(std::path::PathBuf::from)
             })
-            .unwrap();
-        if !path.is_file() {
-            let status = std::process::Command::new(env!("CARGO"))
-                .args([
-                    "build",
-                    "--locked",
-                    "-p",
-                    "polyclave-core",
-                    "--bin",
-                    "polyclave-fake-agent",
-                ])
-                .status()
-                .expect("failed to invoke cargo build for polyclave-fake-agent");
-            assert!(status.success(), "cargo build polyclave-fake-agent failed");
-        }
+            .expect("cargo build JSON output missing polyclave-fake-agent executable");
         assert!(
             path.is_file(),
             "the offline Worker fixture is missing: {}",
