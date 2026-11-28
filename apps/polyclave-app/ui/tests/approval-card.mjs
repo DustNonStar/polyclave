@@ -314,6 +314,7 @@ try {
       const o7 = await overflow(page);
       assert.deepEqual(o7.wide, []); assert.equal(o7.body, width);
       measurements.push({ run: 'r7', width, theme, summary: r7.summary, tests: { state: r7.rows[1].state }, ...o7 });
+      if (shots && theme === 'dark') await page.locator('.evidence').screenshot({ path: join(shots, 'r7-' + (width === 375 ? 'phone' : 'desktop') + '-dark-card.png') });
 
       assert.deepEqual(errors, []); assert.deepEqual(outside, []);
       console.log('approval card ' + width + 'x' + height + ' ' + theme + ' ok');
