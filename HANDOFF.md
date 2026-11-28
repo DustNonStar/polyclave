@@ -1189,3 +1189,94 @@ Branch `fix/per-sha-tests-and-prompt-isolation` (`b5aff98..9d94605`, 3 commits) 
 - **Approved test edits:** all 6 authorized edits (`crates/polyclave-proto/src/lib.rs`, `crates/polyclave-core/tests/recovery.rs`, `apps/polyclave-app/ui/tests/approval-card.mjs`) match the owner decision with no weakened assertions.
 - **Visual & automated verification (macOS):** visually checked `handcheck/per-sha-tests/{r3-phone-dark,r4-desktop-dark-card,r5-phone-dark-card}.jpg`; `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 177 passed, 0 failed (including `TurnDto` compile-fail doctest); `proto.ts` diff clean; UI `tsc --noEmit`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` (1440×900 & 375×812, dark & light) passed; `bash scripts/privacy-scan.sh` clean.
 - **Nits:** `scm_observer.rs` does not emit a `change_log` event when writing non-failing CI `test_results` rows (open cards update on next fetch); `is_host_observation` checks `metadata["kind"]` without additionally checking `source == "host"` (downgrade-only prefix, no privilege escalation). Pushing `main` now to run dual-platform macOS + Windows CI.
+
+## 2026-11-27 Polyclave v5 全项目对抗审查（Codex）
+
+**审查基准** `main@3489145b5301e1084aab2e4d5e175f1812a97840`。
+
+**结论：主线暂不能进入真机端到端验收。** 本轮只读走查生产路径、测试替身与交接记录。审查结束时，确切提交的 macOS 和 Windows 离线 CI 均已通过，包含 Rust workspace 和 UI 浏览器检查。177 个 Rust 测试的计数来自上方合并记录。本轮未重跑测试，未启动真实厂商 CLI、已安装的 WebView 或真机扫码，也未对 GitHub 执行写操作。以下发现均为该提交上的静态结论，修法和反例测试均待实施。[该提交的 GitHub Actions](https://github.com/DustNonStar/polyclave/actions/runs/46100050814)
+
+验收主线为 Mac 派发真实 Worker，中途重启后页面恢复同一 Run，异构 Reviewer 要求修改，Worker 交付并核证下一版，手机显示该 SHA 的 diff、测试和未决项，并批准这个确切 SHA。沿 `README.md`、`PRODUCT.md`、`NEXT.md`、`PLAN-ISSUES.md` 和 `docs/LESSONS.md` 第 5–10 条复核，暂停的功能与已有挂单沿用当前里程碑范围。
+
+### 阻断（真机必挂）
+
+1. **默认 Codex Worker 的 macOS 沙箱阻止正常 Git 提交。**
+   - **证据与触发**　`crates/polyclave-adapters/src/codex.rs:20` 的 `codex_args` 设置 `workspace-write` 和 `approval_policy=never`。与此同时，`crates/polyclave-core/src/worktree.rs:42` 的 `prepare_attempt` 在工作目录建立普通 `.git`，`crates/polyclave-core/src/runner.rs:175` 的 `TurnRunner::execute` 要求 Worker 提交并推送。采用上游官方策略的 Codex 会把可写根下的 `.git` 设为只读，正常 `git add` / `git commit` 无法写入元数据。此判断未运行本机 Codex。[Codex 官方 macOS 沙箱说明](https://github.com/openai/codex/blob/main/codex-rs/core/README.md#macos)
+   - **现有覆盖**　`crates/polyclave-core/tests/worker.rs:30` 直接运行假二进制，`crates/polyclave-adapters/tests/worker.rs:12` 只检查参数。
+   - **最小修法与反例**　提供只允许写当前 Attempt 的 Git 执行边界，或由受限宿主工具完成提交与 staging 推送。用 macOS 生产启动路径验证 Attempt 内可提交，主仓库和宿主镜像仍拒绝 Worker 写入。
+
+2. **真实返工被 Run 终态拒绝，测试替身直接返回了下一版 SHA。**
+   - **证据与触发**　R1 把初稿置为 `done` 后，`bins/polyclaved/src/hub_api.rs:434` 的 `HostWorkerReviseExecutor` 以 `WorkerChat` 调度返工或范围退回。`crates/polyclave-core/src/runs.rs:215` 的 `RunManager::begin` 拒绝终态，门禁从 `crates/polyclave-hub/src/pr_gate.rs:920` 走到 `revise_unverified`。单独放开这个检查仍会遇到 `crates/polyclave-core/src/runner.rs:274` 的 `prepare` 终态检查，以及 `crates/polyclave-store/src/schema.sql:153` 的每 Attempt 单一已接受回执约束。
+   - **现有覆盖**　`crates/polyclave-hub/src/pr_gate.rs:1435` 的 `MockRevise` 跳过调度、回执和镜像导入。
+   - **最小修法与反例**　为门禁新增独立返工转换，从上一版核证 SHA 建立新 Attempt，保留 Run 原始核证基线并独立签收新结果。用真实返工执行器和 TurnRunner 串起 A、Reviewer 要求修改、B 的新回执。缺 B 回执时，旧批准和 A 的核证结果均不得充当返工结果。
+
+3. **二维码可解码，扫码后没有生产配对路径。**
+   - **证据与触发**　`bins/polyclaved/src/hub_api/http.rs:706` 的 `create_pairing_ticket` 返回不含宿主地址的 `polyclave://pair`。移动 Tauri 入口 `apps/polyclave-app/src-tauri/src/lib.rs:4` 没有处理该 scheme。手动打开 Tailscale HTTPS 页面也无法配对，`apps/polyclave-app/ui/src/api/sse.ts:4` 的 `bootstrap` / `request` 和 `apps/polyclave-app/ui/src/views/flows.ts:142` 的 `tokenDialog` 都限制为本机 HTTP，页面没有兑换调用。
+   - **现有覆盖**　`apps/polyclave-app/ui/tests/qr-roundtrip.mjs:14` 只做二维码字节往返。`bins/polyclaved/src/hub_api/tests.rs:3024` 在服务端测试中直接兑换并构造请求头，随后读取设备列表。
+   - **最小修法与反例**　生成指向配置过的 Tailscale HTTPS 源的配对链接。页面同源兑换、清除链接中的秘密，再用设备凭据访问 API 和 SSE。补 375 px 浏览器从扫码 URL 开始的兑换、重放拒绝、吊销和重连回归。
+
+4. **最终已核证 SHA 缺少人工审批，卡片也没有实际 diff。**
+   - **证据与触发**　`apps/polyclave-app/ui/src/views/inspector.ts:383` 的 `review` 对 `done` 不提供 Accept。`crates/polyclave-core/src/runs.rs:446` 的 `resolve_seen` 只处理 `needs_review` / `interrupted` 的异常结算。`bins/polyclaved/src/routes.rs:157` 的 `run` 通过 `crates/polyclave-core/src/mirror.rs:400` 的 `commit_summary` 提供文件统计和提交标题。异构 Reviewer 同意后，`crates/polyclave-hub/src/pr_gate.rs:1011` 的 `run_pr_gate` 可直接启用 auto-merge，远端满足条件时可以先于人工审批合并。[GitHub auto-merge 行为](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/automatically-merging-a-pull-request)
+   - **现有覆盖**　`apps/polyclave-app/ui/tests/approval-card.mjs:156` 检查异常 Run 的按钮文字和已核证 Run 的静态证据。`bins/polyclaved/src/hub_api/tests.rs:901` 把 `auto_merge_armed` 当作成功。
+   - **最小修法与反例**　增加独立的人审等待状态和审批 POST，绑定完整 SHA，提供同 SHA 的镜像 diff、测试与未决项。补 375 px 实际 POST，展示 A 后 head 移到 B 时拒绝 A，并验证确认 B 前没有合并副作用。
+
+### 高危（安全或不变量破坏）
+
+5. **人工接收产生的 `result_sha` 会进入 R1 自动发布路径。**
+   - **证据与触发**　`crates/polyclave-core/src/runs.rs:471` 的 `resolve_seen` 接受与 `seen_sha` 相同的镜像 tip，忽略 `BranchCheck::Present` 的 `problem` 与回执是否存在，随后以 `result_source='user'` 写入 `result_sha`。`bins/polyclaved/src/hub_api.rs:422` 的 `verified_result_sha` 只查非空，允许缺回执或缺 trailer 的人工接收结果进入门禁。`apps/polyclave-app/ui/src/views/evidence.ts:96` 的 `tests` 同样只比较 `result_sha`，可把该 SHA 的测试行标成 R1 绿灯。
+   - **现有覆盖**　`bins/polyclaved/src/hub_api/tests.rs:681` 的反例只覆盖 `observed_sha` 有值而 `result_sha` 为空的情形。
+   - **最小修法与反例**　保留人工接收，自动发布和 R1 绿灯共同检查核证来源和已接受 Attempt 的同 SHA 回执。通过生产路径人工接收无回执 tip，再断言门禁拒绝且未调用推送、评审或合并。
+
+6. **调用方可以改变评审基线和工单授权范围。**
+   - **证据与触发**　`bins/polyclaved/src/hub_api.rs:1007` 的 `prepare_pr_gate_run` 和 `bins/polyclaved/src/hub_api/tools.rs:113` 的 `run_pr_gate` 工具允许提交 `base_sha`、`base_branch` 和 `touched_paths` 覆盖。评审与范围检查使用传入的 base，GitHub 开 PR 使用独立的 base branch。传入与 head 相同的 base 可产生空评审 diff，实际 PR 仍有内容。路径规则也可比 Ticket 授权更宽。见 `crates/polyclave-hub/src/pr_gate.rs:656` / `:790` 的 `run_pr_gate`。
+   - **现有覆盖**　`bins/polyclaved/src/hub_api/tests.rs:751` 检查调用方传入错误 head。门禁的全范围评审和路径反例使用预设 base 与规则。
+   - **最小修法与反例**　用 Run 与 Ticket 持久数据限定基线和路径，校验实际 PR 基线对应评审范围。补空范围、远端 base 不一致、调用方扩大授权三个反例，均须在首次推送前拒绝。
+
+7. **Claude Seatbelt 未隔离宿主文件和本地 API。**
+   - **证据与触发**　`crates/polyclave-adapters/src/claude.rs:42` 的 `build_profile` 允许全盘读取和 loopback 连接。Worker 与 daemon 同用户，宿主 GUI token 可读，`bins/polyclaved/src/auth.rs:130` 的 `require` 赋予它主 API 权限。整个 `/private/tmp` 可写，导致位于该目录下的宿主状态、镜像或主仓库落入 Worker 可写边界。token 文件由 `bins/polyclaved/src/main.rs:102` 的 `serve` 创建。
+   - **现有覆盖**　`crates/polyclave-adapters/tests/worker.rs:489` 只检查一次 worktree 写入和外部写入，没有检查凭据读取、主 API 或临时目录下的宿主路径。
+   - **最小修法与反例**　为 Attempt 设置独立临时写根，保护宿主凭据和账本读取，并把 Worker 可访问的本机服务限于其 MCP。用哨兵凭据和测试服务验证普通位置及临时目录布局中的边界。
+
+8. **手机入口接受普通 Mesh 头，远程凭据检查允许无身份绑定的设备。**
+   - **证据与触发**　`bins/polyclaved/src/routes.rs:308` 的 `exchange_pairing` 和 `bins/polyclaved/src/auth.rs:68` 的 `require` 将 `x-agentmesh-node` 作为 Tailscale 身份头的兜底。`crates/polyclave-store/src/stage3.rs:295` 的 `verify_device_token` 对无绑定的设备不检验来访 peer，导致本机兑换的无绑定令牌也可通过带 peer 的远程验证。前提是存在有效票据或设备令牌。[Tailscale Serve 身份头契约](https://tailscale.com/docs/features/tailscale-serve#identity-headers)
+   - **现有覆盖**　`bins/polyclaved/src/hub_api/tests.rs:3024` 使用预置 Tailscale 头和已经绑定的令牌验证同源访问。
+   - **最小修法与反例**　手机入口从可信 Serve 路径取得身份，远程验证要求持久绑定存在且相等。补无 Tailscale 身份、仅有 Mesh 头、本地无绑定凭据走远程入口的拒绝测试。
+
+9. **Pause 与远端 enable 并发时，能留下本地显示暂停、GitHub 仍可自动合并的 PR。**
+   - **证据与触发**　`crates/polyclave-hub/src/pr_gate.rs:1023` 的 `run_pr_gate` 先写 armed 再调用远端。`crates/polyclave-hub/src/pr_gate.rs:1042` 的 `pause_all` 可在 enable 完成前关闭远端并清掉账本标记。若并发 enable 随后成功，远端重新启用。本地也会在 enable 响应丢失时直接 disarm，遗失远端结果未知的状态。账本转换见 `crates/polyclave-store/src/stage2.rs:706` 的 `arm_auto_merge`。
+   - **现有覆盖**　`crates/polyclave-hub/src/pr_gate.rs:1560` 等 enable 完成后才调用 Pause。
+   - **最小修法与反例**　按 PR 串行化开关操作，持久记录未确认的远端意图并在 Pause 和恢复时对账。用屏障交错 enable 和 Pause，再测远端已执行但响应丢失时的重启对账。
+
+### 重要（逻辑缺陷或明显体验断链）
+
+10. **宿主重启后，已打开的 Mac 页面一直拿旧令牌重连。**
+    - **证据与触发**　`bins/polyclaved/src/main.rs:102` 的 `serve` 启动时轮换本地 token。`apps/polyclave-app/ui/src/app.ts:228` 只 bootstrap 一次，`apps/polyclave-app/ui/src/api/sse.ts:30` 的 `follow` 在收到 `401` 后继续用旧连接重试。SQLite 恢复后，页面仍可能显示旧快照或在线状态。`app.ts:121` 的 `frame` 收到 `resync_required` 时拉取快照，却没有清除丢失终止事件的 `S.live`。
+    - **现有覆盖**　`bins/polyclaved/src/routes.rs:558` 验证游标和 resync 帧，浏览器夹具使用固定 bearer。
+    - **最小修法与反例**　桌面壳鉴权失败后重新取凭据，普通浏览器提示重新连接。恢复后同步快照并清空瞬态流状态。用同一页面模拟流断开、token 轮换、宿主恢复并重新读取同一 Run。
+
+11. **Attempt 建目录与落库之间崩溃，会让同一编号反复卡在残留目录。**
+    - **证据与触发**　`crates/polyclave-core/src/runs.rs:291` 的 `RunManager::begin` 先调用 `crates/polyclave-core/src/worktree.rs:22` 的 `prepare_attempt`，再写 Attempt 和 `current_attempt`。若 staging 创建后、落库前宿主退出，`crates/polyclave-core/src/recovery.rs:73` 把未派发 Run 置为 interrupted，重试仍用相同编号，创建目录遇到残留即失败。
+    - **现有覆盖**　`crates/polyclave-core/tests/recovery.rs:289` 在 `begin` 前后构造崩溃，未覆盖这个中间窗口。
+    - **最小修法与反例**　先持久预留 Attempt，恢复时识别未释放的准备态并安全重建或跳过。用屏障在 staging 建目录后终止宿主，验证同一 Run 可继续且不复用来源不明的目录。
+
+12. **stdout 队列饱和时，Worker 退出可以使宿主结算死锁。**
+    - **证据与触发**　`crates/polyclave-core/src/runner.rs:356` / `:413` 的 `run_process` 使用 256 项同步队列。supervisor 退出后，消费者先 join stdout reader，再排空队列。reader 若阻塞于向满队列发送，双方互等，取消检查和 `runner.rs:500` 的结算均无法继续。
+    - **现有覆盖**　`crates/polyclave-core/tests/worker.rs:68` 的 Worker 夹具没有制造退出时的满队列。
+    - **最小修法与反例**　在等待 reader 时继续消费，并限制进程退出后的管道排空时间。用屏障制造超容量事件，确认 Run 能结算、MCP token 撤销、下一次调度可取得执行槽。
+
+13. **同 SHA 的 CI 卡片仍可假绿，也可能保留过期结果。**
+    - **证据与触发**　`crates/polyclave-hub/src/scm.rs:698` 的 `list_pr_checks_and_comments` 只取 GitHub check-runs 第一页。`crates/polyclave-store/src/test_results.rs:15` / `:53` 以检查名作为同 SHA 下的唯一键组成部分，同名检查可以相互覆盖。`apps/polyclave-app/ui/src/views/evidence.ts:96` 的 `tests` 可把不完整的集合判为通过。另见 `crates/polyclave-hub/src/scm_observer.rs:167` / `:251` / `:322` 的 `poll_once`，它跳过已合并 PR，修改测试行不发 change event，第一次看到 SHA 后也不再产生该 SHA 的后续失败事件。[GitHub check-runs 分页契约](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference)
+    - **现有覆盖**　`crates/polyclave-hub/src/scm_observer.rs:753` 的夹具每页仅几个不同名的检查并直接读取 SQLite，浏览器夹具 `apps/polyclave-app/ui/tests/approval-card.mjs:203` 预填了结果。
+    - **最小修法与反例**　完整分页，按稳定检查标识记录、区分是否取全，更新状态时发出 change event，按检查与状态转换去重通知。补第二页失败、同名异源检查、同 SHA 从排队转失败、首次轮询时已合并和打开的手机卡片自动更新。
+
+14. **SCM 事件投递到启动时选定的 Hub，也不唤醒空闲会话。**
+    - **证据与触发**　`bins/polyclaved/src/hub_api.rs:684` 的 `try_start_scm_observer_from_keychain` 在启动时固定第一个 Hub。空库启动后才注册项目时，观察器不向任何 Hub 入队。多项目时可投错。即使入队成功，`crates/polyclave-hub/src/scm_observer.rs:101` 的 `emit_event` 和 `:358` 的 `spawn` 也不触发 `bins/polyclaved/src/hub_api.rs:1145` 的 `Hub::kick`。
+    - **现有覆盖**　`crates/polyclave-hub/src/scm_observer.rs:505` / `:598` 给 observer 注入已存在的 Hub，断言入队来源，未检查真实会话是否被唤醒。
+    - **最小修法与反例**　按 Run 归属查找 Hub，成功入队后由 daemon 唤醒。补空库启动后注册两个项目的用例，断言只有所属 Hub 处理事件，且 prompt 保持宿主观察来源。
+
+### 真机验收前的修复顺序
+
+1. 先修真实凭据和发布边界。隔离 Worker 与宿主、绑定手机身份、校验 R1 发布来源与实际评审基线。要求人工审批后才启用自动合并，并消除 Pause 与远端请求竞态。
+2. 闭合 Mac 生产执行链。让 Codex 能在 Attempt 内提交，修退出死锁、启动恢复和原页面重连。用真实返工执行器经新 Attempt 交付并核证 B。
+3. 让 B 的审批证据完整且可刷新。采集 B 的 CI 检查，从镜像提供实际 diff 和未决项，用原子检查把审批绑定到 B。
+4. 闭合扫码到审批 POST。用 375 px 浏览器覆盖 HTTPS 兑换、查看证据、拒绝过期 SHA 和批准当前 SHA，随后才执行真实 Mac 重启、异构 Reviewer、GitHub 和手机的整条验收。
