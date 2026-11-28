@@ -1332,3 +1332,18 @@ Tests: macOS local formatting check, Clippy with warnings denied, and workspace 
 Hand check and cleanup: the Unix stall regression used a local Git subprocess and temporary repository and joined the test thread before closing the fixture. The HTTP regression used an in-process Axum router. No UI changes or persistent fixture processes.
 
 Native Windows execution of the Git Job Object path and real vendor CLI acceptance remain pending. The paused Mesh transport still has no Ticket path mandate for brokered Codex or Claude publishing. This branch is local for merge review.
+
+## Audit Hardening — Batch 1 cancellation and Windows Job follow-up (2026-11-27)
+
+- 8537267 fix(runtime): drain broker publication on cancellation — macOS workspace tests: 186 passed
+
+- **Cancellation.** The runner persists `mcp_revoked=1` for the active Turn when it handles cancellation, before waiting for Worker teardown. `POST /api/runs/{id}/cancel` returns `accepted: true` and `broker_stopped: true` after the broker releases the repository lock. Worker settlement is asynchronous. A ref already published by an in-flight push remains subject to the existing reconciliation and receipt rules.
+- **Windows Git.** The broker uses `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_JOB_LIST` to attach the child at creation. It retains the Job through termination, waits for process handles and checks that the Job has zero active processes before returning from Git and releasing the mirror lock. If Windows cannot confirm cleanup, the daemon exits rather than continuing with uncertain writer exclusion.
+
+Tests: macOS formatting, Clippy with warnings denied and workspace tests passed. The added macOS daemon regression establishes a socket barrier in the Git push command, calls the authenticated cancel route and verifies revocation, broker exit, no staging ref and no accepted receipt. It failed before the fix because the token remained active when the route returned. The two added Windows tests cover cancelling a live Git-like process tree and cleaning up a descendant after normal parent exit. They passed the `x86_64-pc-windows-msvc` cross-target Clippy check with `--all-targets` on macOS. Existing tests were preserved. The generated protocol diff is empty.
+
+Hand check and cleanup: the HTTP regression used a real local daemon, a temporary repository and an offline Worker. Its subprocesses, listener and temporary repository were torn down. No UI changes.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)` after the code commit.
+
+Merge readiness: native Windows execution is still required on the exact branch head. This macOS host has no available Windows runner, and cross-target checks only compile the native tests. The branch remains local. Batch 2 and Batch 3 stay outside this follow-up.
