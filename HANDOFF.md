@@ -1544,3 +1544,48 @@ Branch `fix/hardening-batch3-phone-approval` (Items 3.1–3.4 + self-review `402
 - **Code & invariant audit:** verified two-way `peer_identity` equality in `Store::verify_device_token` and removal of `X-AgentMesh-Node` fallback (`stage3.rs`, `auth.rs`, `routes.rs`); `POLYCLAVE_TAILSCALE_ORIGIN` bare-`https` validation, nullable `qr_uri`, and in-page `#pair=` exchange + fragment stripping + same-origin `https://` support (`http.rs`, `hub_api.rs`, `sse.ts`); `PrGateStatus::AwaitingHumanApproval` gate stop before auto-merge, atomic exact-SHA `POST /api/pr-gates/:id/approve` with remote head re-check and `AwaitingHumanApproval` restoration on unreadable remote (`4027a08`), and bounded `GET /api/pr-gates/:id/diff` with explicit `truncated` (`pr_gate.rs`, `stage2.rs`, `hub_api.rs`); and `401` credential-rotation recovery + `S.live` clearing on `resync_required` (`app.ts`, `sse.ts`).
 - **Visual & automated verification (macOS):** visually inspected `handcheck/hardening-batch3/{item3-phone-awaiting,item4-phone-rotated}.jpg`; `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 209 passed, 0 failed (including `TurnDto` compile-fail doctest and real-daemon `cancel_staging`); `proto.ts` diff clean; UI `tsc --noEmit`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` (all 6 suites at 1440×900 & 375×812) passed; `bash scripts/privacy-scan.sh` clean.
 - **Nits / next step:** `app.ts` does not re-attach `.catch` on the second `follow` after a first `401` recovery (minor follow-up). All 3 audit-hardening batches (14 Codex findings) are now merged; fixing the clean-CI `polyclave-fake-agent` build lookup in `bins/polyclaved/src/hub_api/tests.rs` next before pushing `main` for dual-platform CI and real-environment end-to-end acceptance.
+
+## Polyclave v5 pre-acceptance P0 fixes — Batch 1 & Batch 2 checkpoint
+
+- `09319ad` `docs: add pre-acceptance fix plan and tiered review lesson`
+- `1255106` `fix: preserve revision from_sha, fix cli hub tool permissions, and harden claude seatbelt` — workspace tests: 215 passed
+- `6684da8` `fix: make pr gate async, handle clean merges, guard armed sha, and unify mobile approval` — workspace tests: 217 passed
+
+Commits:
+- `09319ad` `docs: add pre-acceptance fix plan and tiered review lesson`
+- `1255106` `fix: preserve revision from_sha, fix cli hub tool permissions, and harden claude seatbelt`
+- `6684da8` `fix: make pr gate async, handle clean merges, guard armed sha, and unify mobile approval`
+
+Tests:
+- Branch head before this handoff commit: `main@6684da8`.
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean.
+- `cargo test --locked --workspace`: **217 passed, 0 failed, 0 ignored** (including macOS `sandbox-exec` DNS/sensitive-path probe, `model_surface` test, `from_sha` partial-path revision test, async PR Gate + `CLEAN` merge + I1 sibling guard + startup recovery tests, and `TurnDto` compile-fail doctest).
+- `git diff --exit-code -- apps/polyclave-app/ui/src/generated/proto.ts`: clean (no changes).
+- UI checks under `apps/polyclave-app/ui`: `npx tsc --noEmit` and `npm run build` passed; `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` passed all 6 suites (`offline-browser`, `qr-roundtrip`, `approval-card`, `pairing-flow`, `pr-gate-approval`, `restart-reconnect`) at `1440×900` and `375×812`.
+- Existing test adjustments required by the Batch 1 & Batch 2 plan contracts (`docs/superpowers/plans/2026-11-28-polyclave-v5-pre-acceptance-fixes.md`):
+  - `crates/polyclave-core/tests/recovery.rs` (`allow_retry_survives_restart_and_attempt_limit_is_enforced`): replaced hardcoded `3` with `r.max_attempts` (now `5`).
+  - `crates/polyclave-hub/src/pr_gate.rs` (`a_lost_disarm_answer_leaves_the_gate_armed_and_still_settles_the_others`, `one_gate_github_cannot_answer_for_does_not_stop_the_others_reconciling`): gave the second gate its own `run2` so the new I1 one-active-gate-per-Run guard is respected; (`a_lost_enable_answer_stays_armed_and_startup_reconciliation_settles_it`): updated disarmed status assertion from `Approved` to `AwaitingHumanApproval`.
+  - `crates/polyclave-hub/src/scm_observer.rs` (`store_with_sha`): aligned `pr_gates.head_sha` with `PAGED_SHA` to match the new merged-SHA check.
+  - `bins/polyclaved/src/hub_api/tests.rs` (`pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge`, `hub_tools_start_council_and_run_pr_gate_enforce_schema_pause_and_direction_invariant`): assert immediate `pending` return from async `run_pr_gate`, then await `hub.wait_pr_gate(&gate_id)` before running existing assertions.
+
+Hand check:
+- Verified in offline Chrome (`pr-gate-approval.mjs`) at `1440×900` and `375×812`: `#needs-count == 1`, `GitHub PR` external link, same-SHA `ci/unit` test result and `receipt_not_done` (`Windows CI pending`), hidden `Run PR Gate` button while `awaiting_human_approval` / `auto_merge_armed`, and no horizontal overflow (`scrollWidth == innerWidth`). No screenshots committed yet.
+
+Issues:
+- None opened in `PLAN-ISSUES.md`. `docs/superpowers/reviews/` remains untracked per user instruction.
+
+Cleanup:
+- All test servers, fake GitHub listeners, and Playwright browsers closed; no background daemon or fake agent left running.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`
+
+Not done:
+- **Batch 3 not started** (next up in `docs/superpowers/plans/2026-11-28-polyclave-v5-pre-acceptance-fixes.md`):
+  1. I4 / B10: close all active SSE streams immediately on `revoke_device`.
+  2. B2: bounded daemon shutdown (`_lock` in `main`, `shutdown_timeout`, `Hub::close` cancels active Worker runs and waits boundedly before closing MCP, `UPDATE turns ... AND status='running'` in `settle()`).
+  3. SV1: per-entry read-only `skills` symlinks in `isolated-homes` + `canonical_real_path` write guard in `sync_skill_to_isolated_homes`.
+  4. SV2: full-text boundary/substring redaction in `redact_text`.
+  5. B6: Finder/Tauri `PATH` fallback (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, `POLYCLAVE_EXTRA_PATH`).
+- **Not pushed to `origin/main`**; Windows CI has not run on `09319ad..HEAD`.
+- **Stage 2 real-environment acceptance (V1–V5) not started**: all Batch 1 & Batch 2 checks above used offline fakes/mocks, local bare repos, and Playwright.
