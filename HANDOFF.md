@@ -1445,10 +1445,10 @@ Branch `fix/hardening-batch2-pr-gate` (Items 2.1–2.6 + self-review `7c1dc1e` +
 ## Audit Hardening — Batch 3 (Phone Pairing, Exact-SHA Approval & Restart Reconnect) — partial
 
 - cad76dc fix(auth): require Tailscale identity and persisted binding for remote device auth — workspace tests: 206 passed
-- 3393d2e feat(ui): pair over configured Tailscale HTTPS origin and exchange ticket in page — workspace tests: 206 passed
-- 1da3de1 docs: record the Batch 3 stop point and the open Item 3.3 decision — workspace tests: 207 passed
+- 8e70621 feat(ui): pair over configured Tailscale HTTPS origin and exchange ticket in page — workspace tests: 206 passed
+- 46abe23 docs: record the Batch 3 stop point and the open Item 3.3 decision — workspace tests: 207 passed
 
-Code head: `fix/hardening-batch3-phone-approval` at the commit after `1da3de1` (the one that updates the pairing assertion), branched from `main@3c3d4f1`.
+Code head: `fix/hardening-batch3-phone-approval` at `4422a05`, branched from `main@3c3d4f1`.
 
 **Batch 3 is not finished.** Items 3.1 and 3.2 are done and green; Item 3.3 is partial on the local branch `wip/human-approval` (`e744792`, never pushed) and Item 3.4 is not started. `PLAN-ISSUES.md` records the stop point, what exists, what is missing, and the one design decision the reviewer has to make before 3.3 can be finished.
 
@@ -1477,7 +1477,7 @@ Code head: `fix/hardening-batch3-phone-approval` at the commit after `1da3de1` (
 
 No daemon, browser or fixture process is left running; the browser suites close their servers and browsers in `finally`; the only hand-check state is under `/tmp/polyclave-hc/hardening-batch3/`. No real vendor CLI, no real Tailscale, no real GitHub credential was used.
 
-Privacy scan: **not clean** — `privacy-scan: email address in added lines`, pointing at a fixture literal I introduced in `3393d2e`. A later commit removes it from the files, but the scan reads every commit's added lines in `origin/main..HEAD`, so the branch cannot print `clean` without touching that unpublished commit. Recorded in `PLAN-ISSUES.md` with the options; nothing was pushed.
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`, after the owner authorised rewriting the two unpublished commits that carried the address-shaped literal.
 
 ### Not done, and why
 
@@ -1485,3 +1485,54 @@ Privacy scan: **not clean** — `privacy-scan: email address in added lines`, po
 - **Item 3.4** not started: 401 recovery after a daemon restart and clearing `S.live` on `resync_required`.
 - **Unverified in real environments:** nothing here was run against a real Tailscale tailnet, a real phone, a real daemon restart or real GitHub. Every check above is an offline fake, an in-process router or a Playwright page served by the test itself. Native Windows CI: none on this host.
 - Nothing was merged or pushed; the branch stays local for independent blind review.
+
+## Audit Hardening — Batch 3 completion (all four items)
+
+- cad76dc fix(auth): require Tailscale identity and persisted binding for remote device auth — workspace tests: 206 passed
+- 8e70621 feat(ui): pair over configured Tailscale HTTPS origin and exchange ticket in page — workspace tests: 206 passed
+- 4422a05 test(pairing): assert the phone-openable link instead of the dead custom scheme — workspace tests: 207 passed
+- ab2de36 feat(hub): gate merge on explicit human approval of exact verified SHA with full diff — workspace tests: 207 passed
+- e44acfd fix(ui): recover auth token and clear live stream state after daemon restart — workspace tests: 208 passed
+- 4027a08 fix(hub): return a gate to the human wait when the approval cannot be checked — workspace tests: 209 passed
+
+Code head: `fix/hardening-batch3-phone-approval` at this handoff commit (the last commit on the branch; `git log -1` names it), branched from `main@3c3d4f1`. Two commits (`8e70621`, `fd66102`) were rewritten in place, with the owner's permission, to build a URL-userinfo example at run time instead of committing an address-shaped literal; their content is otherwise unchanged. The earlier "partial" section below this one describes the stop point reached mid-job; it is superseded by this section, and the `wip/human-approval` branch it mentions was deleted after its work was cherry-picked here.
+
+### Implementation and evidence (all offline fakes)
+
+- **3.1 — device auth.** Peer identity must equal the persisted binding in both directions; `X-AgentMesh-Node` is no longer read as an identity. `remote_device_auth_requires_tailscale_identity_and_a_matching_binding` covers the four refusals and both allowed paths; restoring either the lenient check or the header fallback fails it with `200 != 403`.
+- **3.2 — pairing.** `POLYCLAVE_TAILSCALE_ORIGIN` (bare `https` authority) drives a phone-openable `https://<host>/#pair=<secret>` link; without it the ticket carries no link and Settings says what to set. `sse.ts::trustedOrigin` admits loopback and the page's own https origin; the page exchanges the secret, strips it, and keeps the device token. `pairing_qr_points_at_the_configured_tailscale_origin` plus `tests/pairing-flow.mjs` (1440/375) cover scan → exchange → replay refusal → revocation → re-pair.
+- **3.3 — exact-SHA human approval.** `PrGateStatus::AwaitingHumanApproval` (with an in-place `pr_gates` rebuild that parks `pr_reviews` rows while the CHECK gains the value), `run_pr_gate` stopping at the wait instead of arming, `Store::await_human_approval` / `Store::approve_pr_gate` comparing the SHA inside the write, `POST /api/pr-gates/{id}/approve` (`expected_sha`, alias `seen_sha`) as the only path to `enableAutoMerge`, and `GET /api/pr-gates/{id}/diff` returning the exact `base_sha..head_sha` cut at 64 KiB with `truncated` and the full size. The gate card shows the exact commit, the diff and `Approve <sha>`; tests + not-done stay in the Run evidence card for the same SHA. Tests: `pr_gates_gains_the_awaiting_state_and_keeps_its_rows_and_reviews`, `pr_gate_routes_run_gate_and_expose_reviews_scope_and_auto_merge` (await → diff → stale refusal → approval over HTTP), `tests/pr-gate-approval.mjs` (1440/375: nothing armed before, the POST carries exactly that SHA, the diff is fetched only on request).
+- **3.4 — restart reconnect.** A `401` from the API or the stream is a rotated credential, not a network blip: `follow` surfaces it, the page re-reads its connection once, drops `S.live`, re-snapshots, and only keeps running with a credential that actually changed — otherwise the status bar reads **Daemon credential rejected** and the reconnect dialog opens. `resync_required` clears the transient deltas before the snapshot. `tests/restart-reconnect.mjs` (1440/375) rotates the token, asserts the page stops claiming to be connected, that a delta from the dead stream is never shown, and that a fresh token brings the same run back.
+
+### Tests
+
+- Branch head: `cargo fmt --all -- --check` clean, `cargo clippy --locked --workspace --all-targets -- -D warnings` 0 warnings, `cargo test --locked --workspace` **209 passed, 0 failed, 0 ignored**.
+- `proto.ts` regenerated with `POLYCLAVE_UPDATE_PROTO=1 cargo test -p polyclave-proto`; `git diff --exit-code` clean at the head.
+- UI: `npx tsc --noEmit`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` (offline browser, QR round trip, approval card, pairing flow, PR-gate approval, restart reconnect) pass at 1440×900 and 375×812, dark and light where the suite covers both.
+- Existing-test edits are recorded item by item in `PLAN-ISSUES.md`. None weakens an assertion: the gate tests drive the new human step and assert the wait before it; the pairing test asserted a dead `polyclave://` scheme and now asserts the exact https link.
+
+### Hand check
+
+`handcheck/hardening-batch3/` (JPEG q70, all < 60 KB) — what each screenshot shows:
+`item2-phone-paired.jpg` (375×812 after a scanned link: session selected, daemon connected, no overflow), `item2-phone-revoked.jpg` (revoked token: "Reconnect this device" dialog, not connected), `item3-phone-awaiting.jpg` (375: `awaiting human approval`, "Waiting for your approval of bbbbbbb", the diff, `Approve bbbbbbb`), `item3-desktop-awaiting.jpg` (the same card at 1440), `item3-phone-approved.jpg` (after the POST: armed), `item4-phone-rotated.jpg` (rotated token: not connected, reconnect offered). `measurements.md` has the numbers for every step at both widths (`scrollWidth == innerWidth`, no overflowing element).
+
+### Self-review
+
+One defect found and fixed before handing back: `approve_pr_gate` moved the ledger to `approved` before reading the PR from GitHub, so a transport failure left the gate unapprovable forever. The error branch now restores `AwaitingHumanApproval` (regression `an_approval_that_cannot_be_checked_leaves_the_gate_approvable_again`). Negative controls were run for each refusal this batch added: 3.1 (lenient check or header fallback → `200 != 403`), 3.2 (link shape), 3.3 (arming from the wait is refused; stale SHA refused over HTTP), 3.4 (the stale delta assertion fails if the deltas are not cleared).
+
+### Issues
+
+Five `PLAN-ISSUES.md` entries were opened by this job, each with the evidence and the exact justification: 3.1's stricter `verify_device_token`, 3.2's configured origin and nullable link (plus the one existing assertion that changed), the mid-job stop point (now marked resolved), 3.3's option-A decision with the nine gate tests that gained the human step, and the self-review wedge. Nothing is left open in the sense of blocking: the stop point and the privacy-scan finding are both resolved in that file.
+
+### Cleanup
+
+No daemon, browser or fixture process is left running; every browser suite closes its browser in `finally`, and the hand-check state lives under `/tmp/polyclave-hc/hardening-batch3/`. No real vendor CLI, no real Tailscale tailnet, no real phone and no real GitHub credential was used.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`. The address-shaped fixture literal this job introduced was removed by rewriting the two unpublished commits that carried it (owner-authorised); no commit on the branch adds an address.
+
+### Not done / not verified in real environments
+
+- **Never run against real infrastructure:** no real Tailscale tailnet or `tailscale serve`, no real phone or QR scan by a device camera, no real daemon restart with a rotated token file, no real GitHub PR/auto-merge. Every check above is an in-process router, an offline fake or a Playwright page served by the test.
+- **Item 3.3's diff is the mirror range, not GitHub's PR diff**: the card shows `base_sha..head_sha` read from the host mirror (bounded at 64 KiB with the truncation stated). If the remote base moved, the gate refuses at approval instead of showing a different range.
+- **Per-SHA tests and not-done rows** live in the Run evidence card (keyed to the same SHA), not inside the PR-gate card; the gate card links the person to the SHA they are approving.
+- Native Windows CI: none on this host. Nothing was merged or pushed; the branch stays local for the independent blind review.
