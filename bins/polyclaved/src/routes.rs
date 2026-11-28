@@ -344,10 +344,12 @@ async fn exchange_pairing(
         Some(_) if headers.get_all(axum::http::header::ORIGIN).iter().count() != 1 => {
             return Err(refused());
         }
+        // The rule the rest of the API uses: the desktop page, the Tauri shell
+        // and the phone's own https page may pair; nothing else may.
         Some(origin)
             if !origin
                 .to_str()
-                .is_ok_and(|o| auth.origin_matches_host(o, host)) =>
+                .is_ok_and(|o| auth.origin_allowed(o, Some(host), peer.as_deref())) =>
         {
             return Err(refused());
         }

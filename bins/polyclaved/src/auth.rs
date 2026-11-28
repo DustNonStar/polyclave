@@ -29,7 +29,14 @@ impl LocalAuth {
             store,
         }
     }
-    fn allowed_origin(&self, origin: &str, host: Option<&str>, peer: Option<&str>) -> bool {
+    /// Whether a browser may call the daemon with this `Origin`.
+    ///
+    /// The desktop page and the Tauri shell are accepted by name. A phone or
+    /// tablet reaches the daemon through Tailscale Serve, which terminates TLS
+    /// and sets the identity header; then that page's own origin is accepted too,
+    /// but only when the origin is `https` and names exactly the `Host` the
+    /// browser used, so a cross-site page is still refused.
+    pub fn origin_allowed(&self, origin: &str, host: Option<&str>, peer: Option<&str>) -> bool {
         if origin == self.web_origin
             || matches!(
                 origin,
@@ -38,11 +45,6 @@ impl LocalAuth {
         {
             return true;
         }
-        // A phone or tablet reaches this daemon through Tailscale Serve, which
-        // terminates TLS and sets the identity header. Then the page's own
-        // origin must be allowed — otherwise approving from the phone is a 403 —
-        // but nothing else: the origin must be https and name exactly the Host
-        // the browser used, so a cross-site page is still refused.
         match (peer, host) {
             (Some(peer), Some(host)) => !peer.is_empty() && same_https_origin(origin, host),
             _ => false,
@@ -51,10 +53,6 @@ impl LocalAuth {
     /// The loopback `Host` value the desktop page uses.
     pub fn loopback_host(&self) -> &str {
         &self.host
-    }
-    /// True when `origin` is `https://<authority>` and `<authority>` is `host`.
-    pub fn origin_matches_host(&self, origin: &str, host: &str) -> bool {
-        same_https_origin(origin, host)
     }
     fn matches(&self, secret: &[u8]) -> bool {
         let expected = self.token.as_bytes();
@@ -91,7 +89,7 @@ pub async fn require(State(auth): State<LocalAuth>, request: Request, next: Next
         Some(v)
             if headers.get_all(header::ORIGIN).iter().count() == 1
                 && v.to_str()
-                    .is_ok_and(|s| auth.allowed_origin(s, host, peer_identity.as_deref())) =>
+                    .is_ok_and(|s| auth.origin_allowed(s, host, peer_identity.as_deref())) =>
         {
             Some(v.clone())
         }

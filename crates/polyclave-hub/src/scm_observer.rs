@@ -69,33 +69,15 @@ impl ScmObserver {
         }
     }
 
-    /// Whether an observed event may wake the Hub.
+    /// The admission policy of the Run's own checkout, read once per gate.
     ///
-    /// The policy is the admission policy of the Run's own checkout: `off`
-    /// silences everything, and a GitHub bot account or a configured bot actor
-    /// is never the person speaking. When the policy cannot be read, only an
-    /// actor-free event (a CI failure, a merge conflict) is forwarded.
-    fn admits(&self, run_id: &str, actor: Option<&str>) -> bool {
-        let policy = self
-            .store
-            .run_repo_cwd(run_id)
-            .ok()
-            .flatten()
-            .and_then(|repo| self.store.hub_inference_policy(&repo).ok());
-        let Some(policy) = policy else {
-            return actor.is_none();
-        };
-        if policy.0 == "off" {
-            return false;
-        }
-        match actor {
-            // GitHub marks bot accounts as `<name>[bot]`.
-            Some(actor) => {
-                crate::triage::inference_verdict(&policy, actor, false, actor.ends_with("[bot]"))
-                    != crate::triage::InferredAdmission::Ignored
-            }
-            None => true,
-        }
+    /// `None` means it could not be read (the Run is gone, or the store failed).
+    /// The choice is deliberate: an actor-free event (a CI failure, a merge
+    /// conflict) is still forwarded, while anything attributed to a person is
+    /// withheld rather than admitted on a guess.
+    fn policy_for(&self, run_id: &str) -> Option<(String, Vec<String>, Vec<String>)> {
+        let repo = self.store.run_repo_cwd(run_id).ok().flatten()?;
+        self.store.hub_inference_policy(&repo).ok()
     }
 
     /// Records the event in the change log and, when the policy allows it, wakes
@@ -104,23 +86,31 @@ impl ScmObserver {
     /// and must not be able to stand as a Ticket's basis message.
     fn emit_event(
         &self,
+        policy: Option<&(String, Vec<String>, Vec<String>)>,
         event: &ObservedEvent,
         dedupe_key: &str,
-        run_id: &str,
         actor: Option<&str>,
     ) -> bool {
-        // An ignored actor is not admitted anywhere: it must not reach the Hub
-        // inbox and must not reach the change log the Hub reads either.
-        if !self.admits(run_id, actor) {
+        // The policy is the Run's admission policy: `off` silences everything,
+        // and a GitHub bot account or a configured bot actor is never the person
+        // speaking. An ignored actor reaches neither the Hub inbox nor the change
+        // log the Hub reads.
+        let admitted = match (policy, actor) {
+            (Some(policy), Some(actor)) => {
+                crate::triage::inference_verdict(policy, actor, false, actor.ends_with("[bot]"))
+                    != crate::triage::InferredAdmission::Ignored
+            }
+            (Some(policy), None) => policy.0 != "off",
+            (None, actor) => actor.is_none(),
+        };
+        if !admitted {
             return false;
         }
         if let Some(ref hub_id) = self.hub_session_id {
-            {
-                let intent = format!("scm:{}:{}:{}", event.repo_slug, event.pr_number, dedupe_key);
-                let _ = self
-                    .store
-                    .hub_enqueue_external(hub_id, &intent, &event.summary);
-            }
+            let intent = format!("scm:{}:{}:{}", event.repo_slug, event.pr_number, dedupe_key);
+            let _ = self
+                .store
+                .hub_enqueue_external(hub_id, &intent, &event.summary);
         }
         let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         let gate_id = event.gate_id.clone();
@@ -143,6 +133,7 @@ impl ScmObserver {
                 continue;
             };
 
+            let policy = self.policy_for(&gate.run_id);
             let mut cursor = self
                 .store
                 .scm_cursor(&gate.repo_slug, pr_number)
@@ -170,7 +161,7 @@ impl ScmObserver {
                     kind: ObservedEventKind::Merged,
                     summary: format!("PR #{pr_number} ({}) merged", gate.repo_slug),
                 };
-                if self.emit_event(&ev, "merged", &gate.run_id, None) {
+                if self.emit_event(policy.as_ref(), &ev, "merged", None) {
                     events.push(ev);
                 }
                 self.store.save_scm_cursor(cursor).map_err(map_store_err)?;
@@ -190,9 +181,9 @@ impl ScmObserver {
                     summary: format!("PR #{pr_number} ({}) has merge conflicts", gate.repo_slug),
                 };
                 if self.emit_event(
+                    policy.as_ref(),
                     &ev,
                     &format!("conflict:{}", pr_state.head_sha),
-                    &gate.run_id,
                     None,
                 ) {
                     events.push(ev);
@@ -207,11 +198,12 @@ impl ScmObserver {
 
             // Reviews and comments are numbered in separate GitHub sequences, so
             // each has its own cursor; sharing one would hide the smaller ids.
-            let mut last_review_id = self
+            let last_review_id = self
                 .store
                 .scm_review_cursor(&gate.repo_slug, pr_number)
                 .map_err(map_store_err)?
                 .unwrap_or(0);
+            let mut seen_review_id = last_review_id;
 
             for review in details.reviews {
                 // Ignore host-submitted reviews carrying `[agent-reviewer · …]`.
@@ -219,8 +211,8 @@ impl ScmObserver {
                     continue;
                 }
                 let rid = review.id as i64;
-                if rid > last_review_id {
-                    last_review_id = rid;
+                if rid > seen_review_id {
+                    seen_review_id = rid;
                     let ev = ObservedEvent {
                         gate_id: gate.id.clone(),
                         repo_slug: gate.repo_slug.clone(),
@@ -232,9 +224,9 @@ impl ScmObserver {
                         ),
                     };
                     if self.emit_event(
+                        policy.as_ref(),
                         &ev,
                         &format!("review:{rid}"),
-                        &gate.run_id,
                         Some(&review.author_login),
                     ) {
                         events.push(ev);
@@ -264,9 +256,9 @@ impl ScmObserver {
                         ),
                     };
                     if self.emit_event(
+                        policy.as_ref(),
                         &ev,
                         &format!("comment:{cid}"),
-                        &gate.run_id,
                         Some(&comment.author_login),
                     ) {
                         events.push(ev);
@@ -274,15 +266,9 @@ impl ScmObserver {
                 }
             }
 
-            if last_review_id
-                > self
-                    .store
-                    .scm_review_cursor(&gate.repo_slug, pr_number)
-                    .map_err(map_store_err)?
-                    .unwrap_or(0)
-            {
+            if seen_review_id > last_review_id {
                 self.store
-                    .save_scm_review_cursor(&gate.repo_slug, pr_number, last_review_id)
+                    .save_scm_review_cursor(&gate.repo_slug, pr_number, seen_review_id)
                     .map_err(map_store_err)?;
             }
 
@@ -307,9 +293,9 @@ impl ScmObserver {
                             ),
                         };
                         if self.emit_event(
+                            policy.as_ref(),
                             &ev,
                             &format!("ci:{}:{}", check.id, pr_state.head_sha),
-                            &gate.run_id,
                             None,
                         ) {
                             events.push(ev);

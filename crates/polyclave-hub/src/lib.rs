@@ -39,5 +39,7 @@ pub enum Error {
     Store,
     #[error("requested action is outside the registered scope")]
     Policy,
+    #[error("the destination branch is not this gate's to publish")]
+    Publish,
 }
 pub type Result<T> = std::result::Result<T, Error>;

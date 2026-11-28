@@ -425,7 +425,7 @@ async fn cancel(State(hub): State<Hub>, Path(id): Path<String>) -> Reply {
 
 fn map_hub_err(err: Error) -> HttpError {
     match err {
-        Error::Policy | Error::Profile => HttpError(
+        Error::Policy | Error::Profile | Error::Publish => HttpError(
             StatusCode::CONFLICT,
             "conflict",
             "Request refused in the current state",

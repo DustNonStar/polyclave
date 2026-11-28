@@ -133,7 +133,7 @@ pub trait MirrorPusher: Send + Sync {
     /// A lease built from the tip read just before the push would always satisfy
     /// itself, so `None` must never overwrite a branch this gate does not own: a
     /// branch that another Run or a person created is refused, and a human
-    /// decides. That refusal is [`Error::Policy`], which the gate escalates.
+    /// decides. That refusal is [`Error::Publish`], which the gate escalates.
     fn push_verified_sha<'a>(
         &'a self,
         target: &'a PublishTarget,
@@ -343,11 +343,13 @@ impl MirrorPusher for GitMirrorPusher {
                 }
                 let observed = remote_tip(&git, &mirror, protocol, &token, &url, &dest)?;
                 match &expected {
+                    // A revise round expects the tip it pushed last: anything else
+                    // means someone moved the branch, which a human must settle.
                     Some(expected) => {
                         if observed.as_deref() != Some(expected.as_str())
                             && observed.as_deref() != Some(sha.as_str())
                         {
-                            return Err(Error::Policy);
+                            return Err(Error::Publish);
                         }
                     }
                     // First push: only an absent branch, or one that already is
@@ -355,7 +357,7 @@ impl MirrorPusher for GitMirrorPusher {
                     // someone else and is left untouched.
                     None => {
                         if observed.is_some() && observed.as_deref() != Some(sha.as_str()) {
-                            return Err(Error::Policy);
+                            return Err(Error::Publish);
                         }
                     }
                 }
@@ -751,27 +753,37 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
 
     // Push exactly the R1-verified SHA from the authoritative mirror, then
     // open/find the PR. The pusher confirms the remote tip equals that SHA.
-    // A policy refusal means the destination branch is not this gate's to
-    // overwrite (or the SHA is not publishable): nothing was pushed, and a
-    // human decides rather than the gate forcing the branch.
+    // A publish refusal means the destination branch is not this gate's to
+    // overwrite: nothing was pushed, and a human decides rather than the gate
+    // forcing the branch.
     match deps
         .pusher
         .push_verified_sha(&target, &req.mirror_path, &current_head, &req.branch, None)
         .await
     {
         Ok(()) => {}
-        Err(Error::Policy) => {
+        Err(Error::Publish) => {
             return escalate(
                 deps,
                 &gate.id,
                 req.hub_session_id.as_deref(),
                 "push_refused",
                 &format!(
-                    "refusing to publish {current_head} to {} on branch {}: the branch is not absent and does not already hold that SHA, so pushing would overwrite work this gate did not create; nothing was pushed and no PR was opened",
+                    "refusing to publish {current_head} to {} on branch {}: the branch already holds a different commit, so pushing would overwrite work this gate did not create; nothing was pushed and no PR was opened",
                     req.repo_slug, req.branch
                 ),
             );
         }
+        Err(Error::Policy) => return escalate(
+            deps,
+            &gate.id,
+            req.hub_session_id.as_deref(),
+            "push_unpublishable",
+            &format!(
+                "refusing to publish {current_head} to {} on branch {}: the SHA is not a commit of the host mirror, or the branch name is not a valid ref; nothing was pushed",
+                req.repo_slug, req.branch
+            ),
+        ),
         Err(err) => return Err(err),
     }
 
@@ -962,7 +974,9 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             return Ok(escalated);
         }
 
-        deps.pusher
+        // The revise head may only replace the tip this gate pushed last.
+        match deps
+            .pusher
             .push_verified_sha(
                 &target,
                 &req.mirror_path,
@@ -970,7 +984,23 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
                 &req.branch,
                 Some(current_head.as_str()),
             )
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            Err(Error::Publish) => {
+                return escalate(
+                    deps,
+                    &gate.id,
+                    req.hub_session_id.as_deref(),
+                    "revise_push_refused",
+                    &format!(
+                        "the revision {new_head} did not replace {current_head} on branch {}: the branch moved, so the revised commit was not published and the PR still shows {current_head}",
+                        req.branch
+                    ),
+                );
+            }
+            Err(err) => return Err(err),
+        }
         current_head = new_head;
         gate = deps
             .store
@@ -1319,6 +1349,29 @@ mod tests {
         pushed: Mutex<Vec<(String, String)>>,
     }
 
+    /// Succeeds once, then reports that the destination branch moved.
+    struct FlakyPusher {
+        calls: AtomicUsize,
+    }
+
+    impl MirrorPusher for FlakyPusher {
+        fn push_verified_sha<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _sha: &'a str,
+            _branch: &'a str,
+            _expected_remote_tip: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => Ok(()),
+                    _ => Err(Error::Publish),
+                }
+            })
+        }
+    }
+
     /// A pusher that refuses the way the real one does when the destination
     /// branch is not the gate's to overwrite.
     struct RefusingPusher;
@@ -1332,7 +1385,7 @@ mod tests {
             _branch: &'a str,
             _expected_remote_tip: Option<&'a str>,
         ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async move { Err(Error::Policy) })
+            Box::pin(async move { Err(Error::Publish) })
         }
     }
 
@@ -1717,7 +1770,7 @@ mod tests {
         let refused = pusher
             .push_verified_sha(&target, &fix.mirror, &fix.good_head_sha, "feat/x", None)
             .await;
-        assert!(matches!(refused, Err(Error::Policy)));
+        assert!(matches!(refused, Err(Error::Publish)));
         assert_eq!(tip("feat/x"), fix.bad_head_sha_1);
 
         // The branch owner may still publish that exact SHA, so a rerun of the
@@ -1881,6 +1934,65 @@ mod tests {
             vec![(fix.good_head_sha.clone(), "feat/revise".to_owned())]
         );
         assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_under_a_revise_escalates_instead_of_being_forced() {
+        let fix = setup_git_and_store();
+        // An in-scope revision: another commit touching src/lib.rs.
+        let revised = {
+            let work = fix._dir.path().join("work");
+            git(&work, &["checkout", "main"]);
+            std::fs::write(work.join("src/lib.rs"), "pub fn base() -> i32 { 2 }\n").unwrap();
+            git(&work, &["add", "."]);
+            git(&work, &["commit", "-m", "revised"]);
+            let sha = git(&work, &["rev-parse", "HEAD"]);
+            git(
+                &work,
+                &["push", fix.mirror.to_str().unwrap(), "HEAD:refs/heads/main"],
+            );
+            sha
+        };
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Revise]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: Some(Arc::new(MockRevise {
+                next_sha: revised.clone(),
+                bounces: AtomicUsize::new(0),
+            })),
+            pusher: Arc::new(FlakyPusher {
+                calls: AtomicUsize::new(0),
+            }),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/moved");
+        request.hub_session_id = Some("hub".into());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        // The PR keeps the commit it already had; the revision was not forced on.
+        assert_eq!(gate.head_sha, fix.good_head_sha);
+        assert!(gh.enable_auto_merge_calls.lock().unwrap().is_empty());
+        assert!(
+            fix.store
+                .hub_messages("hub")
+                .unwrap()
+                .iter()
+                .any(|m| m.text.contains("the branch moved")),
+            "a moved branch must reach the Hub"
+        );
         server.abort();
     }
 
