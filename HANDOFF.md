@@ -1347,3 +1347,11 @@ Hand check and cleanup: the HTTP regression used a real local daemon, a temporar
 Privacy scan: `privacy-scan: clean (origin/main..HEAD)` after the code commit.
 
 Merge readiness: native Windows execution is still required on the exact branch head. This macOS host has no available Windows runner, and cross-target checks only compile the native tests. The branch remains local. Batch 2 and Batch 3 stay outside this follow-up.
+
+## Audit Hardening — Batch 1 review (Gemini): passed, merged
+
+Branch `fix/hardening-batch1-runtime` (Items 1.1–1.4 + self-review `2fdf2d6` + cancellation & Windows Job follow-up `8537267`) was rebased onto `main` (`d55add9`), fast-forwarded into `main`, and deleted.
+
+- **Code & invariant audit:** verified bounded post-exit stdout drain (`runner.rs`), SQLite Attempt reservation before directory creation (`runs.rs`, `recovery.rs`), tightened macOS Seatbelt profile (`claude.rs`), host-side `commit_and_stage` MCP broker (`stage.rs`), immediate `mcp_revoked=1` persistence + `wait_for_cancelled_staging` repository-lock drain on `POST /api/runs/:id/cancel` (`routes.rs`, `runner.rs`, verified by real-daemon `cancel_http_drains_paused_broker_push_before_acknowledging`), and Windows `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_JOB_LIST` atomic Job attachment + `drain_job` active-process-zero wait (`windows.rs`, `command_tree_windows.rs`).
+- **Verification (macOS):** `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 186 passed, 0 failed (including `TurnDto` compile-fail doctest and real-daemon cancel staging test); `bash scripts/privacy-scan.sh` clean.
+- **Pending CI:** pushing `main` now to run native `macos-latest` and `windows-latest` GitHub Actions CI (including `command_tree_windows.rs`). Nit: `unix.rs` `CommandTree::drop` waits on the main `git` process after `SIGKILL` to the process group without polling `group_members`.
