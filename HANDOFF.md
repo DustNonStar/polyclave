@@ -1600,3 +1600,30 @@ Not done:
 - [x] #6 [Medium] `apps/polyclave-app/ui/src/state/store.ts` & `inspector.ts`: include `failed` runs in `needsReview()` / `Needs you` badge, restrict `Run PR Gate` to `failed | escalated | scope_violation | paused`, and separate `View PR Gate` vs `Open PR Gate` on the Run card (`b7d5c9e`, UI `test:browser` passed).
 - [x] #7 [Low] `bins/polyclaved/src/hub_api.rs` (prune finished `pr_gate_tasks` handles and avoid duplicate `pr_gate:{id}:failed` hub notices on preflight failure) and `apps/polyclave-app/ui/src/views/flows.ts` (update default reviewer model when switching vendor unless manually edited) (`b7d5c9e`).
 
+
+## Pre-acceptance fixes — Stage 1 Batch 3 (I4/B10 + B2 + SV1/SV2 + B6)
+
+Commits:
+- `05d2688` `fix: close sse on device revoke, bound daemon shutdown, and seal evolution safety valves`
+
+Tests:
+- Branch head before this handoff commit: `main@05d2688`.
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean.
+- `cargo test --locked --workspace`: **223 passed, 0 failed, 0 ignored** (including `revoking_paired_device_closes_open_sse_stream_immediately`, `sync_skill_refuses_symlinked_skills_dir_and_redact_text_handles_embedded_tokens`, `augmented_path_env_includes_standard_fallback_locations`, and non-symlink `skills` dir check).
+- No UI or protocol files changed in Batch 3 (`git diff --exit-code -- apps/polyclave-app/ui/src/generated/proto.ts` unchanged).
+
+Hand check:
+- Offline Rust test suite only; real-device / `polyclaved` signal shutdown / Finder launch / Tailscale SSE revocation remain for Stage 2 (`V1`–`V5`).
+
+Issues:
+- None opened in `PLAN-ISSUES.md`. `docs/superpowers/reviews/` remains untracked per user instruction.
+
+Cleanup:
+- All test servers and listeners closed; no background daemon or fake agent left running.
+
+Privacy scan: `privacy-scan: clean (origin/main..HEAD)`
+
+Not done:
+- **Not pushed to `origin/main`**; Windows CI has not run on `09319ad..HEAD`.
+- **Stage 2 real-environment acceptance (`V1`–`V5`) not started**: all Stage 1 checks used offline fakes/mocks, local bare repos, and Playwright.
