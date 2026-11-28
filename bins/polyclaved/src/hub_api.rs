@@ -1018,7 +1018,7 @@ impl Hub {
                 .map_err(Into::into)
             })
             .map_err(|_| PrGatePrepError::Internal)?;
-        let default_touched_paths: Vec<String> = serde_json::from_str::<Value>(&mandate_json)
+        let mandate_paths: Vec<String> = serde_json::from_str::<Value>(&mandate_json)
             .ok()
             .and_then(|v| v.get("allowed_paths").cloned())
             .and_then(|v| serde_json::from_value(v).ok())
@@ -1033,15 +1033,16 @@ impl Hub {
             .or_else(|| existing_gate.as_ref().map(|g| g.branch.clone()))
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("polyclave/{}", run.id));
-        let base_branch = inputs
-            .base_branch
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| run.base_branch.clone());
-        let base_sha = inputs
-            .base_sha
-            .or_else(|| existing_gate.as_ref().map(|g| g.base_sha.clone()))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| run.base_sha.clone());
+        // The reviewed base is the Run's own: its immutable admission baseline
+        // and the branch it was admitted on. A caller cannot substitute another
+        // base, which would let a review cover a range the PR never shows.
+        if run.base_sha.trim().is_empty() || run.base_branch.trim().is_empty() {
+            return Err(PrGatePrepError::Invalid(
+                "run has no recorded base to review",
+            ));
+        }
+        let base_branch = run.base_branch.clone();
+        let base_sha = run.base_sha.clone();
         // Only the Run's R1-verified result is reviewed, pushed and armed.
         let head_sha = verified_result_sha(&self.runs, &run).map_err(|_| {
             PrGatePrepError::Invalid(
@@ -1063,7 +1064,8 @@ impl Hub {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("Polyclave run {}", run.id));
         let pr_body = inputs.pr_body.unwrap_or_default();
-        let touched_paths = inputs.touched_paths.unwrap_or(default_touched_paths);
+        // Path scope is the Ticket's mandate, never the caller's list.
+        let touched_paths = mandate_paths;
         let is_high_risk = inputs.is_high_risk.unwrap_or(false);
         let reviewers = inputs
             .reviewers
@@ -1465,17 +1467,18 @@ fn ensure_private(path: &FsPath) -> HubResult<()> {
         _ => Err(Error::NotStarted),
     }
 }
+/// Everything a caller may still choose about a PR gate. The reviewed base
+/// (`base_sha`, `base_branch`) and the authorized path scope are read from the
+/// persisted Run and Ticket mandate inside `prepare_pr_gate_run`; they are not
+/// part of this request, so no caller can widen or shift them.
 pub(crate) struct PrGateRunInputs {
     pub target_id: String,
     pub hub_session_id: Option<String>,
     pub repo_slug: Option<String>,
     pub branch: Option<String>,
-    pub base_branch: Option<String>,
-    pub base_sha: Option<String>,
     pub head_sha: Option<String>,
     pub pr_title: Option<String>,
     pub pr_body: Option<String>,
-    pub touched_paths: Option<Vec<String>>,
     pub is_high_risk: Option<bool>,
     pub reviewers: Option<Vec<ReviewerSpec>>,
 }

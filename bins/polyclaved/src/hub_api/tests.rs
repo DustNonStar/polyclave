@@ -499,15 +499,31 @@ impl ReviewerExecutor for MockReviewer {
 
 struct MockPusher {
     pushed: Mutex<Vec<(String, String)>>,
+    /// The base branches the gate asked about before pushing anything.
+    base_checked: Mutex<Vec<String>>,
 }
 impl MockPusher {
     fn new() -> Self {
         Self {
             pushed: Mutex::new(Vec::new()),
+            base_checked: Mutex::new(Vec::new()),
         }
     }
 }
 impl MirrorPusher for MockPusher {
+    fn confirm_review_base<'a>(
+        &'a self,
+        _target: &'a polyclave_hub::publish_origin::PublishTarget,
+        _mirror_path: &'a FsPath,
+        _base_branch: &'a str,
+        _base_sha: &'a str,
+    ) -> BoxFuture<'a, HubResult<()>> {
+        self.base_checked
+            .lock()
+            .unwrap()
+            .push(_base_branch.to_owned());
+        Box::pin(async { Ok(()) })
+    }
     fn push_verified_sha<'a>(
         &'a self,
         _target: &'a polyclave_hub::publish_origin::PublishTarget,
@@ -855,6 +871,90 @@ fn setup_unreceipted_run(dir: &FsPath, hub: &Hub, run_id: &str, attempt_id: i64)
         })
         .unwrap();
     tip
+}
+
+/// Item 2.2: the reviewed base and the authorized path scope come from the
+/// persisted Run and its Ticket mandate. A caller that tries to widen either is
+/// refused before anything is pushed, over HTTP and through the MCP tool.
+#[tokio::test]
+async fn pr_gate_refuses_a_caller_that_tries_to_widen_the_reviewed_scope() {
+    let (dir, hub, _rx) = test_hub().await;
+    let (run_id, base_sha, head_sha) = setup_git_run_fixture(dir.path(), &hub);
+    let pusher = Arc::new(MockPusher::new());
+    let scm_state = Arc::new(MockScmState::default());
+    hub.set_scm(Arc::new(MockScmClient {
+        state: scm_state.clone(),
+        polled: None,
+    }));
+    hub.set_reviewer(Arc::new(MockReviewer));
+    hub.set_pusher(pusher.clone());
+    hub.set_default_reviewers(vec![ReviewerSpec {
+        vendor: Vendor::Claude,
+        model: "claude-sonnet-4-6".into(),
+    }]);
+    let app = daemon_router(&hub);
+
+    // Every one of these fields used to be a caller override.
+    for body in [
+        json!({"repo_slug": "org/repo", "branch": "feat/widen", "touched_paths": ["**"]}),
+        json!({"repo_slug": "org/repo", "branch": "feat/widen", "base_sha": base_sha}),
+        json!({"repo_slug": "org/repo", "branch": "feat/widen", "base_branch": "release"}),
+        // An empty reviewed range is refused on its own.
+        json!({"repo_slug": "org/repo", "branch": "feat/widen", "base_sha": head_sha}),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(authed_post(&format!("/api/pr-gates/{run_id}/run"), body))
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error(), "{}", res.status());
+    }
+
+    // The tool refuses the same attempt, and the schema no longer offers them.
+    let schema = tool_list(true);
+    let gate_tool = schema
+        .iter()
+        .find(|t| t["name"] == "run_pr_gate")
+        .expect("run_pr_gate tool");
+    for field in ["base_sha", "base_branch", "touched_paths"] {
+        assert!(
+            gate_tool["parameters"]["properties"].get(field).is_none(),
+            "{field} is not a caller choice"
+        );
+    }
+    hub.store
+        .hub_enqueue("hub", "req-widen", "widen scope")
+        .unwrap();
+    let claim = hub
+        .store
+        .hub_claim("hub", "fixture-host", &hub.boot)
+        .unwrap()
+        .unwrap();
+    hub.store.hub_authorize(claim.id, None).unwrap();
+    let scope = ToolScope::new(claim.id, "hub", "hub", &claim.repo);
+    assert!(matches!(
+        hub.call_tool(
+            &scope,
+            "run_pr_gate",
+            json!({
+                "run_id": run_id,
+                "repo_slug": "org/repo",
+                "branch": "feat/widen",
+                "pr_title": "Widen",
+                "touched_paths": ["**"]
+            }),
+        )
+        .await,
+        Err(Error::Policy)
+    ));
+
+    // Nothing was published, reviewed or merged, and no gate row was created.
+    assert!(pusher.pushed.lock().unwrap().is_empty());
+    assert!(pusher.base_checked.lock().unwrap().is_empty());
+    assert!(scm_state.submitted_reviews.lock().unwrap().is_empty());
+    assert!(scm_state.enabled_nodes.lock().unwrap().is_empty());
+    assert!(hub.store.list_pr_gates().unwrap().is_empty());
+    hub.close().await;
 }
 
 /// Item 2.1: a person may still accept a tip by hand, but that accept stores no

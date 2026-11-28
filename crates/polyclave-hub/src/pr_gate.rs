@@ -142,6 +142,21 @@ pub trait MirrorPusher: Send + Sync {
         branch: &'a str,
         expected_remote_tip: Option<&'a str>,
     ) -> BoxFuture<'a, Result<()>>;
+
+    /// Confirms the remote branch the PR will merge into still contains the
+    /// reviewed baseline `base_sha`, so the range GitHub computes is the range
+    /// the reviewer read. The gate asks before it pushes anything, and a
+    /// refusal escalates instead of publishing onto a base nobody reviewed.
+    ///
+    /// There is deliberately no permissive default: a pusher that cannot
+    /// answer must refuse, or the check would silently pass.
+    fn confirm_review_base<'a>(
+        &'a self,
+        target: &'a PublishTarget,
+        mirror_path: &'a Path,
+        base_branch: &'a str,
+        base_sha: &'a str,
+    ) -> BoxFuture<'a, Result<()>>;
 }
 
 const GITHUB_BASE_URL: &str = "https://github.com/";
@@ -392,6 +407,81 @@ impl MirrorPusher for GitMirrorPusher {
             .map_err(|_| Error::Transport)?
         })
     }
+
+    fn confirm_review_base<'a>(
+        &'a self,
+        target: &'a PublishTarget,
+        mirror_path: &'a Path,
+        base_branch: &'a str,
+        base_sha: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if !is_full_oid(base_sha) {
+                return Err(Error::Policy);
+            }
+            let git = match &self.git {
+                Some(git) => git.clone(),
+                None => resolve_cli_binary(Path::new("git")).map_err(|_| Error::Policy)?,
+            };
+            let token_source = self.token.clone();
+            let url = self.remote_url(target);
+            let protocol = self.allowed_protocol();
+            let dest = format!("refs/heads/{base_branch}");
+            let mirror = mirror_path.to_path_buf();
+            let base_sha = base_sha.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let token = token_source()?;
+                let fmt = clean_git(&git, &mirror)
+                    .args(["check-ref-format", &dest])
+                    .output()
+                    .map_err(|_| Error::Transport)?;
+                if !fmt.status.success() {
+                    return Err(Error::Policy);
+                }
+                let Some(tip) = remote_tip(&git, &mirror, protocol, &token, &url, &dest)? else {
+                    // The PR's base branch does not exist on the remote.
+                    return Err(Error::Policy);
+                };
+                if tip == base_sha {
+                    return Ok(());
+                }
+                // The baseline's ancestry can only be read from the remote's own
+                // objects; only this one command may write them, and it creates
+                // no local ref.
+                let fetched = remote_git(&git, &mirror, protocol, &token)
+                    .args([
+                        "fetch",
+                        "--no-tags",
+                        "--no-prune",
+                        "--no-write-fetch-head",
+                        "--no-recurse-submodules",
+                        "--upload-pack=git-upload-pack",
+                        &url,
+                        &dest,
+                    ])
+                    .output()
+                    .map_err(|_| Error::Transport)?;
+                if !fetched.status.success() {
+                    return Err(Error::Transport);
+                }
+                let verified = clean_git(&git, &mirror)
+                    .arg("merge-base")
+                    .arg("--is-ancestor")
+                    .arg(&base_sha)
+                    .arg(&tip)
+                    .output()
+                    .map_err(|_| Error::Transport)?;
+                match verified.status.code() {
+                    Some(0) => Ok(()),
+                    // The remote base branch no longer contains the reviewed base.
+                    Some(1) => Err(Error::Policy),
+                    _ => Err(Error::Transport),
+                }
+            })
+            .await
+            .map_err(|_| Error::Transport)?
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -579,6 +669,13 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
         return Err(Error::Policy);
     }
 
+    // The reviewed range must exist: a Run whose verified head is its own base
+    // has nothing for a reviewer to read, and a PR for it would still show
+    // whatever the remote branch holds.
+    if req.base_sha == req.head_sha {
+        return Err(Error::Policy);
+    }
+
     let mut gate = deps
         .store
         .create_pr_gate(NewPrGate {
@@ -651,6 +748,27 @@ pub async fn run_pr_gate(deps: &PrGateDeps, req: RunPrGateRequest) -> Result<PrG
             .store
             .set_pr_gate_status(&gate.id, PrGateStatus::Failed);
         return Err(Error::Policy);
+    }
+
+    // GitHub computes the PR's diff from the remote base branch, so the branch
+    // the PR merges into must still contain the Run's reviewed baseline. Checked
+    // here, before the scope check and before the first push.
+    if deps
+        .pusher
+        .confirm_review_base(&target, &req.mirror_path, &req.base_branch, &req.base_sha)
+        .await
+        .is_err()
+    {
+        return escalate(
+            deps,
+            &gate.id,
+            req.hub_session_id.as_deref(),
+            "review_base",
+            &format!(
+                "the remote branch {} of {} no longer contains the reviewed base {}; the PR would show a range no reviewer read, so nothing was pushed and no PR was opened",
+                req.base_branch, req.repo_slug, req.base_sha
+            ),
+        );
     }
 
     // 3-layer touched_paths scope check (1 worker bounce, escalate on 2nd violation)
@@ -1355,6 +1473,15 @@ mod tests {
     }
 
     impl MirrorPusher for FlakyPusher {
+        fn confirm_review_base<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _base_branch: &'a str,
+            _base_sha: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
         fn push_verified_sha<'a>(
             &'a self,
             _target: &'a PublishTarget,
@@ -1377,6 +1504,15 @@ mod tests {
     struct RefusingPusher;
 
     impl MirrorPusher for RefusingPusher {
+        fn confirm_review_base<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _base_branch: &'a str,
+            _base_sha: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
         fn push_verified_sha<'a>(
             &'a self,
             _target: &'a PublishTarget,
@@ -1390,6 +1526,15 @@ mod tests {
     }
 
     impl MirrorPusher for MockPusher {
+        fn confirm_review_base<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _base_branch: &'a str,
+            _base_sha: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
         fn push_verified_sha<'a>(
             &'a self,
             _target: &'a PublishTarget,
@@ -1663,6 +1808,209 @@ mod tests {
         assert_eq!(gate.status, PrGateStatus::Escalated);
         assert_eq!(gate.scope_violations, vec!["README.md".to_owned()]);
         server.abort();
+    }
+
+    /// Refuses the pre-push base confirmation, as a remote base branch that
+    /// moved off the reviewed baseline does.
+    struct MovedBasePusher {
+        pushed: Mutex<Vec<(String, String)>>,
+    }
+
+    impl MirrorPusher for MovedBasePusher {
+        fn confirm_review_base<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            _base_branch: &'a str,
+            _base_sha: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Err(Error::Policy) })
+        }
+        fn push_verified_sha<'a>(
+            &'a self,
+            _target: &'a PublishTarget,
+            _mirror_path: &'a Path,
+            sha: &'a str,
+            branch: &'a str,
+            _expected_remote_tip: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            self.pushed
+                .lock()
+                .unwrap()
+                .push((sha.to_owned(), branch.to_owned()));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_reviewed_range_is_refused_before_any_push() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let pusher = Arc::new(MockPusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        // The verified head is the reviewed base itself: there is no range.
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/empty");
+        request.head_sha = request.base_sha.clone();
+        assert!(matches!(
+            run_pr_gate(&deps, request).await.unwrap_err(),
+            Error::Policy
+        ));
+        assert!(pusher.pushed.lock().unwrap().is_empty());
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        assert!(fix.store.list_pr_gates().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_remote_base_branch_off_the_reviewed_range_is_refused_before_any_push() {
+        let fix = setup_git_and_store();
+        let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
+        let scm = Arc::new(
+            GitHubScmClient::new(
+                GitHubConfig::new(SecretToken::new("bot-tok"), SecretToken::new("rev-tok"))
+                    .with_base_urls(&base_url, format!("{base_url}/graphql")),
+            )
+            .unwrap(),
+        );
+        let pusher = Arc::new(MovedBasePusher {
+            pushed: Mutex::new(Vec::new()),
+        });
+        let deps = PrGateDeps {
+            store: fix.store.clone(),
+            scm,
+            reviewer: Arc::new(MockReviewer {
+                verdicts: Mutex::new(vec![ReviewVerdict::Approve]),
+                seen_worktrees: Mutex::new(Vec::new()),
+            }),
+            worker_revise: None,
+            pusher: pusher.clone(),
+        };
+        let mut request = range_request(&fix, &fix.good_head_sha, "feat/moved-base");
+        request.hub_session_id = Some("hub".into());
+        let gate = run_pr_gate(&deps, request).await.unwrap();
+        assert_eq!(gate.status, PrGateStatus::Escalated);
+        assert_eq!(gate.pr_number, None);
+        assert!(pusher.pushed.lock().unwrap().is_empty());
+        assert!(gh.submitted_reviews.lock().unwrap().is_empty());
+        let notices: Vec<String> = fix
+            .store
+            .hub_messages("hub")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("no longer contains the reviewed base")),
+            "{notices:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn git_pusher_requires_the_remote_base_branch_to_hold_the_reviewed_baseline() {
+        let fix = setup_git_and_store();
+        let github = fix._dir.path().join("github");
+        let remote = github.join("org/repo.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(
+            fix._dir.path(),
+            &["init", "--bare", "--template=", remote.to_str().unwrap()],
+        );
+        let work = fix._dir.path().join("work");
+        let pusher = GitMirrorPusher::with_local_base(&github);
+        let target = PublishTarget::for_tests("org/repo");
+        let base = fix.base_sha.as_str();
+
+        // No base branch on the remote yet: the PR could not even be opened.
+        assert!(matches!(
+            pusher
+                .confirm_review_base(&target, &fix.mirror, "main", base)
+                .await,
+            Err(Error::Policy)
+        ));
+
+        // The remote base branch contains the reviewed baseline.
+        git(
+            &work,
+            &[
+                "push",
+                remote.to_str().unwrap(),
+                &format!("{base}:refs/heads/main"),
+            ],
+        );
+        pusher
+            .confirm_review_base(&target, &fix.mirror, "main", base)
+            .await
+            .unwrap();
+
+        // An unrelated history rewritten on top of the base branch no longer
+        // contains it, so the reviewed range is not the PR's range.
+        let unrelated = fix._dir.path().join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        git(&unrelated, &["init", "-b", "other", "--template="]);
+        git(&unrelated, &["config", "user.name", "Other"]);
+        git(
+            &unrelated,
+            &["config", "user.email", "other@example.invalid"],
+        );
+        std::fs::write(unrelated.join("README.md"), "rewritten\n").unwrap();
+        git(&unrelated, &["add", "."]);
+        git(&unrelated, &["commit", "-m", "unrelated root"]);
+        let rewritten = git(&unrelated, &["rev-parse", "HEAD"]);
+        git(
+            &unrelated,
+            &[
+                "push",
+                "-f",
+                remote.to_str().unwrap(),
+                &format!("{rewritten}:refs/heads/main"),
+            ],
+        );
+        assert!(matches!(
+            pusher
+                .confirm_review_base(&target, &fix.mirror, "main", base)
+                .await,
+            Err(Error::Policy)
+        ));
+        // The gate can still publish after the base is restored.
+        git(
+            &work,
+            &[
+                "push",
+                "-f",
+                remote.to_str().unwrap(),
+                &format!("{base}:refs/heads/main"),
+            ],
+        );
+        pusher
+            .confirm_review_base(&target, &fix.mirror, "main", base)
+            .await
+            .unwrap();
+        // A malformed baseline is refused without touching the remote.
+        assert!(pusher
+            .confirm_review_base(&target, &fix.mirror, "main", "deadbeef")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -2588,6 +2936,16 @@ mod tests {
             std::fs::create_dir_all(&remote).unwrap();
             git(&remote, &["init", "--bare", "--template="]);
         }
+        // A real GitHub repository has the PR's base branch, and it contains the
+        // Run's reviewed baseline.
+        git(
+            &work,
+            &[
+                "push",
+                github.join("org/repo.git").to_str().unwrap(),
+                &format!("{}:refs/heads/main", fix.base_sha),
+            ],
+        );
         let (base_url, gh, _app_state, server) = spawn_fake_github(fix.store.clone()).await;
         let scm = Arc::new(
             GitHubScmClient::new(
@@ -2724,6 +3082,16 @@ mod tests {
         let remote = github.join("org/repo.git");
         std::fs::create_dir_all(&remote).unwrap();
         git(&remote, &["init", "--bare", "--template="]);
+        // The remote's base branch contains the reviewed baseline, as on GitHub.
+        let work = fix._dir.path().join("work");
+        git(
+            &work,
+            &[
+                "push",
+                remote.to_str().unwrap(),
+                &format!("{}:refs/heads/main", fix.base_sha),
+            ],
+        );
 
         // A git wrapper that records argv, whether the token variable was set,
         // and git's stderr, then runs the real git.
@@ -2809,7 +3177,8 @@ mod tests {
         let mut remote_commands = 0;
         let mut lines = argv.lines();
         while let (Some(call), Some(token)) = (lines.next(), lines.next()) {
-            let talks_to_remote = call.contains("[ls-remote]") || call.contains("[push]");
+            let talks_to_remote =
+                call.contains("[ls-remote]") || call.contains("[push]") || call.contains("[fetch]");
             if talks_to_remote {
                 remote_commands += 1;
                 assert!(call.contains("[credential.helper=]"), "{call}");
@@ -2821,9 +3190,11 @@ mod tests {
             // The token variable is set only on commands that talk to the remote.
             assert_eq!(token == "TOKEN:set", talks_to_remote, "{call} {token}");
         }
-        // ls-remote, push, ls-remote; then the stale lease's ls-remote, and the
-        // missing repository's ls-remote.
-        assert_eq!(remote_commands, 5, "{argv}");
+        // The base-branch ls-remote that proves the reviewed base is still on the
+        // remote, then ls-remote, push, ls-remote; then the stale lease's
+        // ls-remote, and the missing repository's ls-remote. Every one of them
+        // carries the one-shot credential helper and none carries the token.
+        assert_eq!(remote_commands, 6, "{argv}");
         let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
         assert!(!stderr.contains(SENTINEL_TOKEN), "{stderr}");
 
