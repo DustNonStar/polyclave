@@ -1180,3 +1180,12 @@ Commits:
 ### Not done
 
 Windows CI（本机只跑 macOS）；真实环境验收一项都没跑；`host_run` 引擎（决策 2 明确暂不建）；把 `source='host'` 的角色渲染进一步细化（本轮只加了前缀，角色仍是 User，见 `PLAN-ISSUES.md` 里的对应条目）。
+
+## 2026-11-27 主线里程碑合并审查（Gemini）：passed, merged
+
+Branch `fix/per-sha-tests-and-prompt-isolation` (`b5aff98..9d94605`, 3 commits) was fast-forwarded into `main` and the branch deleted.
+
+- **Code & invariant audit:** verified `test_results` live-schema table (`user_version` unchanged at 10, exact 40-hex SHA key `(run_id, sha, source, name)`), `scm_observer.rs` recording CI check runs outside `last_check_sha` so `pending -> passed/failed` updates land for `run_test_sha`, `mcp.rs` `submit_result` optional `tests`/`tests_status`/`not_done` validation without changing `same_receipt` idempotency, `evidence.ts` gating green strictly on `ci`/`host_run` matching exact `result_sha`, and `provider.rs`/`cli_provider.rs`/`hub_api.rs` prefixing `scm_observation` messages with `[host observation, not from the user] ` without altering ledger text.
+- **Approved test edits:** all 6 authorized edits (`crates/polyclave-proto/src/lib.rs`, `crates/polyclave-core/tests/recovery.rs`, `apps/polyclave-app/ui/tests/approval-card.mjs`) match the owner decision with no weakened assertions.
+- **Visual & automated verification (macOS):** visually checked `handcheck/per-sha-tests/{r3-phone-dark,r4-desktop-dark-card,r5-phone-dark-card}.jpg`; `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets -- -D warnings` clean; `cargo test --locked --workspace` 177 passed, 0 failed (including `TurnDto` compile-fail doctest); `proto.ts` diff clean; UI `tsc --noEmit`, `npm run build`, and `POLYCLAVE_BROWSER_CHANNEL=chrome npm run test:browser` (1440×900 & 375×812, dark & light) passed; `bash scripts/privacy-scan.sh` clean.
+- **Nits:** `scm_observer.rs` does not emit a `change_log` event when writing non-failing CI `test_results` rows (open cards update on next fetch); `is_host_observation` checks `metadata["kind"]` without additionally checking `source == "host"` (downgrade-only prefix, no privilege escalation). Pushing `main` now to run dual-platform macOS + Windows CI.
