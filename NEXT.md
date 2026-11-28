@@ -1,12 +1,13 @@
-# Next job: none assigned
+# Next job: Audit Hardening — Batch 1 (Runtime & Sandbox)
 
-There is no assigned local-implementer job right now. The last job here, the Node "page review 3", is retired: its files (`src/http.ts`, `public/app.js`) left the tree with `legacy-node/` in `01c8645`.
+Work on a new branch **`fix/hardening-batch1-runtime`** branched from `main` (after `docs: add 3-batch audit hardening plan and assign Batch 1 in NEXT.md`).
 
-Since 2026-11-26, Dot writes code on `dot/<job>` branches and the merge reviewer merges them (see `AGENTS.md`). Wait for the reviewer to write a new job here.
+Execute **Batch 1 only** from `docs/superpowers/plans/2026-11-27-polyclave-v5-audit-hardening.md` (Items **1.1, 1.2, 1.3, 1.4**, covering Codex audit findings #12, #11, #7, #1).
 
-Milestone (owner decision 2026-11-27): the single end-to-end user story in `PLAN-ISSUES.md`, "Narrow the next milestone to one end-to-end user story". New feature work on mesh, desktop control and self-evolution is paused until it passes.
+## Rules for this job
 
-Open before new work:
-
-- The open `direction` items in `PLAN-ISSUES.md` (none open today; the mesh `worker_run` budget was resolved as A + C on 2026-11-27 and is merged). Open `detail` items: how `dsh` chooses a model, and recording test results per SHA. Only the user decides these.
-- The pending real-environment acceptance at the end of `HANDOFF.md`: real vendor CLI Worker and CLI Hub probes, live DeepSeek API calls, the installed desktop WebView, a real GitHub push and PR, and a real phone pairing scan. The same list is the verification table in `README.md`.
+1. Read `AGENTS.md`, `docs/superpowers/plans/2026-11-27-polyclave-v5-audit-hardening.md`, `PLAN-ISSUES.md`, and the Codex audit section at the end of `HANDOFF.md` before editing.
+2. Make **one commit per item** with the exact commit messages in the plan. Do not start Batch 2 or Batch 3 in this branch; Batches 2 and 3 will follow from updated `main` after Batch 1 is reviewed and merged.
+3. Run `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, and `cargo test --locked --workspace` after each item, and `bash scripts/privacy-scan.sh` (`clean`) at the end.
+4. Do not weaken, skip, or delete any existing test. If an existing test conflicts, record it in `PLAN-ISSUES.md` and stop.
+5. Append the Batch 1 report to `HANDOFF.md`, commit it (`chore: hardening-batch1-runtime handoff`), and **do not push `main` or merge** — leave the branch for the merge reviewer.
