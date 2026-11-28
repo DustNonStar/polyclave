@@ -21,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -412,11 +412,21 @@ impl TurnRunner {
             }
             match wrapper.try_wait() {
                 Ok(Some(code)) => {
-                    if let Some(handle) = reader_thread {
-                        let _ = handle.join();
-                    }
-                    while let Ok(ev) = receiver.try_recv() {
-                        self.emit(work, &secretless(ev, token));
+                    // A full queue can block the reader. Keep receiving until
+                    // it closes its sender, but do not wait indefinitely for a
+                    // descendant that still holds the stdout pipe open.
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                        match receiver.recv_timeout(remaining) {
+                            Ok(ev) => self.emit(work, &secretless(ev, token)),
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                if let Some(handle) = reader_thread {
+                                    let _ = handle.join();
+                                }
+                                break;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        }
                     }
                     return Exit {
                         code: Some(code),

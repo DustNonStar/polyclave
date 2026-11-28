@@ -252,3 +252,118 @@ async fn released_worker_cancels_without_correction_and_removes_only_turn_files(
     assert_eq!(facts(&f, &r.id).0, 0);
     assert_cleanup(&f);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn burst_at_worker_exit_drains_stdout_and_releases_turn() {
+    let (tmp, manager, request) = repository();
+    let host = "worker-burst".to_owned();
+    let (addr, server) = Mcp::new(
+        manager.store.clone(),
+        host.clone(),
+        Arc::new(manager.clone()),
+    )
+    .listen()
+    .await
+    .unwrap();
+    let (run, _) = manager.accept(request).unwrap();
+    let fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_polyclave-fake-agent"));
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let event_count = count.clone();
+    let store = manager.store.clone();
+    let runner = TurnRunner::new(
+        manager.clone(),
+        &tmp.path().join("state"),
+        host,
+        RunnerConfig {
+            supervisor: fake.clone(),
+            mcp_url: format!("http://{addr}/mcp"),
+            codex: fake,
+            claude: "unavailable".into(),
+            claude_isolation: None,
+        },
+        move |run_id, event| match event {
+            AgentEvent::Session { .. } => {
+                let identity = store
+                    .read(|db| {
+                        Ok(db.query_row(
+                            "SELECT os_proc_id,proc_started_at FROM turns WHERE run_id=?1",
+                            [run_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get(1)?)),
+                        )?)
+                    })
+                    .unwrap();
+                let supervisor = polyclave_os::ProcessIdentity {
+                    pid: identity.0.parse().unwrap(),
+                    started_at: identity.1,
+                };
+                // Hold the consumer while the producer fills the queue. The
+                // supervisor's exit releases this barrier.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while polyclave_os::process_identity(supervisor.pid)
+                    .unwrap()
+                    .as_ref()
+                    == Some(&supervisor)
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "supervisor did not exit"
+                    );
+                    std::thread::yield_now();
+                }
+                #[cfg(unix)]
+                loop {
+                    // Darwin's identity lookup can stop reporting an exiting
+                    // child before waitpid reports the zombie.
+                    let status = std::process::Command::new("ps")
+                        .args(["-p", &supervisor.pid.to_string(), "-o", "stat="])
+                        .output()
+                        .unwrap();
+                    let state = String::from_utf8(status.stdout).unwrap();
+                    if state.trim().starts_with('Z') || !status.status.success() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "supervisor was not waitable"
+                    );
+                }
+            }
+            AgentEvent::TextDelta { text } if text == "burst" => {
+                event_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {}
+        },
+    )
+    .unwrap();
+    let job = runner
+        .schedule(
+            &run.id,
+            TurnMode::Start,
+            "Fixture: stdout burst before exit".into(),
+        )
+        .unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done_tx.send(job.join()).ok());
+    let done = done_rx.recv_timeout(Duration::from_secs(15));
+    server.abort();
+    assert_eq!(
+        done.expect("worker did not settle")
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Done
+    );
+    assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 280);
+    let revoked = manager
+        .store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT mcp_revoked FROM turns WHERE run_id=?1",
+                [&run.id],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .unwrap();
+    assert!(revoked);
+    assert!(matches!(runner.cancel(&run.id), Err(Error::ConflictError)));
+}

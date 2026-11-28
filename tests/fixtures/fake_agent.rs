@@ -82,6 +82,14 @@ fn worker(args: &[OsString]) -> i32 {
         commit(run, n + 1);
         push(branch);
     }
+    if input.contains("Fixture: stdout burst before exit") {
+        for _ in 0..280 {
+            println!(
+                "{}",
+                json!({"type":"item.completed","item":{"type":"agent_message","text":"burst"}})
+            );
+        }
+    }
     if input.contains("Fixture: nonzero after receipt") {
         19
     } else {
